@@ -38,6 +38,10 @@
   trigger clippy warnings.
 - **Serde**: Use `SCREAMING_SNAKE_CASE` for enum rename attributes,
   `camelCase` for struct fields in API responses
+- **Discarded results**: Never use `let _ = ...` to discard results. For
+  infallible operations like `write!` on a `String`, call `.unwrap()` instead
+  (e.g., `write!(buf, "...").unwrap()`). `write!` to a `String` cannot fail,
+  so the unwrap is safe and makes intent explicit.
 
 ### Package Organization
 
