@@ -60,13 +60,13 @@ pub async fn fetch_ckan(
 
     if fetch_limit >= total_available {
         log::info!(
-            "{}: {total_available} records available across {num_resources} resource(s) (fetching all)",
-            config.label
+            "{}: {total_available} records available across {num_resources} resource(s) (fetching all, page size {})",
+            config.label, config.page_size
         );
     } else {
         log::info!(
-            "{}: {total_available} records available across {num_resources} resource(s) (fetching up to {fetch_limit})",
-            config.label
+            "{}: {total_available} records available across {num_resources} resource(s) (fetching up to {fetch_limit}, page size {})",
+            config.label, config.page_size
         );
     }
 
