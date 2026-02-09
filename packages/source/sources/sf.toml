@@ -1,0 +1,37 @@
+id = "sf_pd"
+name = "San Francisco Police Department"
+city = "San Francisco"
+state = "CA"
+output_filename = "sf_crimes.json"
+
+[fetcher]
+type = "socrata"
+api_url = "https://data.sfgov.org/resource/wg3w-h783.json"
+date_column = "incident_datetime"
+page_size = 50000
+
+[fields]
+incident_id = ["incident_id"]
+crime_type = ["incident_category"]
+block_address = "intersection"
+location_type = "analysis_neighborhood"
+
+[fields.occurred_at]
+type = "simple"
+field = "incident_datetime"
+
+[fields.lat]
+field = "latitude"
+type = "string"
+
+[fields.lng]
+field = "longitude"
+type = "string"
+
+[fields.description]
+type = "single"
+field = "incident_description"
+
+[fields.arrest]
+type = "string_contains"
+field = "resolution"

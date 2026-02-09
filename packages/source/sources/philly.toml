@@ -1,0 +1,37 @@
+id = "philly_pd"
+name = "Philadelphia Police Department"
+city = "Philadelphia"
+state = "PA"
+output_filename = "philly_crimes.json"
+
+[fetcher]
+type = "carto"
+api_url = "https://phl.carto.com/api/v2/sql"
+table_name = "incidents_part1_part2"
+date_column = "dispatch_date_time"
+page_size = 10000
+
+[fields]
+incident_id = ["dc_key", "objectid"]
+crime_type = ["text_general_code"]
+block_address = "location_block"
+location_type = "dc_dist"
+
+[fields.occurred_at]
+type = "simple"
+field = "dispatch_date_time"
+
+[fields.lat]
+field = "point_y"
+type = "f64"
+
+[fields.lng]
+field = "point_x"
+type = "f64"
+
+[fields.description]
+type = "single"
+field = "text_general_code"
+
+[fields.arrest]
+type = "none"

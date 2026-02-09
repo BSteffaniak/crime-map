@@ -1,0 +1,37 @@
+id = "nyc_pd"
+name = "New York City Police Department"
+city = "New York"
+state = "NY"
+output_filename = "nyc_crimes.json"
+
+[fetcher]
+type = "socrata"
+api_url = "https://data.cityofnewyork.us/resource/5uac-w243.json"
+date_column = "cmplnt_fr_dt"
+page_size = 50000
+
+[fields]
+incident_id = ["cmplnt_num"]
+crime_type = ["ofns_desc"]
+reported_at = "rpt_dt"
+location_type = "prem_typ_desc"
+
+[fields.occurred_at]
+type = "date_plus_hhmmss"
+date_field = "cmplnt_fr_dt"
+time_field = "cmplnt_fr_tm"
+
+[fields.lat]
+field = "latitude"
+type = "string"
+
+[fields.lng]
+field = "longitude"
+type = "string"
+
+[fields.description]
+type = "fallback_chain"
+fields = ["pd_desc", "ofns_desc"]
+
+[fields.arrest]
+type = "none"

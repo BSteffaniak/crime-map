@@ -1,0 +1,39 @@
+id = "la_pd"
+name = "Los Angeles Police Department"
+city = "Los Angeles"
+state = "CA"
+output_filename = "la_crimes.json"
+
+[fetcher]
+type = "socrata"
+api_url = "https://data.lacity.org/resource/2nrs-mtv8.json"
+date_column = "date_occ"
+page_size = 50000
+
+[fields]
+incident_id = ["dr_no"]
+crime_type = ["crm_cd_desc"]
+reported_at = "date_rptd"
+block_address = "location"
+location_type = "premis_desc"
+
+[fields.occurred_at]
+type = "date_plus_hhmm"
+date_field = "date_occ"
+time_field = "time_occ"
+
+[fields.lat]
+field = "lat"
+type = "string"
+
+[fields.lng]
+field = "lon"
+type = "string"
+
+[fields.description]
+type = "single"
+field = "crm_cd_desc"
+
+[fields.arrest]
+type = "string_contains"
+field = "status_desc"

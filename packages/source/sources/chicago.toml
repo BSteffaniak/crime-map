@@ -1,0 +1,39 @@
+id = "chicago_pd"
+name = "Chicago Police Department"
+city = "Chicago"
+state = "IL"
+output_filename = "chicago_crimes.json"
+
+[fetcher]
+type = "socrata"
+api_url = "https://data.cityofchicago.org/resource/ijzp-q8t2.json"
+date_column = "date"
+page_size = 50000
+
+[fields]
+incident_id = ["case_number", "id"]
+crime_type = ["primary_type"]
+block_address = "block"
+location_type = "location_description"
+domestic = "domestic"
+
+[fields.occurred_at]
+type = "simple"
+field = "date"
+
+[fields.lat]
+field = "latitude"
+type = "string"
+
+[fields.lng]
+field = "longitude"
+type = "string"
+
+[fields.description]
+type = "combine"
+fields = ["primary_type", "description"]
+separator = ": "
+
+[fields.arrest]
+type = "direct_bool"
+field = "arrest"

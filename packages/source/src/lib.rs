@@ -1,16 +1,20 @@
 #![cfg_attr(feature = "fail-on-warnings", deny(warnings))]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
-#![allow(clippy::multiple_crate_versions)]
+#![allow(clippy::multiple_crate_versions, clippy::cargo_common_metadata)]
 
 //! Crime data source trait and normalization logic.
 //!
-//! Each data provider implements the [`CrimeSource`] trait to define how
-//! raw data is fetched, parsed, and mapped to the canonical taxonomy.
+//! Each data provider is defined by a TOML config file in `packages/source/sources/`
+//! and handled by the generic [`source_def::SourceDefinition`] implementation.
+//! Use [`registry::all_sources`] to get all configured sources.
 
 pub mod arcgis;
+pub mod carto;
+pub mod ckan;
 pub mod parsing;
+pub mod registry;
 pub mod socrata;
-pub mod sources;
+pub mod source_def;
 pub mod type_mapping;
 
 use std::path::{Path, PathBuf};

@@ -1,0 +1,37 @@
+id = "denver_pd"
+name = "Denver Police Department"
+city = "Denver"
+state = "CO"
+output_filename = "denver_crimes.json"
+
+[fetcher]
+type = "socrata"
+api_url = "https://data.denvergov.org/resource/j6g8-fkyh.json"
+date_column = "first_occurrence_date"
+page_size = 50000
+
+[fields]
+incident_id = ["incident_id"]
+crime_type = ["offense_type_id"]
+reported_at = "reported_date"
+block_address = "incident_address"
+location_type = "neighborhood_id"
+
+[fields.occurred_at]
+type = "simple"
+field = "first_occurrence_date"
+
+[fields.lat]
+field = "geo_lat"
+type = "f64"
+
+[fields.lng]
+field = "geo_lon"
+type = "f64"
+
+[fields.description]
+type = "single"
+field = "offense_type_id"
+
+[fields.arrest]
+type = "none"

@@ -1,0 +1,36 @@
+id = "boston_pd"
+name = "Boston Police Department"
+city = "Boston"
+state = "MA"
+output_filename = "boston_crimes.json"
+
+[fetcher]
+type = "ckan"
+api_url = "https://data.boston.gov/api/3/action/datastore_search"
+resource_id = "12cb3883-56f5-47de-afa5-3b1cf61b257b"
+page_size = 10000
+
+[fields]
+incident_id = ["INCIDENT_NUMBER"]
+crime_type = ["OFFENSE_DESCRIPTION"]
+block_address = "STREET"
+location_type = "DISTRICT"
+
+[fields.occurred_at]
+type = "simple"
+field = "OCCURRED_ON_DATE"
+
+[fields.lat]
+field = "Lat"
+type = "string"
+
+[fields.lng]
+field = "Long"
+type = "string"
+
+[fields.description]
+type = "single"
+field = "OFFENSE_DESCRIPTION"
+
+[fields.arrest]
+type = "none"

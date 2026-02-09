@@ -1,0 +1,626 @@
+//! Config-driven crime data source definition.
+//!
+//! [`SourceDefinition`] captures everything unique about a data source in a
+//! serializable config struct. A single generic [`CrimeSource`] implementation
+//! handles all sources, eliminating per-city boilerplate.
+
+use std::path::{Path, PathBuf};
+
+use async_trait::async_trait;
+use chrono::{DateTime, NaiveDateTime, NaiveTime, Utc};
+use crime_map_source_models::NormalizedIncident;
+use serde::Deserialize;
+
+use crate::arcgis::{ArcGisConfig, fetch_arcgis};
+use crate::carto::{CartoConfig, fetch_carto};
+use crate::ckan::{CkanConfig, fetch_ckan};
+use crate::parsing::parse_socrata_date;
+use crate::socrata::{SocrataConfig, fetch_socrata};
+use crate::type_mapping::map_crime_type;
+use crate::{CrimeSource, FetchOptions, SourceError};
+
+// ── Top-level source definition ──────────────────────────────────────────
+
+/// A complete, config-driven crime data source definition.
+///
+/// Loaded from TOML files at compile time and used as the sole
+/// [`CrimeSource`] implementation.
+#[derive(Debug, Deserialize)]
+pub struct SourceDefinition {
+    /// Unique identifier (e.g., `"chicago_pd"`).
+    pub id: String,
+    /// Human-readable name (e.g., `"Chicago Police Department"`).
+    pub name: String,
+    /// City name for the `NormalizedIncident`.
+    pub city: String,
+    /// Two-letter state abbreviation.
+    pub state: String,
+    /// Output filename for downloaded data.
+    pub output_filename: String,
+    /// How to fetch raw data from the API.
+    pub fetcher: FetcherConfig,
+    /// Field name mappings for normalization.
+    pub fields: FieldMapping,
+}
+
+// ── Fetcher config ───────────────────────────────────────────────────────
+
+/// How to fetch raw data from the source API.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FetcherConfig {
+    /// Socrata SODA API (`$limit/$offset/$order/$where`).
+    Socrata {
+        /// Base Socrata API URL.
+        api_url: String,
+        /// Date column for ordering and filtering.
+        date_column: String,
+        /// Records per page.
+        page_size: u64,
+    },
+    /// `ArcGIS` REST API (`resultOffset`/`resultRecordCount`).
+    Arcgis {
+        /// Base query URL.
+        query_url: String,
+        /// Records per page.
+        page_size: u64,
+        /// Optional WHERE clause.
+        where_clause: Option<String>,
+    },
+    /// CKAN Datastore API (`limit`/`offset`).
+    Ckan {
+        /// Base API URL.
+        api_url: String,
+        /// CKAN resource ID.
+        resource_id: String,
+        /// Records per page.
+        page_size: u64,
+    },
+    /// Carto SQL API (SQL `LIMIT`/`OFFSET`).
+    Carto {
+        /// Base Carto SQL API URL.
+        api_url: String,
+        /// Table name to query.
+        table_name: String,
+        /// Date column for ordering and filtering.
+        date_column: String,
+        /// Records per page.
+        page_size: u64,
+    },
+}
+
+// ── Field mapping ────────────────────────────────────────────────────────
+
+/// Maps source-specific JSON field names to canonical incident fields.
+#[derive(Debug, Deserialize)]
+pub struct FieldMapping {
+    /// JSON field names for the incident ID, tried in order.
+    pub incident_id: Vec<String>,
+    /// JSON field names for the crime type, tried in order (first non-empty
+    /// wins).
+    pub crime_type: Vec<String>,
+    /// How to extract the `occurred_at` timestamp.
+    pub occurred_at: DateExtractor,
+    /// Optional field name for `reported_at` (parsed as Socrata datetime).
+    pub reported_at: Option<String>,
+    /// Latitude coordinate field.
+    pub lat: CoordField,
+    /// Longitude coordinate field.
+    pub lng: CoordField,
+    /// How to build the description string.
+    pub description: DescriptionExtractor,
+    /// Optional field name for block address.
+    pub block_address: Option<String>,
+    /// Optional field name for location type.
+    pub location_type: Option<String>,
+    /// How to extract the arrest flag.
+    #[serde(default)]
+    pub arrest: ArrestExtractor,
+    /// Optional domestic violence flag field (direct bool).
+    pub domestic: Option<String>,
+}
+
+// ── Strategy enums ───────────────────────────────────────────────────────
+
+/// How to extract the `occurred_at` timestamp from a raw record.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DateExtractor {
+    /// Single Socrata datetime field.
+    Simple {
+        /// JSON field name.
+        field: String,
+    },
+    /// Date field + 4-character HHMM time string.
+    DatePlusHhmm {
+        /// JSON field for the date portion.
+        date_field: String,
+        /// JSON field for the HHMM time string.
+        time_field: String,
+    },
+    /// Date field + `"HH:MM:SS"` time string.
+    DatePlusHhmmss {
+        /// JSON field for the date portion.
+        date_field: String,
+        /// JSON field for the time string.
+        time_field: String,
+    },
+    /// Epoch milliseconds (f64).
+    EpochMs {
+        /// JSON field name.
+        field: String,
+    },
+}
+
+/// A coordinate field and its type.
+#[derive(Debug, Deserialize)]
+pub struct CoordField {
+    /// JSON field name.
+    pub field: String,
+    /// Whether the field is a string or f64.
+    #[serde(rename = "type")]
+    pub coord_type: CoordType,
+}
+
+/// Whether a coordinate is stored as a string or float in the API response.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordType {
+    /// Coordinate is a JSON string that must be parsed to f64.
+    String,
+    /// Coordinate is a JSON number (f64).
+    F64,
+}
+
+/// How to build the description string.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DescriptionExtractor {
+    /// Use a single field directly.
+    Single {
+        /// JSON field name.
+        field: String,
+    },
+    /// Combine multiple fields with a separator (skip empty fields).
+    Combine {
+        /// JSON field names to combine.
+        fields: Vec<String>,
+        /// Separator between non-empty values.
+        separator: String,
+    },
+    /// Try fields in order, use the first non-empty value.
+    FallbackChain {
+        /// JSON field names, tried in order.
+        fields: Vec<String>,
+    },
+}
+
+/// How to extract the `arrest_made` flag.
+#[derive(Debug, Default, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ArrestExtractor {
+    /// No arrest information available.
+    #[default]
+    None,
+    /// Direct boolean field.
+    DirectBool {
+        /// JSON field name.
+        field: String,
+    },
+    /// String field checked for "arrest" substring (case-insensitive).
+    StringContains {
+        /// JSON field name.
+        field: String,
+    },
+}
+
+// ── Helper methods on extractors ─────────────────────────────────────────
+
+/// Gets a string value from a JSON object by field name.
+fn get_str<'a>(record: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+    record.get(field)?.as_str()
+}
+
+/// Gets an f64 value from a JSON object by field name.
+fn get_f64(record: &serde_json::Value, field: &str) -> Option<f64> {
+    record.get(field)?.as_f64()
+}
+
+/// Gets a bool value from a JSON object by field name.
+fn get_bool(record: &serde_json::Value, field: &str) -> Option<bool> {
+    record.get(field)?.as_bool()
+}
+
+impl CoordField {
+    /// Extracts a coordinate value from a JSON record.
+    fn extract(&self, record: &serde_json::Value) -> Option<f64> {
+        match self.coord_type {
+            CoordType::String => {
+                let s = get_str(record, &self.field)?;
+                s.parse::<f64>().ok()
+            }
+            CoordType::F64 => get_f64(record, &self.field),
+        }
+    }
+}
+
+impl DateExtractor {
+    /// Extracts a datetime from a JSON record.
+    fn extract(&self, record: &serde_json::Value) -> Option<DateTime<Utc>> {
+        match self {
+            Self::Simple { field } => {
+                let s = get_str(record, field)?;
+                parse_socrata_date(s)
+            }
+            Self::DatePlusHhmm {
+                date_field,
+                time_field,
+            } => {
+                let date_str = get_str(record, date_field)?;
+                let parsed = parse_socrata_date(date_str)?;
+                if let Some(time_str) = get_str(record, time_field)
+                    && time_str.len() == 4
+                {
+                    let hour = time_str[..2].parse::<u32>().ok()?;
+                    let min = time_str[2..].parse::<u32>().ok()?;
+                    let time = NaiveTime::from_hms_opt(hour, min, 0)?;
+                    let dt = NaiveDateTime::new(parsed.date_naive(), time);
+                    return Some(dt.and_utc());
+                }
+                Some(parsed)
+            }
+            Self::DatePlusHhmmss {
+                date_field,
+                time_field,
+            } => {
+                let date_str = get_str(record, date_field)?;
+                let parsed = parse_socrata_date(date_str)?;
+                if let Some(time_str) = get_str(record, time_field)
+                    && let Ok(time) = time_str.parse::<NaiveTime>()
+                {
+                    let dt = NaiveDateTime::new(parsed.date_naive(), time);
+                    return Some(dt.and_utc());
+                }
+                Some(parsed)
+            }
+            Self::EpochMs { field } => {
+                let ms = get_f64(record, field)?;
+                #[allow(clippy::cast_possible_truncation)]
+                let secs = (ms / 1000.0) as i64;
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let nsecs = ((ms % 1000.0) * 1_000_000.0) as u32;
+                DateTime::from_timestamp(secs, nsecs)
+            }
+        }
+    }
+}
+
+impl DescriptionExtractor {
+    /// Extracts a description string from a JSON record.
+    fn extract(&self, record: &serde_json::Value) -> Option<String> {
+        match self {
+            Self::Single { field } => get_str(record, field).map(String::from),
+            Self::Combine { fields, separator } => {
+                let parts: Vec<&str> = fields
+                    .iter()
+                    .filter_map(|f| get_str(record, f))
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if parts.is_empty() {
+                    None
+                } else {
+                    Some(parts.join(separator))
+                }
+            }
+            Self::FallbackChain { fields } => fields
+                .iter()
+                .filter_map(|f| get_str(record, f))
+                .find(|s| !s.is_empty())
+                .map(String::from),
+        }
+    }
+}
+
+impl ArrestExtractor {
+    /// Extracts the arrest flag from a JSON record.
+    fn extract(&self, record: &serde_json::Value) -> Option<bool> {
+        match self {
+            Self::None => Option::None,
+            Self::DirectBool { field } => get_bool(record, field),
+            Self::StringContains { field } => {
+                let s = get_str(record, field)?;
+                Some(s.to_lowercase().contains("arrest"))
+            }
+        }
+    }
+}
+
+// ── CrimeSource implementation ───────────────────────────────────────────
+
+#[async_trait]
+impl CrimeSource for SourceDefinition {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn fetch(&self, options: &FetchOptions) -> Result<PathBuf, SourceError> {
+        match &self.fetcher {
+            FetcherConfig::Socrata {
+                api_url,
+                date_column,
+                page_size,
+            } => {
+                fetch_socrata(
+                    &SocrataConfig {
+                        api_url,
+                        date_column,
+                        output_filename: &self.output_filename,
+                        label: &self.name,
+                        page_size: *page_size,
+                    },
+                    options,
+                )
+                .await
+            }
+            FetcherConfig::Arcgis {
+                query_url,
+                page_size,
+                where_clause,
+            } => {
+                fetch_arcgis(
+                    &ArcGisConfig {
+                        query_url,
+                        output_filename: &self.output_filename,
+                        label: &self.name,
+                        page_size: *page_size,
+                        where_clause: where_clause.as_deref(),
+                    },
+                    options,
+                )
+                .await
+            }
+            FetcherConfig::Ckan {
+                api_url,
+                resource_id,
+                page_size,
+            } => {
+                fetch_ckan(
+                    &CkanConfig {
+                        api_url,
+                        resource_id,
+                        output_filename: &self.output_filename,
+                        label: &self.name,
+                        page_size: *page_size,
+                    },
+                    options,
+                )
+                .await
+            }
+            FetcherConfig::Carto {
+                api_url,
+                table_name,
+                date_column,
+                page_size,
+            } => {
+                fetch_carto(
+                    &CartoConfig {
+                        api_url,
+                        table_name,
+                        date_column,
+                        output_filename: &self.output_filename,
+                        label: &self.name,
+                        page_size: *page_size,
+                    },
+                    options,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn normalize(&self, raw_path: &Path) -> Result<Vec<NormalizedIncident>, SourceError> {
+        let data = std::fs::read_to_string(raw_path)?;
+        let records: Vec<serde_json::Value> = serde_json::from_str(&data)?;
+        let raw_count = records.len();
+        let mut incidents = Vec::with_capacity(raw_count);
+        let fields = &self.fields;
+
+        for record in &records {
+            // ── Lat/lng ──────────────────────────────────────────────
+            let Some(latitude) = fields.lat.extract(record) else {
+                continue;
+            };
+            let Some(longitude) = fields.lng.extract(record) else {
+                continue;
+            };
+
+            // Reject zero coordinates
+            if latitude == 0.0 || longitude == 0.0 {
+                continue;
+            }
+
+            // ── Incident ID ──────────────────────────────────────────
+            let Some(source_incident_id) = extract_incident_id(record, &fields.incident_id) else {
+                continue;
+            };
+
+            // ── Crime type ───────────────────────────────────────────
+            let crime_str = fields
+                .crime_type
+                .iter()
+                .filter_map(|f| get_str(record, f))
+                .find(|s| !s.is_empty())
+                .unwrap_or_default();
+            let subcategory = map_crime_type(crime_str);
+
+            // ── Dates ────────────────────────────────────────────────
+            let occurred_at = fields.occurred_at.extract(record).unwrap_or_else(Utc::now);
+
+            let reported_at = fields
+                .reported_at
+                .as_deref()
+                .and_then(|f| get_str(record, f))
+                .and_then(parse_socrata_date);
+
+            // ── Description ──────────────────────────────────────────
+            let description = fields.description.extract(record);
+
+            // ── Optional fields ──────────────────────────────────────
+            let block_address = fields
+                .block_address
+                .as_deref()
+                .and_then(|f| get_str(record, f))
+                .map(String::from);
+
+            let location_type = fields
+                .location_type
+                .as_deref()
+                .and_then(|f| get_str(record, f))
+                .map(String::from);
+
+            let arrest_made = fields.arrest.extract(record);
+
+            let domestic = fields.domestic.as_deref().and_then(|f| get_bool(record, f));
+
+            incidents.push(NormalizedIncident {
+                source_incident_id,
+                subcategory,
+                longitude,
+                latitude,
+                occurred_at,
+                reported_at,
+                description,
+                block_address,
+                city: self.city.clone(),
+                state: self.state.clone(),
+                arrest_made,
+                domestic,
+                location_type,
+            });
+        }
+
+        log::info!(
+            "Normalized {} incidents from {} raw records",
+            incidents.len(),
+            raw_count
+        );
+        Ok(incidents)
+    }
+}
+
+/// Tries each field name in order and returns the first non-empty string
+/// value. Falls back to converting numeric values to strings.
+fn extract_incident_id(record: &serde_json::Value, fields: &[String]) -> Option<String> {
+    for field in fields {
+        if let Some(s) = get_str(record, field)
+            && !s.is_empty()
+        {
+            return Some(s.to_string());
+        }
+        // Some APIs return numeric IDs (e.g., Philly's objectid is i64)
+        if let Some(n) = record.get(field).and_then(serde_json::Value::as_i64) {
+            return Some(n.to_string());
+        }
+    }
+    None
+}
+
+/// Parses a [`SourceDefinition`] from a TOML string.
+///
+/// # Errors
+///
+/// Returns an error if the TOML is malformed or missing required fields.
+pub fn parse_source_toml(toml_str: &str) -> Result<SourceDefinition, String> {
+    toml::de::from_str(toml_str).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_simple_date() {
+        let record = serde_json::json!({"date": "2024-01-15T14:30:00"});
+        let extractor = DateExtractor::Simple {
+            field: "date".to_string(),
+        };
+        let dt = extractor.extract(&record).unwrap();
+        assert_eq!(dt.to_string(), "2024-01-15 14:30:00 UTC");
+    }
+
+    #[test]
+    fn parses_date_plus_hhmm() {
+        let record = serde_json::json!({"date_occ": "2024-01-15T00:00:00", "time_occ": "1430"});
+        let extractor = DateExtractor::DatePlusHhmm {
+            date_field: "date_occ".to_string(),
+            time_field: "time_occ".to_string(),
+        };
+        let dt = extractor.extract(&record).unwrap();
+        assert_eq!(dt.to_string(), "2024-01-15 14:30:00 UTC");
+    }
+
+    #[test]
+    fn parses_epoch_ms() {
+        let record = serde_json::json!({"report_dat": 1_705_312_200_000.0_f64});
+        let extractor = DateExtractor::EpochMs {
+            field: "report_dat".to_string(),
+        };
+        let dt = extractor.extract(&record).unwrap();
+        assert_eq!(dt.date_naive().to_string(), "2024-01-15");
+    }
+
+    #[test]
+    fn extracts_description_combine() {
+        let record = serde_json::json!({"type": "THEFT", "detail": "FROM VEHICLE"});
+        let extractor = DescriptionExtractor::Combine {
+            fields: vec!["type".to_string(), "detail".to_string()],
+            separator: ": ".to_string(),
+        };
+        assert_eq!(extractor.extract(&record).unwrap(), "THEFT: FROM VEHICLE");
+    }
+
+    #[test]
+    fn extracts_description_fallback() {
+        let record = serde_json::json!({"pd_desc": "", "ofns_desc": "ROBBERY"});
+        let extractor = DescriptionExtractor::FallbackChain {
+            fields: vec!["pd_desc".to_string(), "ofns_desc".to_string()],
+        };
+        assert_eq!(extractor.extract(&record).unwrap(), "ROBBERY");
+    }
+
+    #[test]
+    fn extracts_arrest_string_contains() {
+        let record = serde_json::json!({"status": "Adult Arrest"});
+        let extractor = ArrestExtractor::StringContains {
+            field: "status".to_string(),
+        };
+        assert_eq!(extractor.extract(&record), Some(true));
+    }
+
+    #[test]
+    fn extracts_incident_id_fallback() {
+        let record = serde_json::json!({"case_number": null, "id": "12345"});
+        let fields = vec!["case_number".to_string(), "id".to_string()];
+        assert_eq!(extract_incident_id(&record, &fields).unwrap(), "12345");
+    }
+
+    #[test]
+    fn extracts_numeric_incident_id() {
+        let record = serde_json::json!({"objectid": 42});
+        let fields = vec!["objectid".to_string()];
+        assert_eq!(extract_incident_id(&record, &fields).unwrap(), "42");
+    }
+
+    #[test]
+    fn parses_chicago_toml() {
+        let toml_str = include_str!("../sources/chicago.toml");
+        let def = parse_source_toml(toml_str).unwrap();
+        assert_eq!(def.id, "chicago_pd");
+        assert_eq!(def.city, "Chicago");
+        assert_eq!(def.state, "IL");
+    }
+}

@@ -1,0 +1,41 @@
+id = "seattle_pd"
+name = "Seattle Police Department"
+city = "Seattle"
+state = "WA"
+output_filename = "seattle_crimes.json"
+
+[fetcher]
+type = "socrata"
+api_url = "https://data.seattle.gov/resource/tazs-3rd5.json"
+date_column = "offense_date"
+page_size = 50000
+
+[fields]
+incident_id = ["report_number"]
+crime_type = [
+  "offense_sub_category",
+  "nibrs_offense_code_description",
+  "offense_category",
+]
+reported_at = "report_date_time"
+block_address = "_100_block_address"
+location_type = "neighborhood"
+
+[fields.occurred_at]
+type = "simple"
+field = "offense_date"
+
+[fields.lat]
+field = "latitude"
+type = "string"
+
+[fields.lng]
+field = "longitude"
+type = "string"
+
+[fields.description]
+type = "single"
+field = "nibrs_offense_code_description"
+
+[fields.arrest]
+type = "none"

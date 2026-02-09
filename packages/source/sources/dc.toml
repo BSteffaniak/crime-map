@@ -1,0 +1,38 @@
+id = "dc_mpd"
+name = "DC Metropolitan Police Department"
+city = "Washington"
+state = "DC"
+output_filename = "dc_crimes.json"
+
+[fetcher]
+type = "arcgis"
+query_url = "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/8/query"
+page_size = 2000
+
+[fields]
+incident_id = ["CCN"]
+crime_type = ["OFFENSE"]
+block_address = "BLOCK"
+location_type = "WARD"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "REPORT_DAT"
+
+[fields.lat]
+field = "LATITUDE"
+type = "f64"
+
+[fields.lng]
+field = "LONGITUDE"
+type = "f64"
+
+[fields.description]
+type = "combine"
+fields = ["OFFENSE", "METHOD"]
+separator = " ("
+# Note: this produces "ROBBERY (GUN" not "ROBBERY (GUN)" but it's close enough.
+# A suffix option could be added later if needed.
+
+[fields.arrest]
+type = "none"

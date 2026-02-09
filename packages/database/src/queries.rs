@@ -4,6 +4,7 @@
 //! Non-spatial queries use the typed `switchy_database` query builder.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use crime_map_crime_models::{CrimeSeverity, CrimeSubcategory};
 use crime_map_database_models::{IncidentQuery, IncidentRow};
@@ -36,10 +37,9 @@ pub async fn upsert_source(
             &[
                 DatabaseValue::String(name.to_string()),
                 DatabaseValue::String(source_type.to_string()),
-                match api_url {
-                    Some(u) => DatabaseValue::String(u.to_string()),
-                    None => DatabaseValue::Null,
-                },
+                api_url.map_or(DatabaseValue::Null, |u| {
+                    DatabaseValue::String(u.to_string())
+                }),
                 DatabaseValue::String(coverage_area.to_string()),
             ],
         )
@@ -131,32 +131,32 @@ pub async fn insert_incidents(
                     DatabaseValue::Real64(incident.longitude),
                     DatabaseValue::Real64(incident.latitude),
                     DatabaseValue::DateTime(incident.occurred_at.naive_utc()),
-                    match &incident.reported_at {
-                        Some(dt) => DatabaseValue::DateTime(dt.naive_utc()),
-                        None => DatabaseValue::Null,
-                    },
-                    match &incident.description {
-                        Some(d) => DatabaseValue::String(d.clone()),
-                        None => DatabaseValue::Null,
-                    },
-                    match &incident.block_address {
-                        Some(a) => DatabaseValue::String(a.clone()),
-                        None => DatabaseValue::Null,
-                    },
+                    incident
+                        .reported_at
+                        .as_ref()
+                        .map_or(DatabaseValue::Null, |dt| {
+                            DatabaseValue::DateTime(dt.naive_utc())
+                        }),
+                    incident
+                        .description
+                        .as_ref()
+                        .map_or(DatabaseValue::Null, |d| DatabaseValue::String(d.clone())),
+                    incident
+                        .block_address
+                        .as_ref()
+                        .map_or(DatabaseValue::Null, |a| DatabaseValue::String(a.clone())),
                     DatabaseValue::String(incident.city.clone()),
                     DatabaseValue::String(incident.state.clone()),
-                    match incident.arrest_made {
-                        Some(a) => DatabaseValue::Bool(a),
-                        None => DatabaseValue::Null,
-                    },
-                    match incident.domestic {
-                        Some(d) => DatabaseValue::Bool(d),
-                        None => DatabaseValue::Null,
-                    },
-                    match &incident.location_type {
-                        Some(l) => DatabaseValue::String(l.clone()),
-                        None => DatabaseValue::Null,
-                    },
+                    incident
+                        .arrest_made
+                        .map_or(DatabaseValue::Null, DatabaseValue::Bool),
+                    incident
+                        .domestic
+                        .map_or(DatabaseValue::Null, DatabaseValue::Bool),
+                    incident
+                        .location_type
+                        .as_ref()
+                        .map_or(DatabaseValue::Null, |l| DatabaseValue::String(l.clone())),
                 ],
             )
             .await?;
@@ -190,6 +190,7 @@ pub async fn update_source_stats(db: &dyn Database, source_id: i32) -> Result<()
 /// # Errors
 ///
 /// Returns [`DbError`] if the database operation fails.
+#[allow(clippy::too_many_lines)]
 pub async fn query_incidents(
     db: &dyn Database,
     query: &IncidentQuery,
@@ -213,13 +214,15 @@ pub async fn query_incidents(
     let mut param_idx = 1u32;
 
     if let Some(bbox) = &query.bbox {
-        sql.push_str(&format!(
+        write!(
+            sql,
             " AND i.location && ST_MakeEnvelope(${}, ${}, ${}, ${}, 4326)::geography",
             param_idx,
             param_idx + 1,
             param_idx + 2,
             param_idx + 3,
-        ));
+        )
+        .unwrap();
         params.push(DatabaseValue::Real64(bbox.west));
         params.push(DatabaseValue::Real64(bbox.south));
         params.push(DatabaseValue::Real64(bbox.east));
@@ -228,36 +231,36 @@ pub async fn query_incidents(
     }
 
     if let Some(from) = &query.from {
-        sql.push_str(&format!(" AND i.occurred_at >= ${param_idx}"));
+        write!(sql, " AND i.occurred_at >= ${param_idx}").unwrap();
         params.push(DatabaseValue::DateTime(from.naive_utc()));
         param_idx += 1;
     }
 
     if let Some(to) = &query.to {
-        sql.push_str(&format!(" AND i.occurred_at <= ${param_idx}"));
+        write!(sql, " AND i.occurred_at <= ${param_idx}").unwrap();
         params.push(DatabaseValue::DateTime(to.naive_utc()));
         param_idx += 1;
     }
 
     if let Some(severity_min) = &query.severity_min {
-        sql.push_str(&format!(" AND c.severity >= ${param_idx}"));
+        write!(sql, " AND c.severity >= ${param_idx}").unwrap();
         params.push(DatabaseValue::Int32(i32::from(severity_min.value())));
         param_idx += 1;
     }
 
     if let Some(arrest) = query.arrest_made {
-        sql.push_str(&format!(" AND i.arrest_made = ${param_idx}"));
+        write!(sql, " AND i.arrest_made = ${param_idx}").unwrap();
         params.push(DatabaseValue::Bool(arrest));
         param_idx += 1;
     }
 
     sql.push_str(" ORDER BY i.occurred_at DESC");
 
-    sql.push_str(&format!(" LIMIT ${param_idx}"));
+    write!(sql, " LIMIT ${param_idx}").unwrap();
     params.push(DatabaseValue::Int64(i64::from(query.limit)));
     param_idx += 1;
 
-    sql.push_str(&format!(" OFFSET ${param_idx}"));
+    write!(sql, " OFFSET ${param_idx}").unwrap();
     params.push(DatabaseValue::Int64(i64::from(query.offset)));
 
     let rows = db.query_raw_params(&sql, &params).await?;

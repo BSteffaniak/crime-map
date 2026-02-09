@@ -1,6 +1,6 @@
 #![cfg_attr(feature = "fail-on-warnings", deny(warnings))]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
-#![allow(clippy::multiple_crate_versions)]
+#![allow(clippy::multiple_crate_versions, clippy::cargo_common_metadata)]
 
 //! CLI tool for ingesting crime data from public sources into the `PostGIS`
 //! database.
@@ -10,15 +10,7 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use crime_map_database::{db, queries, run_migrations};
-use crime_map_source::sources::boston::BostonSource;
-use crime_map_source::sources::chicago::ChicagoSource;
-use crime_map_source::sources::dc::DcSource;
-use crime_map_source::sources::denver::DenverSource;
-use crime_map_source::sources::la::LaSource;
-use crime_map_source::sources::nyc::NycSource;
-use crime_map_source::sources::philly::PhillySource;
-use crime_map_source::sources::seattle::SeattleSource;
-use crime_map_source::sources::sf::SfSource;
+use crime_map_source::source_def::SourceDefinition;
 use crime_map_source::{CrimeSource, FetchOptions};
 
 #[derive(Parser)]
@@ -35,7 +27,7 @@ enum Commands {
         /// Maximum number of records per source (for testing)
         #[arg(long)]
         limit: Option<u64>,
-        /// Comma-separated list of source IDs to sync (overrides CRIME_MAP_SOURCES env var)
+        /// Comma-separated list of source IDs to sync (overrides `CRIME_MAP_SOURCES` env var)
         #[arg(long)]
         sources: Option<String>,
     },
@@ -81,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .iter()
                 .find(|s| s.id() == source)
                 .ok_or_else(|| format!("Unknown source: {source}"))?;
-            sync_source(db.as_ref(), src.as_ref(), limit).await?;
+            sync_source(db.as_ref(), src, limit).await?;
         }
         Commands::SyncAll { limit, sources } => {
             let db = db::connect_from_env().await?;
@@ -92,12 +84,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sources.len(),
                 sources
                     .iter()
-                    .map(|s| s.id())
+                    .map(crime_map_source::CrimeSource::id)
                     .collect::<Vec<_>>()
                     .join(", ")
             );
             for src in &sources {
-                if let Err(e) = sync_source(db.as_ref(), src.as_ref(), limit).await {
+                if let Err(e) = sync_source(db.as_ref(), src, limit).await {
                     log::error!("Failed to sync {}: {e}", src.id());
                 }
             }
@@ -107,25 +99,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Returns all configured data sources.
-fn all_sources() -> Vec<Box<dyn CrimeSource>> {
-    vec![
-        Box::new(ChicagoSource::new()),
-        Box::new(LaSource::new()),
-        Box::new(SfSource::new()),
-        Box::new(SeattleSource::new()),
-        Box::new(NycSource::new()),
-        Box::new(DenverSource::new()),
-        Box::new(DcSource::new()),
-        Box::new(PhillySource::new()),
-        Box::new(BostonSource::new()),
-    ]
+/// Returns all configured data sources from the TOML registry.
+fn all_sources() -> Vec<SourceDefinition> {
+    crime_map_source::registry::all_sources()
 }
 
 /// Returns the sources to sync, filtered by the `--sources` CLI flag or the
 /// `CRIME_MAP_SOURCES` environment variable. If neither is set, all sources
 /// are returned.
-fn enabled_sources(cli_filter: Option<String>) -> Vec<Box<dyn CrimeSource>> {
+fn enabled_sources(cli_filter: Option<String>) -> Vec<SourceDefinition> {
     let filter = cli_filter.or_else(|| std::env::var("CRIME_MAP_SOURCES").ok());
 
     let all = all_sources();
@@ -136,7 +118,7 @@ fn enabled_sources(cli_filter: Option<String>) -> Vec<Box<dyn CrimeSource>> {
 
     let ids: Vec<&str> = filter_str.split(',').map(str::trim).collect();
 
-    let filtered: Vec<Box<dyn CrimeSource>> =
+    let filtered: Vec<SourceDefinition> =
         all.into_iter().filter(|s| ids.contains(&s.id())).collect();
 
     if filtered.is_empty() {
@@ -157,7 +139,7 @@ fn enabled_sources(cli_filter: Option<String>) -> Vec<Box<dyn CrimeSource>> {
 /// Fetches, normalizes, and inserts data from a single source.
 async fn sync_source(
     db: &dyn switchy_database::Database,
-    source: &dyn CrimeSource,
+    source: &SourceDefinition,
     limit: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();

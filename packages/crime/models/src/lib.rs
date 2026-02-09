@@ -1,6 +1,6 @@
 #![cfg_attr(feature = "fail-on-warnings", deny(warnings))]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
-#![allow(clippy::multiple_crate_versions)]
+#![allow(clippy::multiple_crate_versions, clippy::cargo_common_metadata)]
 
 //! Crime category taxonomy types and severity definitions.
 //!
@@ -124,10 +124,8 @@ impl CrimeCategory {
     pub const fn default_severity(self) -> CrimeSeverity {
         match self {
             Self::Violent => CrimeSeverity::High,
-            Self::Property => CrimeSeverity::Moderate,
-            Self::DrugNarcotics => CrimeSeverity::Moderate,
-            Self::PublicOrder => CrimeSeverity::Low,
-            Self::FraudFinancial => CrimeSeverity::Low,
+            Self::Property | Self::DrugNarcotics => CrimeSeverity::Moderate,
+            Self::PublicOrder | Self::FraudFinancial => CrimeSeverity::Low,
             Self::Other => CrimeSeverity::Minimal,
         }
     }
