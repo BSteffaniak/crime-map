@@ -8,6 +8,7 @@
 //! raw data is fetched, parsed, and mapped to the canonical taxonomy.
 
 pub mod arcgis;
+pub mod parsing;
 pub mod socrata;
 pub mod sources;
 pub mod type_mapping;

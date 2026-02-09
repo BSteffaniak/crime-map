@@ -35,6 +35,9 @@ enum Commands {
         /// Maximum number of records per source (for testing)
         #[arg(long)]
         limit: Option<u64>,
+        /// Comma-separated list of source IDs to sync (overrides CRIME_MAP_SOURCES env var)
+        #[arg(long)]
+        sources: Option<String>,
     },
     /// Sync data from a specific source
     Sync {
@@ -80,10 +83,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or_else(|| format!("Unknown source: {source}"))?;
             sync_source(db.as_ref(), src.as_ref(), limit).await?;
         }
-        Commands::SyncAll { limit } => {
+        Commands::SyncAll { limit, sources } => {
             let db = db::connect_from_env().await?;
             run_migrations(db.as_ref()).await?;
-            let sources = all_sources();
+            let sources = enabled_sources(sources);
+            log::info!(
+                "Syncing {} source(s): {}",
+                sources.len(),
+                sources
+                    .iter()
+                    .map(|s| s.id())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
             for src in &sources {
                 if let Err(e) = sync_source(db.as_ref(), src.as_ref(), limit).await {
                     log::error!("Failed to sync {}: {e}", src.id());
@@ -108,6 +120,38 @@ fn all_sources() -> Vec<Box<dyn CrimeSource>> {
         Box::new(PhillySource::new()),
         Box::new(BostonSource::new()),
     ]
+}
+
+/// Returns the sources to sync, filtered by the `--sources` CLI flag or the
+/// `CRIME_MAP_SOURCES` environment variable. If neither is set, all sources
+/// are returned.
+fn enabled_sources(cli_filter: Option<String>) -> Vec<Box<dyn CrimeSource>> {
+    let filter = cli_filter.or_else(|| std::env::var("CRIME_MAP_SOURCES").ok());
+
+    let all = all_sources();
+
+    let Some(filter_str) = filter else {
+        return all;
+    };
+
+    let ids: Vec<&str> = filter_str.split(',').map(str::trim).collect();
+
+    let filtered: Vec<Box<dyn CrimeSource>> =
+        all.into_iter().filter(|s| ids.contains(&s.id())).collect();
+
+    if filtered.is_empty() {
+        log::warn!(
+            "No matching sources found for filter {:?}. Available: {}",
+            ids,
+            all_sources()
+                .iter()
+                .map(|s| s.id().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    filtered
 }
 
 /// Fetches, normalizes, and inserts data from a single source.

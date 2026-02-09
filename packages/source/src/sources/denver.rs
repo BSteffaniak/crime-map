@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use crime_map_source_models::NormalizedIncident;
 use serde::Deserialize;
 
+use crate::parsing::{parse_lat_lng_f64, parse_socrata_date};
 use crate::socrata::{SocrataConfig, fetch_socrata};
-use crate::sources::chicago::{parse_lat_lng_f64, parse_socrata_date};
 use crate::type_mapping::map_crime_type;
 use crate::{CrimeSource, FetchOptions, SourceError};
 

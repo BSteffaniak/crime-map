@@ -6,10 +6,11 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::Utc;
 use crime_map_source_models::NormalizedIncident;
 use serde::Deserialize;
 
+use crate::parsing::{parse_lat_lng_str, parse_socrata_date};
 use crate::socrata::{SocrataConfig, fetch_socrata};
 use crate::type_mapping::map_crime_type;
 use crate::{CrimeSource, FetchOptions, SourceError};
@@ -142,38 +143,4 @@ impl CrimeSource for ChicagoSource {
         );
         Ok(incidents)
     }
-}
-
-/// Parses a Socrata datetime string (ISO 8601 with optional fractional seconds).
-pub(crate) fn parse_socrata_date(s: &str) -> Option<DateTime<Utc>> {
-    if let Ok(naive) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f") {
-        return Some(naive.and_utc());
-    }
-    if let Ok(naive) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
-        return Some(naive.and_utc());
-    }
-    None
-}
-
-/// Parses lat/lng from optional string fields. Returns `None` if missing,
-/// unparseable, or zero.
-pub(crate) fn parse_lat_lng_str(lat: Option<&String>, lng: Option<&String>) -> Option<(f64, f64)> {
-    let lat_str = lat?.as_str();
-    let lng_str = lng?.as_str();
-    let latitude = lat_str.parse::<f64>().ok()?;
-    let longitude = lng_str.parse::<f64>().ok()?;
-    if latitude == 0.0 || longitude == 0.0 {
-        return None;
-    }
-    Some((latitude, longitude))
-}
-
-/// Parses lat/lng from optional f64 fields.
-pub(crate) fn parse_lat_lng_f64(lat: Option<f64>, lng: Option<f64>) -> Option<(f64, f64)> {
-    let latitude = lat?;
-    let longitude = lng?;
-    if latitude == 0.0 || longitude == 0.0 {
-        return None;
-    }
-    Some((latitude, longitude))
 }

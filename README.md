@@ -60,9 +60,21 @@ cargo ingest sync-all --limit 100
 # Full sync (all records from all 9 sources)
 cargo ingest sync-all
 
+# Sync only specific sources
+cargo ingest sync-all --sources chicago_pd,dc_mpd,boston_pd
+
 # Sync a single source
 cargo ingest sync chicago_pd --limit 1000
 ```
+
+You can also set the `CRIME_MAP_SOURCES` environment variable in your `.env` file to persistently select which sources to sync:
+
+```sh
+# Only sync these sources by default
+CRIME_MAP_SOURCES=chicago_pd,la_pd,sf_pd,dc_mpd
+```
+
+The `--sources` CLI flag takes precedence over the env var. If neither is set, all sources are synced.
 
 ### 4. Generate map tiles
 
@@ -103,6 +115,8 @@ Open http://localhost:8080 in your browser.
 | `philly_pd`  | Philadelphia, PA  | Carto SQL      | [phl.carto.com](https://phl.carto.com/api/v2/sql)                                                               |
 | `boston_pd`  | Boston, MA        | CKAN Datastore | [data.boston.gov](https://data.boston.gov/dataset/crime-incident-reports-august-2015-to-date-source-new-system) |
 
+> **Note on data licensing:** Most sources above are municipal open data with permissive reuse terms. Philadelphia (`philly_pd`) has more restrictive terms that prohibit commercial use and redistribution without written permission from the City. DC (`dc_mpd`) is the most permissive (CC0 public domain). Chicago (`chicago_pd`) requires a disclaimer citing cityofchicago.org as the original source. Use `--sources` or `CRIME_MAP_SOURCES` to control which sources you ingest.
+
 ## CLI Reference
 
 Cargo aliases are defined in `.cargo/config.toml`. All commands run in release mode by default; append `:debug` for debug builds (e.g., `cargo ingest:debug`).
@@ -115,6 +129,7 @@ cargo ingest sources              List all configured data sources
 cargo ingest sync <SOURCE_ID>     Sync a single source
 cargo ingest sync-all             Sync all sources
   --limit <N>                     Max records per source (for testing)
+  --sources <IDS>                 Comma-separated source IDs to sync (overrides CRIME_MAP_SOURCES)
 ```
 
 ### `cargo generate`
@@ -155,12 +170,13 @@ app/                Vite + React + TypeScript + TailwindCSS + MapLibre GL JS fro
 
 ## Environment Variables
 
-| Variable       | Default                                                 | Description                                                 |
-| -------------- | ------------------------------------------------------- | ----------------------------------------------------------- |
-| `DATABASE_URL` | `postgres://postgres:postgres@localhost:5440/crime_map` | PostgreSQL connection string                                |
-| `BIND_ADDR`    | `127.0.0.1`                                             | Server bind address                                         |
-| `PORT`         | `8080`                                                  | Server port                                                 |
-| `RUST_LOG`     | (none)                                                  | Log level (`info`, `debug`, `crime_map_ingest=debug`, etc.) |
+| Variable            | Default                                                 | Description                                                       |
+| ------------------- | ------------------------------------------------------- | ----------------------------------------------------------------- |
+| `DATABASE_URL`      | `postgres://postgres:postgres@localhost:5440/crime_map` | PostgreSQL connection string                                      |
+| `CRIME_MAP_SOURCES` | (all sources)                                           | Comma-separated source IDs to sync (e.g., `chicago_pd,dc_mpd`)   |
+| `BIND_ADDR`         | `127.0.0.1`                                             | Server bind address                                               |
+| `PORT`              | `8080`                                                  | Server port                                                       |
+| `RUST_LOG`          | (none)                                                  | Log level (`info`, `debug`, `crime_map_ingest=debug`, etc.)       |
 
 ## Development
 
