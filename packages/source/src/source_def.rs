@@ -1,15 +1,17 @@
 //! Config-driven crime data source definition.
 //!
 //! [`SourceDefinition`] captures everything unique about a data source in a
-//! serializable config struct. A single generic [`CrimeSource`] implementation
-//! handles all sources, eliminating per-city boilerplate.
+//! serializable config struct. A single generic implementation handles all
+//! sources, eliminating per-city boilerplate.
+//!
+//! Pages of raw records are streamed through a [`tokio::sync::mpsc`] channel
+//! so that normalization and database insertion happen incrementally rather
+//! than buffering the entire dataset in memory.
 
-use std::path::{Path, PathBuf};
-
-use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use crime_map_source_models::NormalizedIncident;
 use serde::Deserialize;
+use tokio::sync::mpsc;
 
 use crate::arcgis::{ArcGisConfig, fetch_arcgis};
 use crate::carto::{CartoConfig, fetch_carto};
@@ -17,14 +19,14 @@ use crate::ckan::{CkanConfig, fetch_ckan};
 use crate::parsing::parse_socrata_date;
 use crate::socrata::{SocrataConfig, fetch_socrata};
 use crate::type_mapping::map_crime_type;
-use crate::{CrimeSource, FetchOptions, SourceError};
+use crate::{FetchOptions, SourceError};
 
 // ── Top-level source definition ──────────────────────────────────────────
 
 /// A complete, config-driven crime data source definition.
 ///
-/// Loaded from TOML files at compile time and used as the sole
-/// [`CrimeSource`] implementation.
+/// Loaded from TOML files at compile time and used as the sole source
+/// implementation.
 #[derive(Debug, Deserialize)]
 pub struct SourceDefinition {
     /// Unique identifier (e.g., `"chicago_pd"`).
@@ -35,7 +37,7 @@ pub struct SourceDefinition {
     pub city: String,
     /// Two-letter state abbreviation.
     pub state: String,
-    /// Output filename for downloaded data.
+    /// Legacy output filename (kept for config compatibility).
     pub output_filename: String,
     /// How to fetch raw data from the API.
     pub fetcher: FetcherConfig,
@@ -46,7 +48,7 @@ pub struct SourceDefinition {
 // ── Fetcher config ───────────────────────────────────────────────────────
 
 /// How to fetch raw data from the source API.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FetcherConfig {
     /// Socrata SODA API (`$limit/$offset/$order/$where`).
@@ -71,8 +73,8 @@ pub enum FetcherConfig {
     Ckan {
         /// Base API URL.
         api_url: String,
-        /// CKAN resource ID.
-        resource_id: String,
+        /// CKAN resource IDs (one per dataset/year).
+        resource_ids: Vec<String>,
         /// Records per page.
         page_size: u64,
     },
@@ -345,101 +347,130 @@ impl ArrestExtractor {
     }
 }
 
-// ── CrimeSource implementation ───────────────────────────────────────────
+// ── Streaming fetch + normalize ───────────────────────────────────────
 
-#[async_trait]
-impl CrimeSource for SourceDefinition {
-    fn id(&self) -> &str {
+/// Channel buffer size — allows the fetcher to stay one page ahead of
+/// the consumer (normalizer/inserter).
+const PAGE_CHANNEL_BUFFER: usize = 2;
+
+impl SourceDefinition {
+    /// Returns the unique source identifier.
+    #[must_use]
+    pub fn id(&self) -> &str {
         &self.id
     }
 
-    fn name(&self) -> &str {
+    /// Returns the human-readable source name.
+    #[must_use]
+    pub fn name(&self) -> &str {
         &self.name
     }
 
-    async fn fetch(&self, options: &FetchOptions) -> Result<PathBuf, SourceError> {
-        match &self.fetcher {
-            FetcherConfig::Socrata {
-                api_url,
-                date_column,
-                page_size,
-            } => {
-                fetch_socrata(
-                    &SocrataConfig {
-                        api_url,
-                        date_column,
-                        output_filename: &self.output_filename,
-                        label: &self.name,
-                        page_size: *page_size,
-                    },
-                    options,
-                )
-                .await
+    /// Starts fetching pages in a background task and returns a receiver
+    /// that yields one page of raw JSON records at a time.
+    ///
+    /// The caller should receive pages, call [`Self::normalize_page`] on
+    /// each, and insert the results into the database immediately.
+    ///
+    /// A fetch error (if any) is returned via the [`tokio::task::JoinHandle`].
+    #[must_use]
+    pub fn fetch_pages(
+        &self,
+        options: &FetchOptions,
+    ) -> (
+        mpsc::Receiver<Vec<serde_json::Value>>,
+        tokio::task::JoinHandle<Result<u64, SourceError>>,
+    ) {
+        let (tx, rx) = mpsc::channel(PAGE_CHANNEL_BUFFER);
+        let fetcher = self.fetcher.clone();
+        let name = self.name.clone();
+        let options = options.clone();
+
+        let handle = tokio::spawn(async move {
+            match &fetcher {
+                FetcherConfig::Socrata {
+                    api_url,
+                    date_column,
+                    page_size,
+                } => {
+                    fetch_socrata(
+                        &SocrataConfig {
+                            api_url,
+                            date_column,
+                            label: &name,
+                            page_size: *page_size,
+                        },
+                        &options,
+                        &tx,
+                    )
+                    .await
+                }
+                FetcherConfig::Arcgis {
+                    query_urls,
+                    page_size,
+                    where_clause,
+                } => {
+                    fetch_arcgis(
+                        &ArcGisConfig {
+                            query_urls,
+                            label: &name,
+                            page_size: *page_size,
+                            where_clause: where_clause.as_deref(),
+                        },
+                        &options,
+                        &tx,
+                    )
+                    .await
+                }
+                FetcherConfig::Ckan {
+                    api_url,
+                    resource_ids,
+                    page_size,
+                } => {
+                    fetch_ckan(
+                        &CkanConfig {
+                            api_url,
+                            resource_ids,
+                            label: &name,
+                            page_size: *page_size,
+                        },
+                        &options,
+                        &tx,
+                    )
+                    .await
+                }
+                FetcherConfig::Carto {
+                    api_url,
+                    table_name,
+                    date_column,
+                    page_size,
+                } => {
+                    fetch_carto(
+                        &CartoConfig {
+                            api_url,
+                            table_name,
+                            date_column,
+                            label: &name,
+                            page_size: *page_size,
+                        },
+                        &options,
+                        &tx,
+                    )
+                    .await
+                }
             }
-            FetcherConfig::Arcgis {
-                query_urls,
-                page_size,
-                where_clause,
-            } => {
-                fetch_arcgis(
-                    &ArcGisConfig {
-                        query_urls,
-                        output_filename: &self.output_filename,
-                        label: &self.name,
-                        page_size: *page_size,
-                        where_clause: where_clause.as_deref(),
-                    },
-                    options,
-                )
-                .await
-            }
-            FetcherConfig::Ckan {
-                api_url,
-                resource_id,
-                page_size,
-            } => {
-                fetch_ckan(
-                    &CkanConfig {
-                        api_url,
-                        resource_id,
-                        output_filename: &self.output_filename,
-                        label: &self.name,
-                        page_size: *page_size,
-                    },
-                    options,
-                )
-                .await
-            }
-            FetcherConfig::Carto {
-                api_url,
-                table_name,
-                date_column,
-                page_size,
-            } => {
-                fetch_carto(
-                    &CartoConfig {
-                        api_url,
-                        table_name,
-                        date_column,
-                        output_filename: &self.output_filename,
-                        label: &self.name,
-                        page_size: *page_size,
-                    },
-                    options,
-                )
-                .await
-            }
-        }
+        });
+
+        (rx, handle)
     }
 
-    async fn normalize(&self, raw_path: &Path) -> Result<Vec<NormalizedIncident>, SourceError> {
-        let data = std::fs::read_to_string(raw_path)?;
-        let records: Vec<serde_json::Value> = serde_json::from_str(&data)?;
-        let raw_count = records.len();
-        let mut incidents = Vec::with_capacity(raw_count);
+    /// Normalizes a single page of raw JSON records into canonical
+    /// [`NormalizedIncident`]s.
+    pub fn normalize_page(&self, records: &[serde_json::Value]) -> Vec<NormalizedIncident> {
         let fields = &self.fields;
+        let mut incidents = Vec::with_capacity(records.len());
 
-        for record in &records {
+        for record in records {
             // ── Lat/lng ──────────────────────────────────────────────
             let Some(latitude) = fields.lat.extract(record) else {
                 continue;
@@ -513,12 +544,7 @@ impl CrimeSource for SourceDefinition {
             });
         }
 
-        log::info!(
-            "Normalized {} incidents from {} raw records",
-            incidents.len(),
-            raw_count
-        );
-        Ok(incidents)
+        incidents
     }
 }
 

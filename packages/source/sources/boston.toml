@@ -7,7 +7,17 @@ output_filename = "boston_crimes.json"
 [fetcher]
 type = "ckan"
 api_url = "https://data.boston.gov/api/3/action/datastore_search"
-resource_id = "12cb3883-56f5-47de-afa5-3b1cf61b257b"
+resource_ids = [
+  "b973d8cb-eeb2-4e7e-99da-c92938efc9c0",
+  "313e56df-6d77-49d2-9c49-ee411f10cf58",
+  "f4495ee9-c42c-4019-82c1-d067f07e45d2",
+  "be047094-85fe-4104-a480-4fa3d03f9623",
+  "34e0ae6b-8c94-4998-ae9e-1b51551fe9ba",
+  "e86f8e38-a23c-4c1a-8455-c8f94210a8f1",
+  "64ad0053-842c-459b-9833-ff53d568f2e3",
+  "b6c4e2c3-7b1e-4f4a-b019-bef8c6a0e882",
+  "792031bf-b9bb-467c-b118-fe795befdf00",
+]
 page_size = 10000
 
 [fields]

@@ -1,9 +1,11 @@
 //! Shared Carto SQL API fetcher.
 //!
-//! Handles paginated fetching from Carto SQL endpoints. Used by Philadelphia.
+//! Handles paginated fetching from Carto SQL endpoints. Pages of raw JSON
+//! records are sent through a channel for immediate processing.
 
 use std::fmt::Write as _;
-use std::path::PathBuf;
+
+use tokio::sync::mpsc;
 
 use crate::{FetchOptions, SourceError};
 
@@ -15,8 +17,6 @@ pub struct CartoConfig<'a> {
     pub table_name: &'a str,
     /// Date column for ordering and `WHERE` filtering.
     pub date_column: &'a str,
-    /// Output filename (e.g., `"philly_crimes.json"`).
-    pub output_filename: &'a str,
     /// Label for log messages (e.g., `"Philly"`).
     pub label: &'a str,
     /// Page size for pagination.
@@ -54,21 +54,20 @@ async fn query_carto_count(
         .as_u64()
 }
 
-/// Fetches all records from a Carto SQL endpoint with pagination, writes to
-/// a JSON file, and returns the output path.
+/// Fetches records from a Carto SQL endpoint page by page, sending each
+/// page through the provided channel.
+///
+/// Returns the total number of records fetched.
 ///
 /// # Errors
 ///
-/// Returns [`SourceError`] if HTTP requests or file I/O fail.
+/// Returns [`SourceError`] if HTTP requests fail.
 pub async fn fetch_carto(
     config: &CartoConfig<'_>,
     options: &FetchOptions,
-) -> Result<PathBuf, SourceError> {
-    let output_path = options.output_dir.join(config.output_filename);
-    std::fs::create_dir_all(&options.output_dir)?;
-
+    tx: &mpsc::Sender<Vec<serde_json::Value>>,
+) -> Result<u64, SourceError> {
     let client = reqwest::Client::new();
-    let mut all_records: Vec<serde_json::Value> = Vec::new();
     let mut offset: u64 = 0;
     let fetch_limit = options.limit.unwrap_or(u64::MAX);
 
@@ -147,21 +146,19 @@ pub async fn fetch_carto(
             break;
         }
 
-        all_records.extend(rows);
         offset += count;
+
+        tx.send(rows)
+            .await
+            .map_err(|e| SourceError::Normalization {
+                message: format!("channel send failed: {e}"),
+            })?;
 
         if count < page_limit {
             break;
         }
     }
 
-    log::info!(
-        "{}: download complete — {} records",
-        config.label,
-        all_records.len(),
-    );
-    let json = serde_json::to_string(&all_records)?;
-    std::fs::write(&output_path, json)?;
-
-    Ok(output_path)
+    log::info!("{}: download complete — {offset} records", config.label);
+    Ok(offset)
 }

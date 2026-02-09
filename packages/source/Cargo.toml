@@ -11,7 +11,6 @@ version = "0.1.0"
 crime_map_crime_models = { workspace = true }
 crime_map_source_models = { workspace = true }
 
-async-trait = { workspace = true }
 chrono = { workspace = true }
 log = { workspace = true }
 reqwest = { workspace = true }

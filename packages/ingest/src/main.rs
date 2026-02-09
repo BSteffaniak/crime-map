@@ -5,13 +5,12 @@
 //! CLI tool for ingesting crime data from public sources into the `PostGIS`
 //! database.
 
-use std::path::PathBuf;
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use crime_map_database::{db, queries, run_migrations};
+use crime_map_source::FetchOptions;
 use crime_map_source::source_def::SourceDefinition;
-use crime_map_source::{CrimeSource, FetchOptions};
 
 #[derive(Parser)]
 #[command(name = "crime_map_ingest", about = "Crime data ingestion tool")]
@@ -84,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sources.len(),
                 sources
                     .iter()
-                    .map(crime_map_source::CrimeSource::id)
+                    .map(SourceDefinition::id)
                     .collect::<Vec<_>>()
                     .join(", ")
             );
@@ -136,7 +135,9 @@ fn enabled_sources(cli_filter: Option<String>) -> Vec<SourceDefinition> {
     filtered
 }
 
-/// Fetches, normalizes, and inserts data from a single source.
+/// Fetches, normalizes, and inserts data from a single source, processing
+/// one page at a time to minimize memory usage and provide incremental
+/// progress.
 async fn sync_source(
     db: &dyn switchy_database::Database,
     source: &SourceDefinition,
@@ -150,42 +151,61 @@ async fn sync_source(
         db,
         source.name(),
         "CITY_API",
-        None,
+        Option::None,
         &format!("{} data", source.name()),
     )
     .await?;
 
-    // Fetch raw data
-    let options = FetchOptions {
-        since: None,
-        limit,
-        output_dir: PathBuf::from("data/downloads"),
-    };
-
-    log::info!("Fetching data from {}...", source.name());
-    let raw_path = source.fetch(&options).await?;
-
-    // Normalize
-    log::info!("Normalizing data...");
-    let incidents = source.normalize(&raw_path).await?;
-    log::info!("Normalized {} incidents", incidents.len());
-
-    // Get category ID mapping
+    // Get category ID mapping (needed for insertion)
     let category_ids = queries::get_all_category_ids(db).await?;
 
-    // Insert into database
-    log::info!("Inserting into database...");
-    let inserted = queries::insert_incidents(db, source_id, &incidents, &category_ids).await?;
+    // Start streaming pages from the fetcher
+    let options = FetchOptions { since: None, limit };
+
+    let (mut rx, fetch_handle) = source.fetch_pages(&options);
+
+    let mut total_raw: u64 = 0;
+    let mut total_normalized: u64 = 0;
+    let mut total_inserted: u64 = 0;
+    let mut page_num: u64 = 0;
+
+    // Process pages as they arrive
+    while let Some(page) = rx.recv().await {
+        page_num += 1;
+        let raw_count = page.len() as u64;
+        total_raw += raw_count;
+
+        // Normalize this page
+        let incidents = source.normalize_page(&page);
+        let norm_count = incidents.len() as u64;
+        total_normalized += norm_count;
+
+        // Insert this page into the database
+        let inserted = queries::insert_incidents(db, source_id, &incidents, &category_ids).await?;
+        total_inserted += inserted;
+
+        log::info!(
+            "{}: page {page_num} — normalized {norm_count}/{raw_count}, inserted {inserted}",
+            source.name(),
+        );
+    }
+
+    // Wait for the fetcher task to finish and check for errors
+    let fetch_result = fetch_handle.await?;
+    if let Err(e) = fetch_result {
+        return Err(format!("Fetch error for {}: {e}", source.name()).into());
+    }
 
     // Update source stats
     queries::update_source_stats(db, source_id).await?;
 
     let elapsed = start.elapsed();
     log::info!(
-        "Sync complete for {}: {} inserted, {} total incidents, took {:.1}s",
+        "Sync complete for {}: {} inserted ({} normalized from {} raw), took {:.1}s",
         source.name(),
-        inserted,
-        incidents.len(),
+        total_inserted,
+        total_normalized,
+        total_raw,
         elapsed.as_secs_f64()
     );
 

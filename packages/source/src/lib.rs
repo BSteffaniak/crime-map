@@ -2,11 +2,15 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
 #![allow(clippy::multiple_crate_versions, clippy::cargo_common_metadata)]
 
-//! Crime data source trait and normalization logic.
+//! Crime data source definitions and fetchers.
 //!
 //! Each data provider is defined by a TOML config file in `packages/source/sources/`
 //! and handled by the generic [`source_def::SourceDefinition`] implementation.
 //! Use [`registry::all_sources`] to get all configured sources.
+//!
+//! Data flows through a streaming pipeline: pages of raw JSON records are
+//! fetched and sent through a channel, then normalized and inserted into
+//! the database one page at a time.
 
 pub mod arcgis;
 pub mod carto;
@@ -16,11 +20,6 @@ pub mod registry;
 pub mod socrata;
 pub mod source_def;
 pub mod type_mapping;
-
-use std::path::{Path, PathBuf};
-
-use async_trait::async_trait;
-use crime_map_source_models::NormalizedIncident;
 
 /// Errors that can occur during data source operations.
 #[derive(Debug, thiserror::Error)]
@@ -52,35 +51,4 @@ pub struct FetchOptions {
     pub since: Option<chrono::DateTime<chrono::Utc>>,
     /// Maximum number of records to fetch.
     pub limit: Option<u64>,
-    /// Directory to store downloaded files.
-    pub output_dir: PathBuf,
-}
-
-/// Trait that all crime data sources must implement.
-///
-/// Each source knows how to fetch its raw data, parse it, and normalize
-/// it into the canonical [`NormalizedIncident`] format.
-#[async_trait]
-pub trait CrimeSource: Send + Sync {
-    /// Returns a unique identifier for this source (e.g., `"chicago_pd"`).
-    fn id(&self) -> &str;
-
-    /// Returns the human-readable name of this source.
-    fn name(&self) -> &str;
-
-    /// Downloads raw data from the source, returning the path to the
-    /// downloaded file(s).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SourceError`] if the download fails.
-    async fn fetch(&self, options: &FetchOptions) -> Result<PathBuf, SourceError>;
-
-    /// Parses the raw downloaded data and normalizes it into canonical
-    /// incidents.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SourceError`] if parsing or normalization fails.
-    async fn normalize(&self, raw_path: &Path) -> Result<Vec<NormalizedIncident>, SourceError>;
 }
