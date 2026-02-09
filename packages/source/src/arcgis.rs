@@ -95,7 +95,15 @@ pub async fn fetch_arcgis(
 
             offset += count;
 
-            if count < page_limit {
+            // ArcGIS sets `exceededTransferLimit: true` when more records
+            // exist beyond this page.  This is the canonical pagination
+            // signal — using `count < page_limit` is unreliable because the
+            // server silently caps results at its own `maxRecordCount`.
+            let exceeded = body
+                .get("exceededTransferLimit")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if !exceeded {
                 break;
             }
         }

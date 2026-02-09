@@ -13,7 +13,7 @@ query_urls = [
   "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/7/query",
   "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/6/query",
 ]
-page_size = 2000
+page_size = 1000
 
 [fields]
 incident_id = ["CCN"]
