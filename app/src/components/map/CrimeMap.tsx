@@ -8,116 +8,177 @@ import {
   HEATMAP_MAX_ZOOM,
   CLUSTER_MAX_ZOOM,
 } from "../../lib/map-config";
-import { severityColor } from "../../lib/types";
+import { severityColor, type FilterState } from "../../lib/types";
+import { useClusterWorker } from "../../lib/cluster-worker";
+import { buildIncidentFilter } from "../../lib/map-filters/expressions";
+import type { BBox } from "../../lib/cluster-worker/types";
 
 interface CrimeMapProps {
-  onBoundsChange?: (bounds: maplibregl.LngLatBounds) => void;
+  filters: FilterState;
+  onBoundsChange?: (bounds: maplibregl.LngLatBounds, zoom: number) => void;
 }
 
-export default function CrimeMap({ onBoundsChange }: CrimeMapProps) {
+export default function CrimeMap({ filters, onBoundsChange }: CrimeMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const [loaded, setLoaded] = useState(false);
 
+  const {
+    clusters,
+    updateViewport,
+    getExpansionZoom,
+  } = useClusterWorker(filters);
+
+  // -- Layer setup --
+
   const setupLayers = useCallback((map: maplibregl.Map) => {
-    // Add PMTiles source for crime incidents
+    // PMTiles source for high-zoom individual points
     map.addSource("incidents", {
       type: "vector",
       url: "pmtiles:///tiles/incidents.pmtiles",
     });
 
-    // Heatmap layer (visible at low zoom)
+    // GeoJSON source for Supercluster clusters (mid-zoom)
+    map.addSource("incidents-clusters", {
+      type: "geojson",
+      data: { type: "FeatureCollection", features: [] },
+    });
+
+    // -- Layer 1: Heatmap (zoom 0-7) --
     map.addLayer({
       id: "incidents-heat",
       type: "heatmap",
       source: "incidents",
       "source-layer": "incidents",
-      maxzoom: CLUSTER_MAX_ZOOM,
+      maxzoom: HEATMAP_MAX_ZOOM,
       paint: {
         "heatmap-weight": [
           "interpolate",
           ["linear"],
           ["get", "severity"],
-          1,
-          0.2,
-          5,
-          1,
+          1, 0.2,
+          5, 1,
         ],
         "heatmap-intensity": [
           "interpolate",
           ["linear"],
           ["zoom"],
-          0,
-          0.5,
-          HEATMAP_MAX_ZOOM,
-          2,
+          0, 0.5,
+          HEATMAP_MAX_ZOOM, 2,
         ],
         "heatmap-color": [
           "interpolate",
           ["linear"],
           ["heatmap-density"],
-          0,
-          "rgba(0, 0, 255, 0)",
-          0.1,
-          "rgba(65, 105, 225, 0.4)",
-          0.3,
-          "rgba(0, 200, 0, 0.5)",
-          0.5,
-          "rgba(255, 255, 0, 0.6)",
-          0.7,
-          "rgba(255, 165, 0, 0.8)",
-          1,
-          "rgba(255, 0, 0, 0.9)",
+          0, "rgba(0, 0, 255, 0)",
+          0.1, "rgba(65, 105, 225, 0.4)",
+          0.3, "rgba(0, 200, 0, 0.5)",
+          0.5, "rgba(255, 255, 0, 0.6)",
+          0.7, "rgba(255, 165, 0, 0.8)",
+          1, "rgba(255, 0, 0, 0.9)",
         ],
         "heatmap-radius": [
           "interpolate",
           ["linear"],
           ["zoom"],
-          0,
-          2,
-          HEATMAP_MAX_ZOOM,
-          20,
+          0, 2,
+          HEATMAP_MAX_ZOOM, 20,
         ],
         "heatmap-opacity": [
           "interpolate",
           ["linear"],
           ["zoom"],
-          HEATMAP_MAX_ZOOM - 1,
-          0.8,
-          CLUSTER_MAX_ZOOM,
-          0,
+          HEATMAP_MAX_ZOOM - 2, 0.8,
+          HEATMAP_MAX_ZOOM, 0,
         ],
       },
     });
 
-    // Individual point layer (visible at higher zoom)
+    // -- Layer 2: Cluster circles (zoom 8-11) --
     map.addLayer({
-      id: "incidents-points",
+      id: "incidents-cluster-circles",
       type: "circle",
-      source: "incidents",
-      "source-layer": "incidents",
+      source: "incidents-clusters",
+      filter: ["has", "point_count"],
       minzoom: HEATMAP_MAX_ZOOM,
+      maxzoom: CLUSTER_MAX_ZOOM,
       paint: {
         "circle-radius": [
+          "step",
+          ["get", "point_count"],
+          15,   // < 10 points
+          10, 20,
+          50, 25,
+          200, 30,
+          1000, 40,
+        ],
+        "circle-color": [
+          "step",
+          ["get", "point_count"],
+          "#51bbd6",
+          10, "#f1f075",
+          50, "#f28cb1",
+          200, "#f59e0b",
+          1000, "#dc2626",
+        ],
+        "circle-stroke-width": 2,
+        "circle-stroke-color": "#ffffff",
+        "circle-opacity": [
           "interpolate",
           ["linear"],
           ["zoom"],
-          HEATMAP_MAX_ZOOM,
-          2,
-          14,
-          6,
+          HEATMAP_MAX_ZOOM, 0,
+          HEATMAP_MAX_ZOOM + 0.5, 0.85,
+          CLUSTER_MAX_ZOOM - 0.5, 0.85,
+          CLUSTER_MAX_ZOOM, 0,
         ],
+      },
+    });
+
+    // Cluster count labels
+    map.addLayer({
+      id: "incidents-cluster-count",
+      type: "symbol",
+      source: "incidents-clusters",
+      filter: ["has", "point_count"],
+      minzoom: HEATMAP_MAX_ZOOM,
+      maxzoom: CLUSTER_MAX_ZOOM,
+      layout: {
+        "text-field": "{point_count_abbreviated}",
+        "text-font": ["Open Sans Regular"],
+        "text-size": 12,
+      },
+      paint: {
+        "text-color": "#333",
+        "text-opacity": [
+          "interpolate",
+          ["linear"],
+          ["zoom"],
+          HEATMAP_MAX_ZOOM, 0,
+          HEATMAP_MAX_ZOOM + 0.5, 1,
+          CLUSTER_MAX_ZOOM - 0.5, 1,
+          CLUSTER_MAX_ZOOM, 0,
+        ],
+      },
+    });
+
+    // Unclustered points from Supercluster (individual at cluster zoom)
+    map.addLayer({
+      id: "incidents-cluster-unclustered",
+      type: "circle",
+      source: "incidents-clusters",
+      filter: ["!", ["has", "point_count"]],
+      minzoom: HEATMAP_MAX_ZOOM,
+      maxzoom: CLUSTER_MAX_ZOOM,
+      paint: {
+        "circle-radius": 4,
         "circle-color": [
           "match",
           ["get", "severity"],
-          5,
-          severityColor(5),
-          4,
-          severityColor(4),
-          3,
-          severityColor(3),
-          2,
-          severityColor(2),
+          5, severityColor(5),
+          4, severityColor(4),
+          3, severityColor(3),
+          2, severityColor(2),
           severityColor(1),
         ],
         "circle-stroke-width": 0.5,
@@ -126,15 +187,65 @@ export default function CrimeMap({ onBoundsChange }: CrimeMapProps) {
           "interpolate",
           ["linear"],
           ["zoom"],
-          HEATMAP_MAX_ZOOM,
-          0.4,
-          CLUSTER_MAX_ZOOM,
-          0.85,
+          HEATMAP_MAX_ZOOM, 0,
+          HEATMAP_MAX_ZOOM + 0.5, 0.7,
+          CLUSTER_MAX_ZOOM - 0.5, 0.7,
+          CLUSTER_MAX_ZOOM, 0,
         ],
       },
     });
 
-    // Popup on click
+    // -- Layer 3: Individual points from PMTiles (zoom 12+) --
+    map.addLayer({
+      id: "incidents-points",
+      type: "circle",
+      source: "incidents",
+      "source-layer": "incidents",
+      minzoom: CLUSTER_MAX_ZOOM,
+      paint: {
+        "circle-radius": [
+          "interpolate",
+          ["linear"],
+          ["zoom"],
+          CLUSTER_MAX_ZOOM, 3,
+          16, 8,
+        ],
+        "circle-color": [
+          "match",
+          ["get", "severity"],
+          5, severityColor(5),
+          4, severityColor(4),
+          3, severityColor(3),
+          2, severityColor(2),
+          severityColor(1),
+        ],
+        "circle-stroke-width": 0.5,
+        "circle-stroke-color": "#ffffff",
+        "circle-opacity": [
+          "interpolate",
+          ["linear"],
+          ["zoom"],
+          CLUSTER_MAX_ZOOM, 0,
+          CLUSTER_MAX_ZOOM + 0.5, 0.85,
+        ],
+      },
+    });
+
+    // -- Click handlers --
+
+    // Click cluster to zoom in
+    map.on("click", "incidents-cluster-circles", async (e) => {
+      const feature = e.features?.[0];
+      if (!feature || !feature.properties) return;
+
+      const clusterId = feature.properties.cluster_id as number;
+      const coords = (feature.geometry as GeoJSON.Point).coordinates as [number, number];
+
+      const zoom = await getExpansionZoom(clusterId);
+      map.easeTo({ center: coords, zoom: Math.min(zoom, CLUSTER_MAX_ZOOM) });
+    });
+
+    // Click individual point for popup (PMTiles layer)
     map.on("click", "incidents-points", (e) => {
       const feature = e.features?.[0];
       if (!feature || !feature.properties) return;
@@ -151,25 +262,35 @@ export default function CrimeMap({ onBoundsChange }: CrimeMapProps) {
           `<div class="text-sm">
             <div class="font-semibold">${props.subcategory ?? "Unknown"}</div>
             <div class="text-gray-600">${props.category ?? ""}</div>
+            ${props.desc ? `<div class="text-gray-500 text-xs mt-1">${props.desc}</div>` : ""}
             <div class="text-gray-500 text-xs mt-1">${props.date ?? ""}</div>
+            ${props.addr ? `<div class="text-gray-500 text-xs">${props.addr}</div>` : ""}
             <div class="text-gray-500 text-xs">${props.city ?? ""}, ${props.state ?? ""}</div>
           </div>`,
         )
         .addTo(map);
     });
 
-    map.on("mouseenter", "incidents-points", () => {
-      map.getCanvas().style.cursor = "pointer";
-    });
-    map.on("mouseleave", "incidents-points", () => {
-      map.getCanvas().style.cursor = "";
-    });
-  }, []);
+    // Cursor changes
+    for (const layerId of [
+      "incidents-cluster-circles",
+      "incidents-cluster-unclustered",
+      "incidents-points",
+    ]) {
+      map.on("mouseenter", layerId, () => {
+        map.getCanvas().style.cursor = "pointer";
+      });
+      map.on("mouseleave", layerId, () => {
+        map.getCanvas().style.cursor = "";
+      });
+    }
+  }, [getExpansionZoom]);
+
+  // -- Map initialization --
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
-    // Register PMTiles protocol
     const protocol = new Protocol();
     maplibregl.addProtocol("pmtiles", protocol.tile);
 
@@ -193,11 +314,33 @@ export default function CrimeMap({ onBoundsChange }: CrimeMapProps) {
     map.on("load", () => {
       setupLayers(map);
       setLoaded(true);
-      onBoundsChange?.(map.getBounds());
+
+      const bounds = map.getBounds();
+      const zoom = map.getZoom();
+      onBoundsChange?.(bounds, zoom);
+
+      // Trigger initial viewport update for the worker
+      const bbox: BBox = [
+        bounds.getWest(),
+        bounds.getSouth(),
+        bounds.getEast(),
+        bounds.getNorth(),
+      ];
+      updateViewport(bbox, zoom);
     });
 
     map.on("moveend", () => {
-      onBoundsChange?.(map.getBounds());
+      const bounds = map.getBounds();
+      const zoom = map.getZoom();
+      onBoundsChange?.(bounds, zoom);
+
+      const bbox: BBox = [
+        bounds.getWest(),
+        bounds.getSouth(),
+        bounds.getEast(),
+        bounds.getNorth(),
+      ];
+      updateViewport(bbox, zoom);
     });
 
     mapRef.current = map;
@@ -207,7 +350,33 @@ export default function CrimeMap({ onBoundsChange }: CrimeMapProps) {
       map.remove();
       mapRef.current = null;
     };
-  }, [setupLayers, onBoundsChange]);
+  }, [setupLayers, onBoundsChange, updateViewport]);
+
+  // -- Update cluster GeoJSON source when clusters change --
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !loaded) return;
+
+    const source = map.getSource("incidents-clusters") as maplibregl.GeoJSONSource | undefined;
+    if (source) {
+      source.setData(clusters);
+    }
+  }, [clusters, loaded]);
+
+  // -- Apply MapLibre filters on PMTiles layers when filters change --
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !loaded) return;
+
+    const filterExpr = buildIncidentFilter(filters);
+
+    // Apply to both heatmap and points layers
+    // null means "show all" — MapLibre accepts null to clear a filter
+    map.setFilter("incidents-heat", filterExpr);
+    map.setFilter("incidents-points", filterExpr);
+  }, [filters, loaded]);
 
   return (
     <div ref={containerRef} className="h-full w-full">

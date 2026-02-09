@@ -6,7 +6,6 @@ import IncidentSidebar from "./components/sidebar/IncidentSidebar";
 import { useFilters } from "./hooks/useFilters";
 
 export default function App() {
-  const [bounds, setBounds] = useState<maplibregl.LngLatBounds | null>(null);
   const [sidebarTab, setSidebarTab] = useState<"filters" | "incidents">(
     "filters",
   );
@@ -22,9 +21,13 @@ export default function App() {
     activeFilterCount,
   } = useFilters();
 
-  const handleBoundsChange = useCallback((newBounds: maplibregl.LngLatBounds) => {
-    setBounds(newBounds);
-  }, []);
+  const handleBoundsChange = useCallback(
+    (_bounds: maplibregl.LngLatBounds, _zoom: number) => {
+      // Bounds/zoom are consumed by the cluster worker inside CrimeMap.
+      // We could track them here if needed for other purposes.
+    },
+    [],
+  );
 
   return (
     <div className="flex h-screen w-screen overflow-hidden">
@@ -73,14 +76,14 @@ export default function App() {
               activeFilterCount={activeFilterCount}
             />
           ) : (
-            <IncidentSidebar bounds={bounds} />
+            <IncidentSidebar filters={filters} />
           )}
         </div>
       </div>
 
       {/* Map */}
       <div className="flex-1">
-        <CrimeMap onBoundsChange={handleBoundsChange} />
+        <CrimeMap filters={filters} onBoundsChange={handleBoundsChange} />
       </div>
     </div>
   );

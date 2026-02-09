@@ -19,6 +19,7 @@ moosicbox_json_utils = { workspace = true, features = ["database"] }
 switchy_database = { workspace = true, features = ["postgres-raw"] }
 
 clap = { workspace = true }
+chrono = { workspace = true }
 log = { workspace = true }
 pretty_env_logger = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }

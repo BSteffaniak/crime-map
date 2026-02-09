@@ -153,13 +153,23 @@ async fn export_geojsonseq(
         let lng: f64 = row.to_value("longitude").unwrap_or(0.0);
         let lat: f64 = row.to_value("latitude").unwrap_or(0.0);
         let id: i64 = row.to_value("id").unwrap_or(0);
+        let source_incident_id: String = row.to_value("source_incident_id").unwrap_or_default();
         let subcategory: String = row.to_value("subcategory").unwrap_or_default();
         let category: String = row.to_value("category").unwrap_or_default();
         let severity: i32 = row.to_value("severity").unwrap_or(1);
         let city: String = row.to_value("city").unwrap_or_default();
         let state: String = row.to_value("state").unwrap_or_default();
         let arrest_made: Option<bool> = row.to_value("arrest_made").unwrap_or(None);
-        let occurred_at: String = row.to_value("occurred_at").unwrap_or_default();
+        let description: Option<String> = row.to_value("description").unwrap_or(None);
+        let block_address: Option<String> = row.to_value("block_address").unwrap_or(None);
+
+        let occurred_at_naive: chrono::NaiveDateTime =
+            row.to_value("occurred_at").unwrap_or_default();
+        let occurred_at = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+            occurred_at_naive,
+            chrono::Utc,
+        )
+        .to_rfc3339();
 
         let feature = serde_json::json!({
             "type": "Feature",
@@ -169,6 +179,7 @@ async fn export_geojsonseq(
             },
             "properties": {
                 "id": id,
+                "sid": source_incident_id,
                 "subcategory": subcategory,
                 "category": category,
                 "severity": severity,
@@ -176,6 +187,8 @@ async fn export_geojsonseq(
                 "state": state,
                 "arrest": arrest_made,
                 "date": occurred_at,
+                "desc": description,
+                "addr": block_address,
             }
         });
 
