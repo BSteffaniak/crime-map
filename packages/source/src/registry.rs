@@ -17,6 +17,20 @@ const SOURCE_TOMLS: &[(&str, &str)] = &[
     ("dc", include_str!("../sources/dc.toml")),
     ("philly", include_str!("../sources/philly.toml")),
     ("boston", include_str!("../sources/boston.toml")),
+    (
+        "montgomery_county_md",
+        include_str!("../sources/montgomery_county_md.toml"),
+    ),
+    ("pg_county_md", include_str!("../sources/pg_county_md.toml")),
+    (
+        "pg_county_md_historical",
+        include_str!("../sources/pg_county_md_historical.toml"),
+    ),
+    ("baltimore_md", include_str!("../sources/baltimore_md.toml")),
+    (
+        "prince_william_va",
+        include_str!("../sources/prince_william_va.toml"),
+    ),
 ];
 
 /// Returns all configured source definitions, parsed from embedded TOML.
@@ -42,7 +56,7 @@ mod tests {
     #[test]
     fn loads_all_sources() {
         let sources = all_sources();
-        assert_eq!(sources.len(), 9);
+        assert_eq!(sources.len(), 14);
     }
 
     #[test]
@@ -51,7 +65,7 @@ mod tests {
         let mut ids: Vec<&str> = sources.iter().map(|s| s.id.as_str()).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 9);
+        assert_eq!(ids.len(), 14);
     }
 
     #[test]

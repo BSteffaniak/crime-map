@@ -1,0 +1,37 @@
+id = "pg_county_md"
+name = "Prince George's County Police Department (2023+)"
+city = "Prince George's County"
+state = "MD"
+output_filename = "pg_county_md_crimes.json"
+
+[fetcher]
+type = "socrata"
+api_url = "https://data.princegeorgescountymd.gov/resource/xjru-idbe.json"
+date_column = "date"
+page_size = 50000
+
+[fields]
+incident_id = ["incident_case_id"]
+crime_type = ["clearance_code_inc_type"]
+block_address = "street_address"
+location_type = "pgpd_sector"
+
+# Date is MM/DD/YYYY text format in this dataset
+[fields.occurred_at]
+type = "mdy_date"
+field = "date"
+
+[fields.lat]
+field = "latitude"
+type = "string"
+
+[fields.lng]
+field = "longitude"
+type = "string"
+
+[fields.description]
+type = "single"
+field = "clearance_code_inc_type"
+
+[fields.arrest]
+type = "none"

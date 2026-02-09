@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDateTime, NaiveTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use crime_map_source_models::NormalizedIncident;
 use serde::Deserialize;
 
@@ -147,6 +147,11 @@ pub enum DateExtractor {
     },
     /// Epoch milliseconds (f64).
     EpochMs {
+        /// JSON field name.
+        field: String,
+    },
+    /// `MM/DD/YYYY` text date (no time component).
+    MdyDate {
         /// JSON field name.
         field: String,
     },
@@ -290,6 +295,11 @@ impl DateExtractor {
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let nsecs = ((ms % 1000.0) * 1_000_000.0) as u32;
                 DateTime::from_timestamp(secs, nsecs)
+            }
+            Self::MdyDate { field } => {
+                let s = get_str(record, field)?;
+                let date = NaiveDate::parse_from_str(s, "%m/%d/%Y").ok()?;
+                Some(date.and_hms_opt(0, 0, 0)?.and_utc())
             }
         }
     }

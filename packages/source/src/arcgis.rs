@@ -86,10 +86,23 @@ pub async fn fetch_arcgis(
             }
 
             // ArcGIS wraps attributes in { "attributes": {...}, "geometry": {...} }
-            // We flatten to just the attributes for simpler deserialization
+            // We flatten to just the attributes, merging geometry x/y so that
+            // sources without explicit lat/lng attribute fields can reference
+            // the geometry coordinates directly.
             for feature in &features {
-                if let Some(attrs) = feature.get("attributes") {
-                    all_features.push(attrs.clone());
+                if let Some(attrs) = feature.get("attributes").cloned() {
+                    let mut record = attrs;
+                    if let Some(geom) = feature.get("geometry")
+                        && let Some(obj) = record.as_object_mut()
+                    {
+                        if let Some(x) = geom.get("x") {
+                            obj.insert("_geometry_x".to_string(), x.clone());
+                        }
+                        if let Some(y) = geom.get("y") {
+                            obj.insert("_geometry_y".to_string(), y.clone());
+                        }
+                    }
+                    all_features.push(record);
                 }
             }
 

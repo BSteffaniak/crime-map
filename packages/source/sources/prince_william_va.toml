@@ -1,0 +1,39 @@
+id = "prince_william_va"
+name = "Prince William County Police Department"
+city = "Prince William County"
+state = "VA"
+output_filename = "prince_william_va_crimes.json"
+
+[fetcher]
+type = "arcgis"
+query_urls = [
+  "https://services2.arcgis.com/0Q7l03Ls62VG0fy4/arcgis/rest/services/Public_Crime_Reports/FeatureServer/0/query",
+]
+page_size = 2000
+
+[fields]
+incident_id = ["CaseNo"]
+crime_type = ["IBRCode"]
+block_address = "BlockAddress"
+location_type = "City"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "OccurredOn"
+
+[fields.lat]
+field = "_geometry_y"
+type = "f64"
+
+[fields.lng]
+field = "_geometry_x"
+type = "f64"
+
+[fields.description]
+type = "combine"
+fields = ["IBRCode", "CrimeCategory"]
+separator = " ("
+
+[fields.arrest]
+type = "string_contains"
+field = "Disposition"

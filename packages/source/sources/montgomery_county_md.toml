@@ -1,0 +1,38 @@
+id = "montgomery_county_md"
+name = "Montgomery County Police Department"
+city = "Montgomery County"
+state = "MD"
+output_filename = "montgomery_county_md_crimes.json"
+
+[fetcher]
+type = "socrata"
+api_url = "https://data.montgomerycountymd.gov/resource/icn6-v9z3.json"
+date_column = "date"
+page_size = 50000
+
+[fields]
+incident_id = ["incident_id", "case_number"]
+crime_type = ["crimename3", "crimename2"]
+reported_at = "date"
+block_address = "location"
+location_type = "place"
+
+[fields.occurred_at]
+type = "simple"
+field = "start_date"
+
+[fields.lat]
+field = "latitude"
+type = "string"
+
+[fields.lng]
+field = "longitude"
+type = "string"
+
+[fields.description]
+type = "combine"
+fields = ["crimename2", "crimename3"]
+separator = ": "
+
+[fields.arrest]
+type = "none"

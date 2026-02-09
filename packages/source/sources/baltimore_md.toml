@@ -1,0 +1,38 @@
+id = "baltimore_pd"
+name = "Baltimore Police Department (Arrests)"
+city = "Baltimore"
+state = "MD"
+output_filename = "baltimore_arrests.json"
+
+[fetcher]
+type = "arcgis"
+query_urls = [
+  "https://egis.baltimorecity.gov/egis/rest/services/GeoSpatialized_Tables/Arrest/FeatureServer/0/query",
+]
+page_size = 1000
+
+[fields]
+incident_id = ["ArrestNumber", "IncidentNumber"]
+crime_type = ["IncidentOffence"]
+block_address = "ArrestLocation"
+location_type = "Neighborhood"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "ArrestDateTime"
+
+[fields.lat]
+field = "Latitude"
+type = "f64"
+
+[fields.lng]
+field = "Longitude"
+type = "f64"
+
+[fields.description]
+type = "combine"
+fields = ["IncidentOffence", "ChargeDescription"]
+separator = " - "
+
+[fields.arrest]
+type = "none"
