@@ -7,6 +7,8 @@
 //! Each data provider implements the [`CrimeSource`] trait to define how
 //! raw data is fetched, parsed, and mapped to the canonical taxonomy.
 
+pub mod arcgis;
+pub mod socrata;
 pub mod sources;
 pub mod type_mapping;
 

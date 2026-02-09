@@ -10,14 +10,11 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use crime_map_source_models::NormalizedIncident;
 use serde::Deserialize;
 
+use crate::socrata::{SocrataConfig, fetch_socrata};
 use crate::type_mapping::map_crime_type;
 use crate::{CrimeSource, FetchOptions, SourceError};
 
-/// Socrata API endpoint for Chicago crime data.
-const CHICAGO_API_URL: &str = "https://data.cityofchicago.org/resource/ijzp-q8t2.json";
-
-/// Batch size for paginated API requests.
-const PAGE_SIZE: u64 = 50_000;
+const API_URL: &str = "https://data.cityofchicago.org/resource/ijzp-q8t2.json";
 
 /// Chicago PD crime data source.
 pub struct ChicagoSource;
@@ -38,7 +35,7 @@ impl Default for ChicagoSource {
 
 /// Raw record shape from the Chicago Socrata API.
 #[derive(Debug, Deserialize)]
-struct ChicagoRecord {
+struct Record {
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
@@ -74,80 +71,33 @@ impl CrimeSource for ChicagoSource {
     }
 
     async fn fetch(&self, options: &FetchOptions) -> Result<PathBuf, SourceError> {
-        let output_path = options.output_dir.join("chicago_crimes.json");
-        std::fs::create_dir_all(&options.output_dir)?;
-
-        let client = reqwest::Client::new();
-        let mut all_records: Vec<serde_json::Value> = Vec::new();
-        let mut offset: u64 = 0;
-        let fetch_limit = options.limit.unwrap_or(u64::MAX);
-
-        loop {
-            let remaining = fetch_limit.saturating_sub(offset);
-            if remaining == 0 {
-                break;
-            }
-            let page_limit = remaining.min(PAGE_SIZE);
-
-            let mut url =
-                format!("{CHICAGO_API_URL}?$limit={page_limit}&$offset={offset}&$order=date DESC");
-
-            if let Some(since) = &options.since {
-                let since_str = since.format("%Y-%m-%dT%H:%M:%S").to_string();
-                url.push_str(&format!("&$where=date > '{since_str}'"));
-            }
-
-            log::info!("Fetching Chicago data: offset={offset}, limit={page_limit}");
-            let response = client.get(&url).send().await?;
-            let records: Vec<serde_json::Value> = response.json().await?;
-
-            let count = records.len() as u64;
-            if count == 0 {
-                break;
-            }
-
-            all_records.extend(records);
-            offset += count;
-
-            if count < page_limit {
-                break;
-            }
-        }
-
-        log::info!("Downloaded {} Chicago records total", all_records.len());
-        let json = serde_json::to_string(&all_records)?;
-        std::fs::write(&output_path, json)?;
-
-        Ok(output_path)
+        fetch_socrata(
+            &SocrataConfig {
+                api_url: API_URL,
+                date_column: "date",
+                output_filename: "chicago_crimes.json",
+                label: "Chicago",
+                page_size: 50_000,
+            },
+            options,
+        )
+        .await
     }
 
     async fn normalize(&self, raw_path: &Path) -> Result<Vec<NormalizedIncident>, SourceError> {
         let data = std::fs::read_to_string(raw_path)?;
-        let records: Vec<ChicagoRecord> = serde_json::from_str(&data)?;
-
-        let mut incidents = Vec::with_capacity(records.len());
+        let records: Vec<Record> = serde_json::from_str(&data)?;
+        let raw_count = records.len();
+        let mut incidents = Vec::with_capacity(raw_count);
 
         for record in records {
-            let Some(lat_str) = &record.latitude else {
+            let Some((latitude, longitude)) =
+                parse_lat_lng_str(record.latitude.as_ref(), record.longitude.as_ref())
+            else {
                 continue;
             };
-            let Some(lng_str) = &record.longitude else {
-                continue;
-            };
-
-            let Ok(latitude) = lat_str.parse::<f64>() else {
-                continue;
-            };
-            let Ok(longitude) = lng_str.parse::<f64>() else {
-                continue;
-            };
-
-            if latitude == 0.0 || longitude == 0.0 {
-                continue;
-            }
 
             let source_incident_id = record.case_number.or(record.id).unwrap_or_default();
-
             if source_incident_id.is_empty() {
                 continue;
             }
@@ -158,7 +108,7 @@ impl CrimeSource for ChicagoSource {
             let occurred_at = record
                 .date
                 .as_deref()
-                .and_then(parse_chicago_date)
+                .and_then(parse_socrata_date)
                 .unwrap_or_else(Utc::now);
 
             let description_text = record.description.unwrap_or_default();
@@ -188,22 +138,42 @@ impl CrimeSource for ChicagoSource {
         log::info!(
             "Normalized {} incidents from {} raw records",
             incidents.len(),
-            data.len()
+            raw_count
         );
-
         Ok(incidents)
     }
 }
 
-/// Parses the Chicago date format: `"2024-01-15T10:30:00.000"`.
-fn parse_chicago_date(s: &str) -> Option<DateTime<Utc>> {
-    // Try the standard format with fractional seconds
+/// Parses a Socrata datetime string (ISO 8601 with optional fractional seconds).
+pub(crate) fn parse_socrata_date(s: &str) -> Option<DateTime<Utc>> {
     if let Ok(naive) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f") {
         return Some(naive.and_utc());
     }
-    // Try without fractional seconds
     if let Ok(naive) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
         return Some(naive.and_utc());
     }
     None
+}
+
+/// Parses lat/lng from optional string fields. Returns `None` if missing,
+/// unparseable, or zero.
+pub(crate) fn parse_lat_lng_str(lat: Option<&String>, lng: Option<&String>) -> Option<(f64, f64)> {
+    let lat_str = lat?.as_str();
+    let lng_str = lng?.as_str();
+    let latitude = lat_str.parse::<f64>().ok()?;
+    let longitude = lng_str.parse::<f64>().ok()?;
+    if latitude == 0.0 || longitude == 0.0 {
+        return None;
+    }
+    Some((latitude, longitude))
+}
+
+/// Parses lat/lng from optional f64 fields.
+pub(crate) fn parse_lat_lng_f64(lat: Option<f64>, lng: Option<f64>) -> Option<(f64, f64)> {
+    let latitude = lat?;
+    let longitude = lng?;
+    if latitude == 0.0 || longitude == 0.0 {
+        return None;
+    }
+    Some((latitude, longitude))
 }

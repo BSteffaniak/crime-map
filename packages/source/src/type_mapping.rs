@@ -12,11 +12,21 @@ use crime_map_crime_models::CrimeSubcategory;
 /// This uses keyword-based matching and is case-insensitive. Returns
 /// [`CrimeSubcategory::Unknown`] when no mapping can be determined.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn map_crime_type(raw: &str) -> CrimeSubcategory {
     let lower = raw.to_lowercase();
 
     // ── Violent crimes (check before property since some overlap) ────
-    if contains_any(&lower, &["homicide", "murder", "manslaughter", "killing"]) {
+    if contains_any(
+        &lower,
+        &[
+            "homicide",
+            "murder",
+            "manslaughter",
+            "killing",
+            "negligent homicide",
+        ],
+    ) {
         return CrimeSubcategory::Homicide;
     }
     if contains_any(
@@ -28,6 +38,10 @@ pub fn map_crime_type(raw: &str) -> CrimeSubcategory {
             "criminal sexual",
             "crim sexual",
             "sex abuse",
+            "sexual abuse",
+            "forcible sex",
+            "sodomy",
+            "indecent exposure",
         ],
     ) {
         return CrimeSubcategory::SexualAssault;
@@ -37,16 +51,42 @@ pub fn map_crime_type(raw: &str) -> CrimeSubcategory {
     }
     if contains_any(
         &lower,
-        &["aggravated assault", "agg assault", "assault-aggravated"],
+        &[
+            "aggravated assault",
+            "agg assault",
+            "assault-aggravated",
+            "felony assault",
+            "assault w/dangerous weapon",
+        ],
     ) {
         return CrimeSubcategory::AggravatedAssault;
     }
-    if contains_any(&lower, &["simple assault", "assault", "battery"]) {
+    if contains_any(
+        &lower,
+        &[
+            "simple assault",
+            "assault",
+            "battery",
+            "intimidation",
+            "harassment",
+            "menacing",
+        ],
+    ) {
         return CrimeSubcategory::SimpleAssault;
     }
 
     // ── Property crimes ─────────────────────────────────────────────
-    if contains_any(&lower, &["burglary", "breaking and entering", "break-in"]) {
+    if contains_any(
+        &lower,
+        &[
+            "burglary",
+            "breaking and entering",
+            "break-in",
+            "burg",
+            "residential burglary",
+            "commercial burglary",
+        ],
+    ) {
         return CrimeSubcategory::Burglary;
     }
     if contains_any(
@@ -55,8 +95,12 @@ pub fn map_crime_type(raw: &str) -> CrimeSubcategory {
             "motor vehicle theft",
             "vehicle theft",
             "auto theft",
+            "auto-theft",
             "stolen vehicle",
             "carjacking",
+            "vehicle - stolen",
+            "grand theft auto",
+            "gta",
         ],
     ) {
         return CrimeSubcategory::MotorVehicleTheft;
@@ -70,6 +114,10 @@ pub fn map_crime_type(raw: &str) -> CrimeSubcategory {
             "pickpocket",
             "purse-snatching",
             "stolen property",
+            "petit larceny",
+            "grand larceny",
+            "pocket-picking",
+            "purse snatching",
         ],
     ) {
         return CrimeSubcategory::LarcenyTheft;
@@ -85,6 +133,7 @@ pub fn map_crime_type(raw: &str) -> CrimeSubcategory {
             "criminal mischief",
             "destruction of property",
             "malicious mischief",
+            "graffiti",
         ],
     ) {
         return CrimeSubcategory::Vandalism;
@@ -114,6 +163,8 @@ pub fn map_crime_type(raw: &str) -> CrimeSubcategory {
             "controlled substance",
             "marijuana",
             "cannabis",
+            "drug offense",
+            "drug violation",
         ],
     ) {
         return CrimeSubcategory::DrugPossession;
@@ -128,6 +179,7 @@ pub fn map_crime_type(raw: &str) -> CrimeSubcategory {
             "firearm",
             "concealed carry",
             "unlawful use of weapon",
+            "dangerous weapons",
         ],
     ) {
         return CrimeSubcategory::WeaponsViolation;
@@ -142,6 +194,7 @@ pub fn map_crime_type(raw: &str) -> CrimeSubcategory {
             "public intoxication",
             "disturbing the peace",
             "noise violation",
+            "liquor law",
         ],
     ) {
         return CrimeSubcategory::DisorderlyConduct;
@@ -165,7 +218,13 @@ pub fn map_crime_type(raw: &str) -> CrimeSubcategory {
     }
     if contains_any(
         &lower,
-        &["fraud", "deceptive practice", "bad check", "wire fraud"],
+        &[
+            "fraud",
+            "deceptive practice",
+            "bad check",
+            "wire fraud",
+            "credit card",
+        ],
     ) {
         return CrimeSubcategory::Fraud;
     }
@@ -181,6 +240,8 @@ pub fn map_crime_type(raw: &str) -> CrimeSubcategory {
             "non criminal",
             "informational",
             "found property",
+            "lost property",
+            "civil sidewalks",
         ],
     ) {
         return CrimeSubcategory::NonCriminal;
@@ -236,6 +297,88 @@ mod tests {
         assert_eq!(
             map_crime_type("SOME_UNRECOGNIZED_TYPE"),
             CrimeSubcategory::Unknown
+        );
+    }
+
+    #[test]
+    fn maps_la_types() {
+        assert_eq!(
+            map_crime_type("VEHICLE - STOLEN"),
+            CrimeSubcategory::MotorVehicleTheft
+        );
+        assert_eq!(
+            map_crime_type("BATTERY - SIMPLE ASSAULT"),
+            CrimeSubcategory::SimpleAssault
+        );
+        assert_eq!(
+            map_crime_type("BURGLARY FROM VEHICLE"),
+            CrimeSubcategory::Burglary
+        );
+    }
+
+    #[test]
+    fn maps_sf_types() {
+        assert_eq!(
+            map_crime_type("Drug Offense"),
+            CrimeSubcategory::DrugPossession
+        );
+        assert_eq!(
+            map_crime_type("Larceny Theft"),
+            CrimeSubcategory::LarcenyTheft
+        );
+        assert_eq!(
+            map_crime_type("Malicious Mischief"),
+            CrimeSubcategory::Vandalism
+        );
+        assert_eq!(
+            map_crime_type("Lost Property"),
+            CrimeSubcategory::NonCriminal
+        );
+    }
+
+    #[test]
+    fn maps_nyc_types() {
+        assert_eq!(
+            map_crime_type("PETIT LARCENY"),
+            CrimeSubcategory::LarcenyTheft
+        );
+        assert_eq!(
+            map_crime_type("GRAND LARCENY"),
+            CrimeSubcategory::LarcenyTheft
+        );
+        assert_eq!(
+            map_crime_type("FELONY ASSAULT"),
+            CrimeSubcategory::AggravatedAssault
+        );
+        assert_eq!(
+            map_crime_type("DANGEROUS WEAPONS"),
+            CrimeSubcategory::WeaponsViolation
+        );
+    }
+
+    #[test]
+    fn maps_dc_types() {
+        assert_eq!(
+            map_crime_type("ASSAULT W/DANGEROUS WEAPON"),
+            CrimeSubcategory::AggravatedAssault
+        );
+        assert_eq!(map_crime_type("HOMICIDE"), CrimeSubcategory::Homicide);
+        assert_eq!(map_crime_type("ROBBERY"), CrimeSubcategory::Robbery);
+    }
+
+    #[test]
+    fn maps_denver_types() {
+        assert_eq!(
+            map_crime_type("auto-theft"),
+            CrimeSubcategory::MotorVehicleTheft
+        );
+        assert_eq!(
+            map_crime_type("drug-alcohol"),
+            CrimeSubcategory::DrugPossession
+        );
+        assert_eq!(
+            map_crime_type("theft-from-motor-vehicle"),
+            CrimeSubcategory::LarcenyTheft
         );
     }
 }

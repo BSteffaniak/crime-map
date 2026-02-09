@@ -10,7 +10,15 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use crime_map_database::{db, queries, run_migrations};
+use crime_map_source::sources::boston::BostonSource;
 use crime_map_source::sources::chicago::ChicagoSource;
+use crime_map_source::sources::dc::DcSource;
+use crime_map_source::sources::denver::DenverSource;
+use crime_map_source::sources::la::LaSource;
+use crime_map_source::sources::nyc::NycSource;
+use crime_map_source::sources::philly::PhillySource;
+use crime_map_source::sources::seattle::SeattleSource;
+use crime_map_source::sources::sf::SfSource;
 use crime_map_source::{CrimeSource, FetchOptions};
 
 #[derive(Parser)]
@@ -89,7 +97,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Returns all configured data sources.
 fn all_sources() -> Vec<Box<dyn CrimeSource>> {
-    vec![Box::new(ChicagoSource::new())]
+    vec![
+        Box::new(ChicagoSource::new()),
+        Box::new(LaSource::new()),
+        Box::new(SfSource::new()),
+        Box::new(SeattleSource::new()),
+        Box::new(NycSource::new()),
+        Box::new(DenverSource::new()),
+        Box::new(DcSource::new()),
+        Box::new(PhillySource::new()),
+        Box::new(BostonSource::new()),
+    ]
 }
 
 /// Fetches, normalizes, and inserts data from a single source.
