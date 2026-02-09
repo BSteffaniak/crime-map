@@ -60,8 +60,8 @@ pub enum FetcherConfig {
     },
     /// `ArcGIS` REST API (`resultOffset`/`resultRecordCount`).
     Arcgis {
-        /// Base query URL.
-        query_url: String,
+        /// Query URLs (one per layer/year).
+        query_urls: Vec<String>,
         /// Records per page.
         page_size: u64,
         /// Optional WHERE clause.
@@ -367,13 +367,13 @@ impl CrimeSource for SourceDefinition {
                 .await
             }
             FetcherConfig::Arcgis {
-                query_url,
+                query_urls,
                 page_size,
                 where_clause,
             } => {
                 fetch_arcgis(
                     &ArcGisConfig {
-                        query_url,
+                        query_urls,
                         output_filename: &self.output_filename,
                         label: &self.name,
                         page_size: *page_size,

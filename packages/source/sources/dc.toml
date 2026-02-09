@@ -6,7 +6,13 @@ output_filename = "dc_crimes.json"
 
 [fetcher]
 type = "arcgis"
-query_url = "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/8/query"
+# Per-year layers: DC publishes each year as a separate MapServer layer.
+# Layer 41 = 2026, Layer 7 = 2025, Layer 6 = 2024.
+query_urls = [
+  "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/41/query",
+  "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/7/query",
+  "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/6/query",
+]
 page_size = 2000
 
 [fields]
