@@ -2,7 +2,8 @@
 //!
 //! Handles paginated fetching from `ArcGIS` `FeatureServer` or `MapServer`
 //! endpoints. Supports multiple query URLs (e.g., one per year/layer) and
-//! merges results into a single output file. Used by DC.
+//! merges results into a single output file. Used by DC, Baltimore, and
+//! Prince William County.
 
 use std::path::PathBuf;
 
@@ -24,6 +25,25 @@ pub struct ArcGisConfig<'a> {
     pub where_clause: Option<&'a str>,
 }
 
+/// Queries each `ArcGIS` layer for its record count using
+/// `returnCountOnly=true`. Returns `None` if any count request fails
+/// (non-fatal).
+async fn query_arcgis_counts(
+    client: &reqwest::Client,
+    config: &ArcGisConfig<'_>,
+    where_clause: &str,
+) -> Option<u64> {
+    let mut total: u64 = 0;
+    for query_url in config.query_urls {
+        let url = format!("{query_url}?where={where_clause}&returnCountOnly=true&f=json");
+        let response = client.get(&url).send().await.ok()?;
+        let body: serde_json::Value = response.json().await.ok()?;
+        let count = body.get("count")?.as_u64()?;
+        total += count;
+    }
+    Some(total)
+}
+
 /// Fetches all features from one or more `ArcGIS` REST endpoints with
 /// pagination, writes to a JSON file, and returns the output path.
 ///
@@ -34,6 +54,7 @@ pub struct ArcGisConfig<'a> {
 /// # Errors
 ///
 /// Returns [`SourceError`] if HTTP requests or file I/O fail.
+#[allow(clippy::too_many_lines)]
 pub async fn fetch_arcgis(
     config: &ArcGisConfig<'_>,
     options: &FetchOptions,
@@ -45,8 +66,34 @@ pub async fn fetch_arcgis(
     let mut all_features: Vec<serde_json::Value> = Vec::new();
     let fetch_limit = options.limit.unwrap_or(u64::MAX);
     let where_clause = config.where_clause.unwrap_or("1=1");
+    let num_layers = config.query_urls.len();
 
-    for query_url in config.query_urls {
+    // ── Pre-fetch count ──────────────────────────────────────────────
+    let total_available = query_arcgis_counts(&client, config, where_clause).await;
+
+    if let Some(total) = total_available {
+        let layers_str = if num_layers > 1 {
+            format!(" across {num_layers} layers")
+        } else {
+            String::new()
+        };
+        if fetch_limit >= total {
+            log::info!(
+                "{}: {total} records available{layers_str} (fetching all)",
+                config.label
+            );
+        } else {
+            log::info!(
+                "{}: {total} records available{layers_str} (fetching up to {fetch_limit})",
+                config.label
+            );
+        }
+    }
+
+    // ── Paginated fetch ──────────────────────────────────────────────
+    let will_fetch = total_available.map(|t| fetch_limit.min(t));
+
+    for (layer_idx, query_url) in config.query_urls.iter().enumerate() {
         let mut offset: u64 = 0;
         let remaining_global =
             fetch_limit.saturating_sub(u64::try_from(all_features.len()).unwrap_or(u64::MAX));
@@ -66,11 +113,20 @@ pub async fn fetch_arcgis(
                 "{query_url}?where={where_clause}&outFields=*&f=json&outSR=4326&resultRecordCount={page_limit}&resultOffset={offset}"
             );
 
-            log::info!(
-                "Fetching {} data: offset={offset}, limit={page_limit} (url={})",
-                config.label,
-                query_url
-            );
+            if let Some(target) = will_fetch {
+                let layer_label = if num_layers > 1 {
+                    format!("layer {}/{num_layers} — ", layer_idx + 1)
+                } else {
+                    String::new()
+                };
+                log::info!(
+                    "{}: {layer_label}{total_fetched} / {target} fetched",
+                    config.label,
+                );
+            } else {
+                log::info!("{}: offset={offset}, limit={page_limit}", config.label,);
+            }
+
             let response = client.get(&url).send().await?;
             let body: serde_json::Value = response.json().await?;
 
@@ -123,9 +179,9 @@ pub async fn fetch_arcgis(
     }
 
     log::info!(
-        "Downloaded {} {} records total",
+        "{}: download complete — {} records",
+        config.label,
         all_features.len(),
-        config.label
     );
     let json = serde_json::to_string(&all_features)?;
     std::fs::write(&output_path, json)?;

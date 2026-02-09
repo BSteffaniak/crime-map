@@ -23,6 +23,37 @@ pub struct CartoConfig<'a> {
     pub page_size: u64,
 }
 
+/// Queries the Carto SQL endpoint for the total record count.
+/// Returns `None` if the count request fails (non-fatal).
+async fn query_carto_count(
+    client: &reqwest::Client,
+    config: &CartoConfig<'_>,
+    options: &FetchOptions,
+) -> Option<u64> {
+    let query = options.since.as_ref().map_or_else(
+        || format!("SELECT count(*) as count FROM {}", config.table_name),
+        |since| {
+            let since_str = since.format("%Y-%m-%d %H:%M:%S").to_string();
+            format!(
+                "SELECT count(*) as count FROM {} WHERE {} > '{since_str}'",
+                config.table_name, config.date_column
+            )
+        },
+    );
+    let response = client
+        .get(config.api_url)
+        .query(&[("q", &query)])
+        .send()
+        .await
+        .ok()?;
+    let body: serde_json::Value = response.json().await.ok()?;
+    body.get("rows")?
+        .as_array()?
+        .first()?
+        .get("count")?
+        .as_u64()
+}
+
 /// Fetches all records from a Carto SQL endpoint with pagination, writes to
 /// a JSON file, and returns the output path.
 ///
@@ -40,6 +71,23 @@ pub async fn fetch_carto(
     let mut all_records: Vec<serde_json::Value> = Vec::new();
     let mut offset: u64 = 0;
     let fetch_limit = options.limit.unwrap_or(u64::MAX);
+
+    // ── Pre-fetch count ──────────────────────────────────────────────
+    let total_available = query_carto_count(&client, config, options).await;
+
+    if let Some(total) = total_available {
+        if fetch_limit >= total {
+            log::info!("{}: {total} records available (fetching all)", config.label);
+        } else {
+            log::info!(
+                "{}: {total} records available (fetching up to {fetch_limit})",
+                config.label
+            );
+        }
+    }
+
+    // ── Paginated fetch ──────────────────────────────────────────────
+    let will_fetch = total_available.map(|t| fetch_limit.min(t));
 
     loop {
         let remaining = fetch_limit.saturating_sub(offset);
@@ -71,10 +119,16 @@ pub async fn fetch_carto(
             },
         );
 
-        log::info!(
-            "Fetching {} data: offset={offset}, limit={page_limit}",
-            config.label
-        );
+        if let Some(target) = will_fetch {
+            log::info!(
+                "{}: page {} — {offset} / {target} fetched",
+                config.label,
+                (offset / config.page_size) + 1,
+            );
+        } else {
+            log::info!("{}: offset={offset}, limit={page_limit}", config.label);
+        }
+
         let response = client
             .get(config.api_url)
             .query(&[("q", &query)])
@@ -102,9 +156,9 @@ pub async fn fetch_carto(
     }
 
     log::info!(
-        "Downloaded {} {} records total",
+        "{}: download complete — {} records",
+        config.label,
         all_records.len(),
-        config.label
     );
     let json = serde_json::to_string(&all_records)?;
     std::fs::write(&output_path, json)?;

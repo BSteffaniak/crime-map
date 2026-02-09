@@ -24,6 +24,28 @@ pub struct SocrataConfig<'a> {
     pub page_size: u64,
 }
 
+/// Queries the Socrata `$select=count(*)` endpoint to get the total number of
+/// records available. Returns `None` if the count request fails (non-fatal).
+async fn query_socrata_count(
+    client: &reqwest::Client,
+    config: &SocrataConfig<'_>,
+    options: &FetchOptions,
+) -> Option<u64> {
+    let mut url = format!("{}?$select=count(*) as count", config.api_url);
+    if let Some(since) = &options.since {
+        let since_str = since.format("%Y-%m-%dT%H:%M:%S").to_string();
+        write!(url, "&$where={} > '{since_str}'", config.date_column).unwrap();
+    }
+    let response = client.get(&url).send().await.ok()?;
+    let body: serde_json::Value = response.json().await.ok()?;
+    body.as_array()?
+        .first()?
+        .get("count")?
+        .as_str()?
+        .parse::<u64>()
+        .ok()
+}
+
 /// Fetches all records from a Socrata dataset with pagination, writes to a
 /// JSON file, and returns the output path.
 ///
@@ -42,6 +64,23 @@ pub async fn fetch_socrata(
     let mut offset: u64 = 0;
     let fetch_limit = options.limit.unwrap_or(u64::MAX);
 
+    // ── Pre-fetch count ──────────────────────────────────────────────
+    let total_available = query_socrata_count(&client, config, options).await;
+
+    if let Some(total) = total_available {
+        if fetch_limit >= total {
+            log::info!("{}: {total} records available (fetching all)", config.label);
+        } else {
+            log::info!(
+                "{}: {total} records available (fetching up to {fetch_limit})",
+                config.label
+            );
+        }
+    }
+
+    // ── Paginated fetch ──────────────────────────────────────────────
+    let will_fetch = total_available.map(|t| fetch_limit.min(t));
+
     loop {
         let remaining = fetch_limit.saturating_sub(offset);
         if remaining == 0 {
@@ -59,10 +98,16 @@ pub async fn fetch_socrata(
             write!(url, "&$where={} > '{since_str}'", config.date_column).unwrap();
         }
 
-        log::info!(
-            "Fetching {} data: offset={offset}, limit={page_limit}",
-            config.label
-        );
+        if let Some(target) = will_fetch {
+            log::info!(
+                "{}: page {} — {offset} / {target} fetched",
+                config.label,
+                (offset / config.page_size) + 1,
+            );
+        } else {
+            log::info!("{}: offset={offset}, limit={page_limit}", config.label);
+        }
+
         let response = client.get(&url).send().await?;
         let records: Vec<serde_json::Value> = response.json().await?;
 
@@ -80,9 +125,9 @@ pub async fn fetch_socrata(
     }
 
     log::info!(
-        "Downloaded {} {} records total",
+        "{}: download complete — {} records",
+        config.label,
         all_records.len(),
-        config.label
     );
     let json = serde_json::to_string(&all_records)?;
     std::fs::write(&output_path, json)?;

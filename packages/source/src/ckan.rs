@@ -39,6 +39,8 @@ pub async fn fetch_ckan(
     let mut all_records: Vec<serde_json::Value> = Vec::new();
     let mut offset: u64 = 0;
     let fetch_limit = options.limit.unwrap_or(u64::MAX);
+    let mut total_available: Option<u64> = None;
+    let mut will_fetch: Option<u64> = None;
 
     loop {
         let remaining = fetch_limit.saturating_sub(offset);
@@ -47,10 +49,15 @@ pub async fn fetch_ckan(
         }
         let page_limit = remaining.min(config.page_size);
 
-        log::info!(
-            "Fetching {} data: offset={offset}, limit={page_limit}",
-            config.label
-        );
+        if let Some(target) = will_fetch {
+            log::info!(
+                "{}: page {} — {offset} / {target} fetched",
+                config.label,
+                (offset / config.page_size) + 1,
+            );
+        } else {
+            log::info!("{}: fetching first page...", config.label);
+        }
 
         let response = client
             .get(config.api_url)
@@ -62,6 +69,27 @@ pub async fn fetch_ckan(
             .send()
             .await?;
         let body: serde_json::Value = response.json().await?;
+
+        // CKAN includes the total count in every response — capture it from
+        // the first page so we can log progress on subsequent pages.
+        if total_available.is_none() {
+            total_available = body
+                .get("result")
+                .and_then(|r| r.get("total"))
+                .and_then(serde_json::Value::as_u64);
+
+            if let Some(total) = total_available {
+                will_fetch = Some(fetch_limit.min(total));
+                if fetch_limit >= total {
+                    log::info!("{}: {total} records available (fetching all)", config.label);
+                } else {
+                    log::info!(
+                        "{}: {total} records available (fetching up to {fetch_limit})",
+                        config.label
+                    );
+                }
+            }
+        }
 
         let records = body
             .get("result")
@@ -84,9 +112,9 @@ pub async fn fetch_ckan(
     }
 
     log::info!(
-        "Downloaded {} {} records total",
+        "{}: download complete — {} records",
+        config.label,
         all_records.len(),
-        config.label
     );
     let json = serde_json::to_string(&all_records)?;
     std::fs::write(&output_path, json)?;
