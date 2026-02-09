@@ -1,0 +1,21 @@
+services:
+  crime-map-postgres:
+    container_name: crime-map-postgres
+    image: postgis/postgis:17-3.5
+    platform: linux/amd64
+    volumes:
+      - db_data:/var/lib/postgresql/crime-map/data
+    ports:
+      - '5440:5432'
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=crime_map
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  db_data:

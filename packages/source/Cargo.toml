@@ -1,0 +1,25 @@
+[package]
+authors = { workspace = true }
+description = "Crime data source trait and normalization logic"
+edition = { workspace = true }
+license = { workspace = true }
+name = "crime_map_source"
+repository = { workspace = true }
+version = "0.1.0"
+
+[dependencies]
+crime_map_crime_models = { workspace = true }
+crime_map_source_models = { workspace = true }
+
+async-trait = { workspace = true }
+chrono = { workspace = true }
+log = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[features]
+default = []
+fail-on-warnings = []

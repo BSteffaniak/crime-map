@@ -1,0 +1,20 @@
+[package]
+authors = { workspace = true }
+description = "Data source configuration types and normalized incident format"
+edition = { workspace = true }
+license = { workspace = true }
+name = "crime_map_source_models"
+repository = { workspace = true }
+version = "0.1.0"
+
+[dependencies]
+crime_map_crime_models = { workspace = true }
+
+chrono = { workspace = true }
+serde = { workspace = true }
+strum = { workspace = true, features = ["derive"] }
+strum_macros = { workspace = true }
+
+[features]
+default = []
+fail-on-warnings = []

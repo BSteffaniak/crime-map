@@ -1,0 +1,100 @@
+[workspace]
+members = [
+  "packages/crime/models",
+  "packages/source/models",
+  "packages/source",
+  "packages/database/models",
+  "packages/database",
+  "packages/ingest/models",
+  "packages/ingest",
+  "packages/generate",
+  "packages/server/models",
+  "packages/server",
+]
+
+resolver = "2"
+
+[profile.release]
+codegen-units = 1
+lto = false
+opt-level = 3
+strip = "symbols"
+
+[profile.debug-release]
+debug = true
+inherits = "release"
+strip = "none"
+
+[workspace.package]
+authors = ["Braden Steffaniak"]
+edition = "2024"
+license = "MPL-2.0"
+repository = "https://github.com/BSteffaniak/crime-map"
+
+[workspace.dependencies]
+# Internal crime-map
+crime_map_crime_models = { default-features = false, path = "packages/crime/models" }
+crime_map_source_models = { default-features = false, path = "packages/source/models" }
+crime_map_source = { default-features = false, path = "packages/source" }
+crime_map_database_models = { default-features = false, path = "packages/database/models" }
+crime_map_database = { default-features = false, path = "packages/database" }
+crime_map_ingest_models = { default-features = false, path = "packages/ingest/models" }
+crime_map_ingest = { default-features = false, path = "packages/ingest" }
+crime_map_generate = { default-features = false, path = "packages/generate" }
+crime_map_server_models = { default-features = false, path = "packages/server/models" }
+crime_map_server = { default-features = false, path = "packages/server" }
+
+# MoosicBox / Switchy (git references)
+moosicbox_assert = { git = "https://github.com/MoosicBox/MoosicBox.git", branch = "master", default-features = false }
+moosicbox_profiles = { git = "https://github.com/MoosicBox/MoosicBox.git", branch = "master", default-features = false }
+moosicbox_json_utils = { git = "https://github.com/MoosicBox/MoosicBox.git", branch = "master", default-features = false }
+
+switchy_async = { git = "https://github.com/MoosicBox/MoosicBox.git", branch = "master", default-features = false }
+switchy_database = { git = "https://github.com/MoosicBox/MoosicBox.git", branch = "master", default-features = false }
+switchy_database_connection = { git = "https://github.com/MoosicBox/MoosicBox.git", branch = "master", default-features = false }
+switchy_env = { git = "https://github.com/MoosicBox/MoosicBox.git", branch = "master", default-features = false }
+switchy_schema = { git = "https://github.com/MoosicBox/MoosicBox.git", branch = "master", default-features = false }
+switchy_time = { git = "https://github.com/MoosicBox/MoosicBox.git", branch = "master", default-features = false }
+
+# External dependencies
+actix-web = { version = "4.12.1", default-features = false }
+actix-cors = { version = "0.7.1", default-features = false }
+actix-files = { version = "0.6.9", default-features = false }
+actix-rt = { version = "2.11.0", default-features = false }
+
+async-trait = { version = "0.1.89", default-features = false }
+chrono = { version = "0.4.42", default-features = false, features = [
+  "clock",
+  "serde",
+] }
+clap = { version = "4.5.53", default-features = false, features = [
+  "derive",
+  "std",
+] }
+deadpool-postgres = { version = "0.14.1", default-features = false }
+futures = { version = "0.3.31", default-features = false }
+log = { version = "0.4.29", default-features = false, features = [
+  "release_max_level_trace",
+] }
+pretty_env_logger = { version = "0.5.0", default-features = false }
+regex = { version = "1.12.2", default-features = false }
+reqwest = { version = "0.12.28", default-features = false, features = [
+  "rustls-tls",
+  "json",
+] }
+serde = { version = "1.0.228", default-features = false, features = ["derive"] }
+serde_json = { version = "1.0.148", default-features = false }
+strum = { version = "0.27.2", default-features = false, features = ["derive"] }
+strum_macros = { version = "0.27.2", default-features = false }
+thiserror = { version = "2.0.17", default-features = false }
+tokio = { version = "1.48.0", default-features = false }
+tokio-postgres = { version = "0.7.15", default-features = false, features = [
+  "with-chrono-0_4",
+] }
+postgres-protocol = { version = "0.6.9", default-features = false }
+uuid = { version = "1.19.0", default-features = false, features = ["v4"] }
+include_dir = { version = "0.7.4", default-features = false }
+sha2 = { version = "0.10.9", default-features = false }
+hex = { version = "0.4.3", default-features = false }
+csv = { version = "1.3.1", default-features = false }
+indicatif = { version = "0.17.11", default-features = false }

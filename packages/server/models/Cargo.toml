@@ -1,0 +1,19 @@
+[package]
+authors = { workspace = true }
+description = "API request and response types for the crime map server"
+edition = { workspace = true }
+license = { workspace = true }
+name = "crime_map_server_models"
+repository = { workspace = true }
+version = "0.1.0"
+
+[dependencies]
+crime_map_crime_models = { workspace = true }
+crime_map_database_models = { workspace = true }
+
+chrono = { workspace = true }
+serde = { workspace = true }
+
+[features]
+default = []
+fail-on-warnings = []

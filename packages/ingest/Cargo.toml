@@ -1,0 +1,37 @@
+[package]
+authors = { workspace = true }
+description = "CLI tool for ingesting crime data from public sources"
+edition = { workspace = true }
+license = { workspace = true }
+name = "crime_map_ingest"
+repository = { workspace = true }
+version = "0.1.0"
+
+[[bin]]
+name = "crime_map_ingest"
+path = "src/main.rs"
+
+[dependencies]
+crime_map_crime_models = { workspace = true }
+crime_map_source_models = { workspace = true }
+crime_map_source = { workspace = true }
+crime_map_database_models = { workspace = true }
+crime_map_database = { workspace = true }
+crime_map_ingest_models = { workspace = true }
+switchy_database = { workspace = true, features = ["postgres-raw"] }
+
+chrono = { workspace = true }
+clap = { workspace = true }
+csv = { workspace = true }
+indicatif = { workspace = true }
+log = { workspace = true }
+pretty_env_logger = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+
+[features]
+default = []
+fail-on-warnings = []

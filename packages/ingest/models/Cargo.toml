@@ -1,0 +1,18 @@
+[package]
+authors = { workspace = true }
+description = "Ingestion configuration, progress, and result types"
+edition = { workspace = true }
+license = { workspace = true }
+name = "crime_map_ingest_models"
+repository = { workspace = true }
+version = "0.1.0"
+
+[dependencies]
+crime_map_source_models = { workspace = true }
+
+chrono = { workspace = true }
+serde = { workspace = true }
+
+[features]
+default = []
+fail-on-warnings = []

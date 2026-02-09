@@ -1,0 +1,11 @@
+[build]
+rustflags = ["--cfg", "tokio_unstable"]
+target-dir = "target"
+
+[alias]
+server = "run --package crime_map_server --release"
+"server:debug" = "run --package crime_map_server"
+ingest = "run --package crime_map_ingest --release --"
+"ingest:debug" = "run --package crime_map_ingest --"
+generate = "run --package crime_map_generate --release --"
+"generate:debug" = "run --package crime_map_generate --"

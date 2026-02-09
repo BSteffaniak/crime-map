@@ -1,0 +1,19 @@
+[package]
+authors = { workspace = true }
+description = "Database row types and query parameter definitions"
+edition = { workspace = true }
+license = { workspace = true }
+name = "crime_map_database_models"
+repository = { workspace = true }
+version = "0.1.0"
+
+[dependencies]
+crime_map_crime_models = { workspace = true }
+crime_map_source_models = { workspace = true }
+
+chrono = { workspace = true }
+serde = { workspace = true }
+
+[features]
+default = []
+fail-on-warnings = []

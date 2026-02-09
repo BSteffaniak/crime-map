@@ -1,0 +1,28 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Environment
+.env.local
+
+# Data files (generated, large)
+data/generated/
+data/downloads/
+
+# Node/Frontend
+app/node_modules/
+app/dist/
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Nix
+result
+.direnv
