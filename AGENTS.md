@@ -7,8 +7,8 @@
 - **Rust lint**: `cargo clippy --all-targets`
 - **Rust lint enforce no warnings**: `cargo clippy --all-targets -- -D warnings`
 - **Format**: `cargo fmt` (Rust) for ALL packages in the workspace
-- **Frontend dev**: `cd app && pnpm dev`
-- **Frontend build**: `cd app && pnpm build`
+- **Frontend dev**: `cd app && bun dev`
+- **Frontend build**: `cd app && bun run build`
 - **Database**: `docker compose up -d` (PostGIS on port 5440)
 - **Ingest data**: `cargo ingest sync-all`
 - **Generate tiles**: `cargo generate all`
@@ -72,6 +72,7 @@
 
 ### Frontend
 
+- **Package manager**: Bun (never pnpm or npm)
 - Vite + React + TypeScript + TailwindCSS
 - MapLibre GL JS for map rendering
 - PMTiles for vector tile serving (generated offline via tippecanoe)

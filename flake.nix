@@ -65,7 +65,7 @@
               postgresql # psql client
               docker-compose
               nodejs
-              nodePackages.pnpm
+              bun
             ])
             ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
               pkgs.clang
@@ -79,7 +79,7 @@
               echo "  docker compose up -d     Start PostGIS (port 5440)"
               echo "  cargo build              Build all Rust packages"
               echo "  cargo run -p crime_map_server  Start API server"
-              echo "  cd app && pnpm dev       Start frontend dev server"
+              echo "  cd app && bun dev       Start frontend dev server"
 
               ${pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
                 export CC="${pkgs.clang}/bin/clang"
