@@ -226,13 +226,33 @@ pub struct CityInfo {
     pub incident_count: Option<u64>,
 }
 
+/// Parameters for searching available locations by name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchLocationsParams {
+    /// Location name to search for (partial match supported).
+    pub query: String,
+    /// Optional state filter to narrow results.
+    pub state: Option<String>,
+}
+
+/// Result of a location search.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchLocationsResult {
+    /// Matching locations with incident counts.
+    pub matches: Vec<CityInfo>,
+    /// Human-readable description of the search.
+    pub description: String,
+}
+
 /// Enumeration of all tool names the AI agent can invoke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolName {
     /// Count incidents in a geographic area with filters.
     CountIncidents,
-    /// Rank census tracts or cities by safety.
+    /// Rank neighborhoods or areas by safety.
     RankAreas,
     /// Compare crime between two time periods.
     ComparePeriods,
@@ -242,6 +262,8 @@ pub enum ToolName {
     TopCrimeTypes,
     /// List available cities in the dataset.
     ListCities,
+    /// Search for locations by name.
+    SearchLocations,
 }
 
 impl std::fmt::Display for ToolName {
@@ -253,6 +275,7 @@ impl std::fmt::Display for ToolName {
             Self::GetTrend => write!(f, "get_trend"),
             Self::TopCrimeTypes => write!(f, "top_crime_types"),
             Self::ListCities => write!(f, "list_cities"),
+            Self::SearchLocations => write!(f, "search_locations"),
         }
     }
 }
@@ -262,6 +285,7 @@ impl std::fmt::Display for ToolName {
 /// These are used in the LLM tool-use protocol to describe what
 /// tools the agent can invoke.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn tool_definitions() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
@@ -359,6 +383,18 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
                     "state": { "type": "string", "description": "Optional state filter (two-letter abbreviation)" }
                 },
                 "required": []
+            }
+        }),
+        serde_json::json!({
+            "name": "search_locations",
+            "description": "Search for available locations in the dataset by name. Use this when a user asks about a specific city, town, or area to find matching or related jurisdictions. Returns cities and counties whose names match the query. If no exact match is found, use your geographic knowledge to search for parent jurisdictions (e.g., search for the county name if a small town isn't found).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Location name to search for (partial match supported, e.g., 'Capitol Heights', 'Prince George')" },
+                    "state": { "type": "string", "description": "Optional two-letter state filter to narrow results" }
+                },
+                "required": ["query"]
             }
         }),
     ]

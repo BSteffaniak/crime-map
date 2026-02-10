@@ -6,8 +6,9 @@
 
 use crime_map_analytics_models::{
     CityInfo, ComparePeriodParams, ComparePeriodResult, CountIncidentsParams, CountIncidentsResult,
-    ListCitiesParams, ListCitiesResult, RankAreaParams, RankAreaResult, TimeGranularity,
-    TopCrimeTypesParams, TopCrimeTypesResult, TrendParams, TrendResult,
+    ListCitiesParams, ListCitiesResult, RankAreaParams, RankAreaResult, SearchLocationsParams,
+    SearchLocationsResult, TimeGranularity, TopCrimeTypesParams, TopCrimeTypesResult, TrendParams,
+    TrendResult,
 };
 use crime_map_geography_models::{AreaStats, CategoryCount, PeriodComparison, TimeSeriesPoint};
 use moosicbox_json_utils::database::ToValue as _;
@@ -716,4 +717,103 @@ pub async fn list_cities(
         .collect();
 
     Ok(ListCitiesResult { cities })
+}
+
+/// Searches for available locations matching a query string.
+///
+/// Performs a case-insensitive partial match against city/county names
+/// in the dataset. Returns matching locations with incident counts,
+/// ordered by relevance (exact matches first, then prefix matches,
+/// then substring matches).
+///
+/// # Errors
+///
+/// Returns [`AnalyticsError`] if the database query fails.
+pub async fn search_locations(
+    db: &dyn Database,
+    params: &SearchLocationsParams,
+) -> Result<SearchLocationsResult, AnalyticsError> {
+    let query = params.query.trim();
+
+    if query.is_empty() {
+        return Ok(SearchLocationsResult {
+            matches: Vec::new(),
+            description: "Empty search query".to_string(),
+        });
+    }
+
+    // Build query with optional state filter.
+    // Use ILIKE for case-insensitive matching. Rank results by match quality:
+    //   1. Exact match (city ILIKE query)
+    //   2. Prefix match (city ILIKE query%)
+    //   3. Substring match (city ILIKE %query%)
+    let mut idx = 1u32;
+    let mut frags = Vec::new();
+    let mut db_params: Vec<DatabaseValue> = Vec::new();
+
+    // The query value is used in the ILIKE pattern
+    let like_pattern = format!("%{query}%");
+    frags.push(format!("city ILIKE ${idx}"));
+    db_params.push(DatabaseValue::String(like_pattern));
+    idx += 1;
+
+    if let Some(ref state) = params.state {
+        frags.push(format!("state = ${idx}"));
+        db_params.push(DatabaseValue::String(state.to_uppercase()));
+        idx += 1;
+    }
+
+    let _ = idx;
+    let where_clause = frags.join(" AND ");
+
+    // Use a CASE expression to sort by match quality
+    let exact_pattern = query.to_string();
+    let prefix_pattern = format!("{query}%");
+    db_params.push(DatabaseValue::String(exact_pattern));
+    db_params.push(DatabaseValue::String(prefix_pattern));
+
+    let exact_idx = idx;
+    let prefix_idx = idx + 1;
+
+    let sql = format!(
+        "SELECT city, state, COUNT(*) as cnt,
+                CASE
+                    WHEN city ILIKE ${exact_idx} THEN 0
+                    WHEN city ILIKE ${prefix_idx} THEN 1
+                    ELSE 2
+                END as match_rank
+         FROM crime_incidents
+         WHERE city IS NOT NULL AND city != '' AND {where_clause}
+         GROUP BY city, state
+         ORDER BY match_rank, cnt DESC
+         LIMIT 10"
+    );
+
+    let rows = db.query_raw_params(&sql, &db_params).await?;
+
+    let matches: Vec<CityInfo> = rows
+        .iter()
+        .map(|row| {
+            let city: String = row.to_value("city").unwrap_or_default();
+            let state: String = row.to_value("state").unwrap_or_default();
+            let cnt: i64 = row.to_value("cnt").unwrap_or(0);
+            CityInfo {
+                city,
+                state,
+                #[allow(clippy::cast_sign_loss)]
+                incident_count: Some(cnt as u64),
+            }
+        })
+        .collect();
+
+    let description = if matches.is_empty() {
+        format!("No locations found matching \"{query}\"")
+    } else {
+        format!("Found {} location(s) matching \"{query}\"", matches.len())
+    };
+
+    Ok(SearchLocationsResult {
+        matches,
+        description,
+    })
 }

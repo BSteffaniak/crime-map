@@ -6,7 +6,7 @@
 use crime_map_analytics::tools;
 use crime_map_analytics_models::{
     ComparePeriodParams, CountIncidentsParams, ListCitiesParams, RankAreaParams,
-    TopCrimeTypesParams, TrendParams, tool_definitions,
+    SearchLocationsParams, TopCrimeTypesParams, TrendParams, tool_definitions,
 };
 use switchy_database::Database;
 use tokio::sync::mpsc;
@@ -48,7 +48,7 @@ fn build_system_prompt(context: &AgentContext) -> String {
 4. For "safest neighborhood" questions, use rank_areas with safestFirst=true.
 5. When comparing cities, call count_incidents for each city separately.
 6. Provide specific numbers and percentages in your answers.
-7. If the user asks about a city not in the dataset, tell them it's not available.
+7. If the user asks about a location not directly in the dataset, use search_locations to find matching jurisdictions. If no match is found, use your geographic knowledge to search for parent jurisdictions — many small cities and towns are covered by county-level data (e.g., Capitol Heights, MD is covered by Prince George's County, MD). Try the county or metropolitan area name before telling the user data is unavailable.
 8. Format your final answer in clear markdown with key statistics bolded.
 9. Today's date is {today}. When users say "2025", "this year", "last year", etc., interpret relative to today.
 10. Use category names in SCREAMING_SNAKE_CASE when calling tools (e.g., "VIOLENT", "PROPERTY").
@@ -250,6 +250,11 @@ async fn execute_tool(
             let result = tools::list_cities(db, &params).await?;
             Ok(serde_json::to_value(result).unwrap_or_default())
         }
+        "search_locations" => {
+            let params: SearchLocationsParams = serde_json::from_value(input.clone())?;
+            let result = tools::search_locations(db, &params).await?;
+            Ok(serde_json::to_value(result).unwrap_or_default())
+        }
         other => Err(AiError::Provider {
             message: format!("Unknown tool: {other}"),
         }),
@@ -284,6 +289,15 @@ fn summarize_tool_result(tool_name: &str, result: &serde_json::Value) -> String 
         "list_cities" => {
             let count = result["cities"].as_array().map_or(0, Vec::len);
             format!("{count} cities available")
+        }
+        "search_locations" => {
+            let count = result["matches"].as_array().map_or(0, Vec::len);
+            let desc = result["description"].as_str().unwrap_or("");
+            if count > 0 {
+                format!("{count} location(s) found: {desc}")
+            } else {
+                desc.to_string()
+            }
         }
         _ => "Result received".to_string(),
     }
