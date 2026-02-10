@@ -1,0 +1,32 @@
+[package]
+authors = { workspace = true }
+description = "CLI tool for discovering and tracking crime data sources"
+edition = { workspace = true }
+license = { workspace = true }
+name = "crime_map_discover"
+repository = { workspace = true }
+version = "0.1.0"
+
+[dependencies]
+crime_map_discover_models = { workspace = true }
+crime_map_scraper = { workspace = true }
+crime_map_source = { workspace = true }
+
+chrono = { workspace = true }
+clap = { workspace = true }
+log = { workspace = true }
+moosicbox_json_utils = { workspace = true, features = ["database", "rusqlite"] }
+pretty_env_logger = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+switchy_database = { workspace = true, features = ["sqlite-rusqlite"] }
+switchy_database_connection = { workspace = true, features = [
+  "sqlite-rusqlite",
+] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+
+[features]
+default = []
+fail-on-warnings = []

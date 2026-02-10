@@ -15,6 +15,9 @@ members = [
   "packages/generate",
   "packages/server/models",
   "packages/server",
+  "packages/discover/models",
+  "packages/discover",
+  "packages/scraper",
 ]
 
 resolver = "2"
@@ -53,6 +56,9 @@ crime_map_geography = { default-features = false, path = "packages/geography" }
 crime_map_analytics_models = { default-features = false, path = "packages/analytics/models" }
 crime_map_analytics = { default-features = false, path = "packages/analytics" }
 crime_map_ai = { default-features = false, path = "packages/ai" }
+crime_map_discover_models = { default-features = false, path = "packages/discover/models" }
+crime_map_discover = { default-features = false, path = "packages/discover" }
+crime_map_scraper = { default-features = false, path = "packages/scraper" }
 
 # MoosicBox / Switchy (git references)
 moosicbox_assert = { git = "https://github.com/MoosicBox/MoosicBox.git", branch = "master", default-features = false }
@@ -117,6 +123,8 @@ hex = { version = "0.4.3", default-features = false }
 csv = { version = "1.4.0", default-features = false }
 duckdb = { version = "1.4.4", default-features = false }
 indicatif = { version = "0.17.11", default-features = false }
+scraper = { version = "0.25.0", default-features = false }
+flate2 = { version = "1.1.9", default-features = false, features = ["default"] }
 
 # AWS SDK (optional, for Bedrock provider)
 aws-sdk-bedrockruntime = { version = "1.124.0", default-features = false }

@@ -1,0 +1,17 @@
+[package]
+authors = { workspace = true }
+description = "Shared types for crime data source discovery"
+edition = { workspace = true }
+license = { workspace = true }
+name = "crime_map_discover_models"
+repository = { workspace = true }
+version = "0.1.0"
+
+[dependencies]
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+
+[features]
+default = []
+fail-on-warnings = []
