@@ -1,0 +1,39 @@
+id = "chesterfield_county_pd"
+name = "Chesterfield County Police Department"
+city = "Chesterfield"
+state = "VA"
+output_filename = "chesterfield_crimes.json"
+
+[fetcher]
+type = "arcgis"
+query_urls = [
+  "https://services3.arcgis.com/TsynfzBSE6sXfoLq/arcgis/rest/services/PSDWIncidents_ProdA/FeatureServer/1/query",
+]
+page_size = 2000
+date_column = "RecordDate"
+
+[fields]
+incident_id = ["RMSIncidentID"]
+crime_type = ["IncidentorOffenseTypeCategory", "IncidentorOffenseCrimeCategory"]
+block_address = "DimLocationAddress"
+location_type = "MagisterialDistrictName"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "RecordDate"
+
+[fields.lat]
+field = "_geometry_y"
+type = "f64"
+
+[fields.lng]
+field = "_geometry_x"
+type = "f64"
+
+[fields.description]
+type = "combine"
+fields = ["IncidentorOffenseTypeCategory", "IncidentorOffenseTypeDesc"]
+separator = ": "
+
+[fields.arrest]
+type = "none"

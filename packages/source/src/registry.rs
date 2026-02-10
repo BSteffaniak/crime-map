@@ -4,7 +4,7 @@
 //! at compile time via [`include_str!`]. Adding a new source is as simple as
 //! creating a new TOML file and adding it to the list below.
 
-use crate::source_def::{SourceDefinition, parse_source_toml};
+use crate::source_def::{parse_source_toml, SourceDefinition};
 
 /// TOML configs embedded at compile time.
 const SOURCE_TOMLS: &[(&str, &str)] = &[
@@ -72,6 +72,11 @@ const SOURCE_TOMLS: &[(&str, &str)] = &[
     ("tampa", include_str!("../sources/tampa.toml")),
     ("las_vegas", include_str!("../sources/las_vegas.toml")),
     ("raleigh", include_str!("../sources/raleigh.toml")),
+    ("lynchburg_va", include_str!("../sources/lynchburg_va.toml")),
+    (
+        "chesterfield_va",
+        include_str!("../sources/chesterfield_va.toml"),
+    ),
     // ── Carto sources ────────────────────────────────────────────────
     ("philly", include_str!("../sources/philly.toml")),
     // ── CKAN sources ─────────────────────────────────────────────────
@@ -87,7 +92,7 @@ const SOURCE_TOMLS: &[(&str, &str)] = &[
 
 /// Total number of configured sources (used in tests).
 #[cfg(test)]
-const EXPECTED_SOURCE_COUNT: usize = 40;
+const EXPECTED_SOURCE_COUNT: usize = 42;
 
 /// Returns all configured source definitions, parsed from embedded TOML.
 ///

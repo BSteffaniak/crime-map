@@ -1,0 +1,37 @@
+id = "lynchburg_pd"
+name = "Lynchburg Police Department"
+city = "Lynchburg"
+state = "VA"
+output_filename = "lynchburg_crimes.json"
+
+[fetcher]
+type = "arcgis"
+query_urls = [
+  "https://mapviewer.lynchburgva.gov/arcgis/rest/services/OpenData/ODPDynamic/MapServer/6/query",
+]
+page_size = 2000
+date_column = "date_occu"
+
+[fields]
+incident_id = ["inci_id"]
+crime_type = ["chrgdesc"]
+block_address = "Location_Concatenated"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "date_occu"
+
+[fields.lat]
+field = "_geometry_y"
+type = "f64"
+
+[fields.lng]
+field = "_geometry_x"
+type = "f64"
+
+[fields.description]
+type = "single"
+field = "chrgdesc"
+
+[fields.arrest]
+type = "none"
