@@ -1,0 +1,42 @@
+id = "baltimore_county_pd"
+name = "Baltimore County Police Department (2021+)"
+city = "Baltimore County"
+state = "MD"
+output_filename = "baltimore_county_crimes.json"
+
+[fetcher]
+type = "arcgis"
+# MapServer table (no geometry layer) — queries use the same ArcGIS REST API.
+query_urls = [
+  "https://bcgisdata.baltimorecountymd.gov/arcgis/rest/services/PublicSafety/PublicCrime/MapServer/0/query",
+]
+page_size = 2000
+date_column = "OCCURREDON"
+
+[fields]
+incident_id = ["OBJECTID"]
+crime_type = ["IBR_CATEGORY", "OFFENSE"]
+block_address = "OBF_ADDRESS"
+location_type = "BASE_PRECINCT"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "OCCURREDON"
+
+# Coordinates are stored as string attributes (no geometry layer).
+# OBF_XCOORD is longitude, OBF_YCOORD is latitude.
+[fields.lat]
+field = "OBF_YCOORD"
+type = "string"
+
+[fields.lng]
+field = "OBF_XCOORD"
+type = "string"
+
+[fields.description]
+type = "combine"
+fields = ["IBR_CATEGORY", "OFFENSE"]
+separator = ": "
+
+[fields.arrest]
+type = "none"

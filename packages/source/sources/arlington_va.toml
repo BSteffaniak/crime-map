@@ -1,0 +1,36 @@
+id = "arlington_pd"
+name = "Arlington County Police Department (2015-2022)"
+city = "Arlington"
+state = "VA"
+output_filename = "arlington_crimes.json"
+
+[fetcher]
+type = "odata"
+api_url = "https://datahub-v2.arlingtonva.us/api/Police/IncidentLog"
+date_column = "firstReportDtm"
+page_size = 5000
+
+[fields]
+incident_id = ["reportNbr"]
+crime_type = ["offenseDsc"]
+block_address = "locationName"
+
+[fields.occurred_at]
+type = "simple"
+field = "firstReportDtm"
+
+# Coordinates are string fields that need parsing.
+[fields.lat]
+field = "latitudeCrd"
+type = "string"
+
+[fields.lng]
+field = "longitudeCrd"
+type = "string"
+
+[fields.description]
+type = "single"
+field = "offenseDsc"
+
+[fields.arrest]
+type = "none"

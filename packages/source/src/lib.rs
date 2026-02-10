@@ -15,6 +15,7 @@
 pub mod arcgis;
 pub mod carto;
 pub mod ckan;
+pub mod odata;
 pub mod parsing;
 pub mod registry;
 pub mod socrata;

@@ -4,7 +4,7 @@
 //! at compile time via [`include_str!`]. Adding a new source is as simple as
 //! creating a new TOML file and adding it to the list below.
 
-use crate::source_def::{parse_source_toml, SourceDefinition};
+use crate::source_def::{SourceDefinition, parse_source_toml};
 
 /// TOML configs embedded at compile time.
 const SOURCE_TOMLS: &[(&str, &str)] = &[
@@ -49,9 +49,22 @@ const SOURCE_TOMLS: &[(&str, &str)] = &[
     ("dc", include_str!("../sources/dc.toml")),
     ("baltimore_md", include_str!("../sources/baltimore_md.toml")),
     (
+        "baltimore_county_md",
+        include_str!("../sources/baltimore_county_md.toml"),
+    ),
+    (
+        "baltimore_nibrs_md",
+        include_str!("../sources/baltimore_nibrs_md.toml"),
+    ),
+    (
+        "baltimore_historical_md",
+        include_str!("../sources/baltimore_historical_md.toml"),
+    ),
+    (
         "prince_william_va",
         include_str!("../sources/prince_william_va.toml"),
     ),
+    ("fairfax_va", include_str!("../sources/fairfax_va.toml")),
     ("atlanta", include_str!("../sources/atlanta.toml")),
     ("detroit", include_str!("../sources/detroit.toml")),
     ("charlotte", include_str!("../sources/charlotte.toml")),
@@ -68,11 +81,13 @@ const SOURCE_TOMLS: &[(&str, &str)] = &[
         "pittsburgh_current",
         include_str!("../sources/pittsburgh_current.toml"),
     ),
+    // ── OData sources ────────────────────────────────────────────────
+    ("arlington_va", include_str!("../sources/arlington_va.toml")),
 ];
 
 /// Total number of configured sources (used in tests).
 #[cfg(test)]
-const EXPECTED_SOURCE_COUNT: usize = 35;
+const EXPECTED_SOURCE_COUNT: usize = 40;
 
 /// Returns all configured source definitions, parsed from embedded TOML.
 ///

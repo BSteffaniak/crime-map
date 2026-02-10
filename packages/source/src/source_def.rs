@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use crate::arcgis::{ArcGisConfig, fetch_arcgis};
 use crate::carto::{CartoConfig, fetch_carto};
 use crate::ckan::{CkanConfig, fetch_ckan};
+use crate::odata::{ODataConfig, fetch_odata};
 use crate::parsing::parse_socrata_date;
 use crate::socrata::{SocrataConfig, fetch_socrata};
 use crate::type_mapping::map_crime_type;
@@ -89,6 +90,15 @@ pub enum FetcherConfig {
         /// Table name to query.
         table_name: String,
         /// Date column for ordering and filtering.
+        date_column: String,
+        /// Records per page.
+        page_size: u64,
+    },
+    /// OData-style REST API (`$top`/`$skip`/`$orderby`).
+    Odata {
+        /// Base API URL (response is a bare JSON array).
+        api_url: String,
+        /// Date column for ordering and `$filter`.
         date_column: String,
         /// Records per page.
         page_size: u64,
@@ -413,7 +423,8 @@ impl SourceDefinition {
             FetcherConfig::Socrata { page_size, .. }
             | FetcherConfig::Arcgis { page_size, .. }
             | FetcherConfig::Ckan { page_size, .. }
-            | FetcherConfig::Carto { page_size, .. } => *page_size,
+            | FetcherConfig::Carto { page_size, .. }
+            | FetcherConfig::Odata { page_size, .. } => *page_size,
         }
     }
 
@@ -504,6 +515,23 @@ impl SourceDefinition {
                         &CartoConfig {
                             api_url,
                             table_name,
+                            date_column,
+                            label: &name,
+                            page_size: *page_size,
+                        },
+                        &options,
+                        &tx,
+                    )
+                    .await
+                }
+                FetcherConfig::Odata {
+                    api_url,
+                    date_column,
+                    page_size,
+                } => {
+                    fetch_odata(
+                        &ODataConfig {
+                            api_url,
                             date_column,
                             label: &name,
                             page_size: *page_size,

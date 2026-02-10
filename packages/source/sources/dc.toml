@@ -7,11 +7,30 @@ output_filename = "dc_crimes.json"
 [fetcher]
 type = "arcgis"
 # Per-year layers: DC publishes each year as a separate MapServer layer.
-# Layer 41 = 2026, Layer 7 = 2025, Layer 6 = 2024.
 query_urls = [
+  # 2026-2024
   "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/41/query",
   "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/7/query",
   "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/6/query",
+  # 2023-2018
+  "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/5/query",
+  "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/4/query",
+  "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/3/query",
+  "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/2/query",
+  "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/1/query",
+  "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/0/query",
+  # 2017-2012
+  "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/38/query",
+  "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/26/query",
+  "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/27/query",
+  "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/40/query",
+  "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/10/query",
+  "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/11/query",
+  # 2011-2008
+  "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/35/query",
+  "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/34/query",
+  "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/33/query",
+  "https://maps2.dcgis.dc.gov/dcgis/rest/services/FEEDS/MPD/MapServer/32/query",
 ]
 page_size = 1000
 date_column = "REPORT_DAT"

@@ -1,0 +1,44 @@
+id = "fairfax_county_pd"
+name = "Fairfax County Police Department"
+city = "Fairfax County"
+state = "VA"
+output_filename = "fairfax_county_crimes.json"
+
+[fetcher]
+type = "arcgis"
+# Three NIBRS category layers: Person (layer 1), Property (layer 0), Society (layer 0).
+# Updated hourly via FCPOD (Fairfax County Police Open Data).
+query_urls = [
+  "https://services9.arcgis.com/kYvfX7YK8OobHItA/arcgis/rest/services/CrimesAgainstPerson_CST_FCPOD_FC/FeatureServer/1/query",
+  "https://services9.arcgis.com/kYvfX7YK8OobHItA/arcgis/rest/services/CrimesAgainstProperty_CST_FCPOD_FC/FeatureServer/0/query",
+  "https://services9.arcgis.com/kYvfX7YK8OobHItA/arcgis/rest/services/CrimesAgainstSociety_FCPOD_FC/FeatureServer/0/query",
+]
+page_size = 2000
+date_column = "BeginDate"
+
+[fields]
+incident_id = ["IncidentNumber"]
+crime_type = ["Category", "IBRCode"]
+location_type = "DISTRICT"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "BeginDate"
+
+# All three layers return native ArcGIS geometry points in WGS84.
+[fields.lat]
+field = "_geometry_y"
+type = "f64"
+
+[fields.lng]
+field = "_geometry_x"
+type = "f64"
+
+# Description field varies by layer: Person has ViolationCodeReference_Descript,
+# Property and Society have EventDescription. Fallback chain handles both.
+[fields.description]
+type = "fallback_chain"
+fields = ["ViolationCodeReference_Descript", "EventDescription", "Category"]
+
+[fields.arrest]
+type = "none"

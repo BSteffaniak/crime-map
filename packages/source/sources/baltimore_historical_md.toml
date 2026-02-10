@@ -1,0 +1,40 @@
+id = "baltimore_historical_pd"
+name = "Baltimore Police Department Part 1 (2012-2023)"
+city = "Baltimore"
+state = "MD"
+output_filename = "baltimore_historical_crimes.json"
+
+[fetcher]
+type = "arcgis"
+query_urls = [
+  "https://services1.arcgis.com/UWYHeuuJISiGmgXx/arcgis/rest/services/Part1_Crime/FeatureServer/0/query",
+]
+page_size = 2000
+date_column = "CrimeDateTime"
+# Filter out records with missing coordinates (lat/lng = 0).
+where_clause = "Latitude <> 0 AND Longitude <> 0"
+
+[fields]
+incident_id = ["CCNO"]
+crime_type = ["Description", "CrimeCode"]
+block_address = "Location"
+location_type = "Neighborhood"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "CrimeDateTime"
+
+[fields.lat]
+field = "Latitude"
+type = "f64"
+
+[fields.lng]
+field = "Longitude"
+type = "f64"
+
+[fields.description]
+type = "single"
+field = "Description"
+
+[fields.arrest]
+type = "none"

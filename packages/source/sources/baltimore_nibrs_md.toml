@@ -1,0 +1,39 @@
+id = "baltimore_nibrs_pd"
+name = "Baltimore Police Department NIBRS (2022+)"
+city = "Baltimore"
+state = "MD"
+output_filename = "baltimore_nibrs_crimes.json"
+
+[fetcher]
+type = "arcgis"
+query_urls = [
+  "https://services1.arcgis.com/UWYHeuuJISiGmgXx/arcgis/rest/services/NIBRS_GroupA_Crime_Data/FeatureServer/0/query",
+]
+page_size = 2000
+date_column = "CrimeDateTime"
+
+[fields]
+incident_id = ["CCNumber"]
+crime_type = ["Description", "CrimeCode"]
+block_address = "Location"
+location_type = "Neighborhood"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "CrimeDateTime"
+
+# Latitude/Longitude are string fields in this dataset.
+[fields.lat]
+field = "Latitude"
+type = "string"
+
+[fields.lng]
+field = "Longitude"
+type = "string"
+
+[fields.description]
+type = "single"
+field = "Description"
+
+[fields.arrest]
+type = "none"
