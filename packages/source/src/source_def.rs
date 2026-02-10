@@ -181,6 +181,16 @@ pub enum CoordType {
     String,
     /// Coordinate is a JSON number (f64).
     F64,
+    /// Extract latitude from a `GeoJSON` Point or Socrata location object.
+    ///
+    /// `GeoJSON`: `{"type":"Point","coordinates":[-96.88,32.71]}` → returns `32.71`
+    /// Socrata: `{"latitude":"32.71","longitude":"-96.88"}` → returns `32.71`
+    PointLat,
+    /// Extract longitude from a `GeoJSON` Point or Socrata location object.
+    ///
+    /// `GeoJSON`: `{"type":"Point","coordinates":[-96.88,32.71]}` → returns `-96.88`
+    /// Socrata: `{"latitude":"32.71","longitude":"-96.88"}` → returns `-96.88`
+    PointLng,
 }
 
 /// How to build the description string.
@@ -251,6 +261,32 @@ impl CoordField {
                 s.parse::<f64>().ok()
             }
             CoordType::F64 => get_f64(record, &self.field),
+            CoordType::PointLat => {
+                let obj = record.get(&self.field)?;
+                // GeoJSON Point: {"type":"Point","coordinates":[lng, lat]}
+                if let Some(coords) = obj.get("coordinates").and_then(|c| c.as_array()) {
+                    return coords.get(1)?.as_f64();
+                }
+                // Socrata location: {"latitude":"32.71","longitude":"-96.88"}
+                obj.get("latitude").and_then(|v| {
+                    v.as_str()
+                        .and_then(|s| s.parse().ok())
+                        .or_else(|| v.as_f64())
+                })
+            }
+            CoordType::PointLng => {
+                let obj = record.get(&self.field)?;
+                // GeoJSON Point: {"type":"Point","coordinates":[lng, lat]}
+                if let Some(coords) = obj.get("coordinates").and_then(|c| c.as_array()) {
+                    return coords.first()?.as_f64();
+                }
+                // Socrata location: {"latitude":"32.71","longitude":"-96.88"}
+                obj.get("longitude").and_then(|v| {
+                    v.as_str()
+                        .and_then(|s| s.parse().ok())
+                        .or_else(|| v.as_f64())
+                })
+            }
         }
     }
 }
@@ -666,5 +702,45 @@ mod tests {
         assert_eq!(def.id, "chicago_pd");
         assert_eq!(def.city, "Chicago");
         assert_eq!(def.state, "IL");
+    }
+
+    #[test]
+    fn extracts_geojson_point_coords() {
+        let record = serde_json::json!({
+            "location": {
+                "type": "Point",
+                "coordinates": [-122.1994, 37.79242]
+            }
+        });
+        let lat_field = CoordField {
+            field: "location".to_string(),
+            coord_type: CoordType::PointLat,
+        };
+        let lng_field = CoordField {
+            field: "location".to_string(),
+            coord_type: CoordType::PointLng,
+        };
+        assert!((lat_field.extract(&record).unwrap() - 37.79242).abs() < f64::EPSILON);
+        assert!((lng_field.extract(&record).unwrap() - -122.1994).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn extracts_socrata_location_coords() {
+        let record = serde_json::json!({
+            "geocoded_column": {
+                "latitude": "32.714063262",
+                "longitude": "-96.888799822"
+            }
+        });
+        let lat_field = CoordField {
+            field: "geocoded_column".to_string(),
+            coord_type: CoordType::PointLat,
+        };
+        let lng_field = CoordField {
+            field: "geocoded_column".to_string(),
+            coord_type: CoordType::PointLng,
+        };
+        assert!((lat_field.extract(&record).unwrap() - 32.714_063_262).abs() < 1e-6);
+        assert!((lng_field.extract(&record).unwrap() - -96.888_799_822).abs() < 1e-6);
     }
 }

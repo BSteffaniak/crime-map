@@ -1,0 +1,36 @@
+id = "everett_pd"
+name = "Everett Police Department"
+city = "Everett"
+state = "WA"
+output_filename = "everett_crimes.json"
+
+[fetcher]
+type = "socrata"
+api_url = "https://data.everettwa.gov/resource/f6vp-3svh.json"
+date_column = "datetimereceived"
+page_size = 50000
+
+[fields]
+incident_id = ["eventnumber"]
+crime_type = ["incidenttype"]
+block_address = "block"
+location_type = "district"
+
+[fields.occurred_at]
+type = "simple"
+field = "datetimereceived"
+
+[fields.lat]
+field = "geomcoordinate"
+type = "point_lat"
+
+[fields.lng]
+field = "geomcoordinate"
+type = "point_lng"
+
+[fields.description]
+type = "single"
+field = "incidenttype"
+
+[fields.arrest]
+type = "none"

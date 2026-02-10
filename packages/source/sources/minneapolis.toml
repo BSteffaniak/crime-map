@@ -1,0 +1,39 @@
+id = "minneapolis_pd"
+name = "Minneapolis Police Department"
+city = "Minneapolis"
+state = "MN"
+output_filename = "minneapolis_crimes.json"
+
+[fetcher]
+type = "arcgis"
+query_urls = [
+  "https://services.arcgis.com/afSMGVsC7QlRK1kZ/arcgis/rest/services/Crime_Data/FeatureServer/0/query",
+]
+page_size = 2000
+date_column = "Occurred_Date"
+
+[fields]
+incident_id = ["Case_Number"]
+crime_type = ["Offense", "Offense_Category"]
+block_address = "Address"
+location_type = "Neighborhood"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "Occurred_Date"
+
+[fields.lat]
+field = "Latitude"
+type = "f64"
+
+[fields.lng]
+field = "Longitude"
+type = "f64"
+
+[fields.description]
+type = "combine"
+fields = ["Offense_Category", "Offense"]
+separator = ": "
+
+[fields.arrest]
+type = "none"

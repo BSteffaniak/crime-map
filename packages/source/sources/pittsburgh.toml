@@ -1,0 +1,38 @@
+id = "pittsburgh_pd"
+name = "Pittsburgh Bureau of Police (2005-2023)"
+city = "Pittsburgh"
+state = "PA"
+output_filename = "pittsburgh_crimes.json"
+
+[fetcher]
+type = "ckan"
+api_url = "https://data.wprdc.org/api/3/action/datastore_search"
+resource_ids = ["044f2016-1dfd-4ab0-bc1e-065da05fca2e"]
+page_size = 10000
+date_column = "INCIDENTTIME"
+
+[fields]
+incident_id = ["CCR", "PK"]
+crime_type = ["INCIDENTHIERARCHYDESC", "OFFENSES"]
+block_address = "INCIDENTLOCATION"
+location_type = "INCIDENTNEIGHBORHOOD"
+
+[fields.occurred_at]
+type = "simple"
+field = "INCIDENTTIME"
+
+# X is longitude, Y is latitude in the WPRDC dataset.
+[fields.lat]
+field = "Y"
+type = "f64"
+
+[fields.lng]
+field = "X"
+type = "f64"
+
+[fields.description]
+type = "fallback_chain"
+fields = ["INCIDENTHIERARCHYDESC", "OFFENSES"]
+
+[fields.arrest]
+type = "none"

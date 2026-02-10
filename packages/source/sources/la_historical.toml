@@ -1,0 +1,38 @@
+id = "la_pd_historical"
+name = "Los Angeles Police Department (2010-2019)"
+city = "Los Angeles"
+state = "CA"
+output_filename = "la_crimes_historical.json"
+
+[fetcher]
+type = "socrata"
+api_url = "https://data.lacity.org/resource/63jg-8b9z.json"
+date_column = "date_occ"
+page_size = 50000
+
+[fields]
+incident_id = ["dr_no"]
+crime_type = ["crm_cd_desc"]
+block_address = "location"
+location_type = "premis_desc"
+
+[fields.occurred_at]
+type = "date_plus_hhmm"
+date_field = "date_occ"
+time_field = "time_occ"
+
+[fields.lat]
+field = "lat"
+type = "string"
+
+[fields.lng]
+field = "lon"
+type = "string"
+
+[fields.description]
+type = "combine"
+fields = ["crm_cd_desc", "premis_desc"]
+separator = " at "
+
+[fields.arrest]
+type = "none"

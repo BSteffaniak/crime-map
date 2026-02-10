@@ -1,0 +1,36 @@
+id = "gainesville_pd"
+name = "Gainesville Police Department"
+city = "Gainesville"
+state = "FL"
+output_filename = "gainesville_crimes.json"
+
+[fetcher]
+type = "socrata"
+api_url = "https://data.cityofgainesville.org/resource/gvua-xt9q.json"
+date_column = "report_date"
+page_size = 50000
+
+[fields]
+incident_id = ["id"]
+crime_type = ["narrative"]
+reported_at = "report_date"
+block_address = "address"
+
+[fields.occurred_at]
+type = "simple"
+field = "offense_date"
+
+[fields.lat]
+field = "latitude"
+type = "string"
+
+[fields.lng]
+field = "longitude"
+type = "string"
+
+[fields.description]
+type = "single"
+field = "narrative"
+
+[fields.arrest]
+type = "none"

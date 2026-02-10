@@ -1,0 +1,36 @@
+id = "kansas_city_pd"
+name = "Kansas City Police Department"
+city = "Kansas City"
+state = "MO"
+output_filename = "kansas_city_crimes.json"
+
+[fetcher]
+type = "socrata"
+api_url = "https://data.kcmo.org/resource/isbe-v4d8.json"
+date_column = "reported_date"
+page_size = 50000
+
+[fields]
+incident_id = ["report_no"]
+crime_type = ["offense", "ibrs", "description"]
+block_address = "address"
+
+[fields.occurred_at]
+type = "simple"
+field = "reported_date"
+
+[fields.lat]
+field = "location"
+type = "point_lat"
+
+[fields.lng]
+field = "location"
+type = "point_lng"
+
+[fields.description]
+type = "combine"
+fields = ["offense", "description"]
+separator = ": "
+
+[fields.arrest]
+type = "none"

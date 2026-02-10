@@ -1,0 +1,36 @@
+id = "oakland_pd"
+name = "Oakland Police Department"
+city = "Oakland"
+state = "CA"
+output_filename = "oakland_crimes.json"
+
+[fetcher]
+type = "socrata"
+api_url = "https://data.oaklandca.gov/resource/ppgh-7dqv.json"
+date_column = "datetime"
+page_size = 50000
+
+[fields]
+incident_id = ["casenumber"]
+crime_type = ["crimetype"]
+block_address = "address"
+
+[fields.occurred_at]
+type = "simple"
+field = "datetime"
+
+[fields.lat]
+field = "location"
+type = "point_lat"
+
+[fields.lng]
+field = "location"
+type = "point_lng"
+
+[fields.description]
+type = "combine"
+fields = ["crimetype", "description"]
+separator = ": "
+
+[fields.arrest]
+type = "none"

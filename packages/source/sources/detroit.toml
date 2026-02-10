@@ -1,0 +1,48 @@
+id = "detroit_pd"
+name = "Detroit Police Department"
+city = "Detroit"
+state = "MI"
+output_filename = "detroit_crimes.json"
+
+[fetcher]
+type = "arcgis"
+# Per-year FeatureServer services (2019-2026).
+query_urls = [
+  "https://services2.arcgis.com/qvkbeam7Wirps6zC/arcgis/rest/services/RMS_Crime_Incidents_2026/FeatureServer/0/query",
+  "https://services2.arcgis.com/qvkbeam7Wirps6zC/arcgis/rest/services/RMS_Crime_Incidents_2025/FeatureServer/0/query",
+  "https://services2.arcgis.com/qvkbeam7Wirps6zC/arcgis/rest/services/RMS_Crime_Incidents_2024/FeatureServer/0/query",
+  "https://services2.arcgis.com/qvkbeam7Wirps6zC/arcgis/rest/services/RMS_Crime_Incidents_2023/FeatureServer/0/query",
+  "https://services2.arcgis.com/qvkbeam7Wirps6zC/arcgis/rest/services/RMS_Crime_Incidents_2022/FeatureServer/0/query",
+  "https://services2.arcgis.com/qvkbeam7Wirps6zC/arcgis/rest/services/RMS_Crime_Incidents_2021/FeatureServer/0/query",
+  "https://services2.arcgis.com/qvkbeam7Wirps6zC/arcgis/rest/services/RMS_Crime_Incidents_2020/FeatureServer/0/query",
+  "https://services2.arcgis.com/qvkbeam7Wirps6zC/arcgis/rest/services/RMS_Crime_Incidents_2019/FeatureServer/0/query",
+]
+page_size = 2000
+date_column = "incident_occurred_at"
+
+[fields]
+incident_id = ["incident_entry_id", "report_number"]
+crime_type = ["offense_category", "offense_description"]
+block_address = "block_address"
+location_type = "neighborhood"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "incident_occurred_at"
+
+[fields.lat]
+field = "latitude"
+type = "f64"
+
+[fields.lng]
+field = "longitude"
+type = "f64"
+
+[fields.description]
+type = "combine"
+fields = ["offense_category", "offense_description"]
+separator = ": "
+
+[fields.arrest]
+type = "string_contains"
+field = "case_status"

@@ -1,0 +1,39 @@
+id = "atlanta_pd"
+name = "Atlanta Police Department"
+city = "Atlanta"
+state = "GA"
+output_filename = "atlanta_crimes.json"
+
+[fetcher]
+type = "arcgis"
+query_urls = [
+  "https://services3.arcgis.com/Et5Qfajgiyosiw4d/arcgis/rest/services/OpenDataWebsite_Crime_view/FeatureServer/0/query",
+]
+page_size = 2000
+date_column = "OccurredFromDate"
+
+[fields]
+incident_id = ["IncidentNumber", "ReportNumber"]
+crime_type = ["NIBRS_Offense"]
+block_address = "Location"
+location_type = "LocationType"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "OccurredFromDate"
+
+[fields.lat]
+field = "Latitude"
+type = "f64"
+
+[fields.lng]
+field = "Longitude"
+type = "f64"
+
+[fields.description]
+type = "combine"
+fields = ["NIBRS_Offense", "Crime_Against"]
+separator = " — "
+
+[fields.arrest]
+type = "none"

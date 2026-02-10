@@ -1,0 +1,35 @@
+id = "mesa_pd"
+name = "Mesa Police Department (2011-2020)"
+city = "Mesa"
+state = "AZ"
+output_filename = "mesa_crimes.json"
+
+[fetcher]
+type = "socrata"
+api_url = "https://citydata.mesaaz.gov/resource/37q9-d27y.json"
+date_column = "occurred_date"
+page_size = 50000
+
+[fields]
+incident_id = ["crime_id"]
+crime_type = ["crime_type"]
+block_address = "address"
+
+[fields.occurred_at]
+type = "simple"
+field = "occurred_date"
+
+[fields.lat]
+field = "latitude"
+type = "string"
+
+[fields.lng]
+field = "longitude"
+type = "string"
+
+[fields.description]
+type = "single"
+field = "crime_type"
+
+[fields.arrest]
+type = "none"

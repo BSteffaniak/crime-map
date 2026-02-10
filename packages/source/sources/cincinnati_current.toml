@@ -1,0 +1,36 @@
+id = "cincinnati_pd_current"
+name = "Cincinnati Police Department (2024+)"
+city = "Cincinnati"
+state = "OH"
+output_filename = "cincinnati_crimes_current.json"
+
+[fetcher]
+type = "socrata"
+api_url = "https://data.cincinnati-oh.gov/resource/7aqy-xrv9.json"
+date_column = "datereported"
+page_size = 50000
+
+[fields]
+incident_id = ["incident_no"]
+crime_type = ["stars_category"]
+block_address = "address_x"
+location_type = "cpd_neighborhood"
+
+[fields.occurred_at]
+type = "simple"
+field = "datefrom"
+
+[fields.lat]
+field = "latitude_x"
+type = "string"
+
+[fields.lng]
+field = "longitude_x"
+type = "string"
+
+[fields.description]
+type = "single"
+field = "stars_category"
+
+[fields.arrest]
+type = "none"

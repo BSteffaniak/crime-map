@@ -1,0 +1,37 @@
+id = "baton_rouge_pd_historical"
+name = "Baton Rouge Police Department (2011-2020)"
+city = "Baton Rouge"
+state = "LA"
+output_filename = "baton_rouge_crimes_historical.json"
+
+[fetcher]
+type = "socrata"
+api_url = "https://data.brla.gov/resource/fabb-cnnu.json"
+date_column = "offense_date"
+page_size = 50000
+
+[fields]
+incident_id = ["file_number"]
+crime_type = ["crime", "offense_desc"]
+block_address = "address"
+location_type = "neighborhood"
+
+[fields.occurred_at]
+type = "simple"
+field = "offense_date"
+
+[fields.lat]
+field = "geolocation"
+type = "point_lat"
+
+[fields.lng]
+field = "geolocation"
+type = "point_lng"
+
+[fields.description]
+type = "combine"
+fields = ["crime", "offense_desc"]
+separator = ": "
+
+[fields.arrest]
+type = "none"

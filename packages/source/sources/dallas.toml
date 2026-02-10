@@ -1,0 +1,38 @@
+id = "dallas_pd"
+name = "Dallas Police Department"
+city = "Dallas"
+state = "TX"
+output_filename = "dallas_crimes.json"
+
+[fetcher]
+type = "socrata"
+api_url = "https://www.dallasopendata.com/resource/qv6i-rri7.json"
+date_column = "date1"
+page_size = 50000
+
+[fields]
+incident_id = ["incidentnum", "servnumid"]
+crime_type = ["nibrs_crime", "nibrs_crime_category", "ucr_offense"]
+reported_at = "reporteddate"
+block_address = "incident_address"
+location_type = "premise"
+
+[fields.occurred_at]
+type = "simple"
+field = "date1"
+
+[fields.lat]
+field = "geocoded_column"
+type = "point_lat"
+
+[fields.lng]
+field = "geocoded_column"
+type = "point_lng"
+
+[fields.description]
+type = "combine"
+fields = ["nibrs_crime_category", "nibrs_crime"]
+separator = ": "
+
+[fields.arrest]
+type = "none"

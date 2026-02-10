@@ -1,0 +1,37 @@
+id = "cambridge_pd"
+name = "Cambridge Police Department"
+city = "Cambridge"
+state = "MA"
+output_filename = "cambridge_crimes.json"
+
+[fetcher]
+type = "socrata"
+api_url = "https://data.cambridgema.gov/resource/xuad-73uj.json"
+date_column = "date_of_report"
+page_size = 50000
+
+[fields]
+incident_id = ["file_number"]
+crime_type = ["crime"]
+block_address = "street"
+location_type = "neighborhood"
+
+[fields.occurred_at]
+type = "simple"
+field = "date_of_report"
+
+# Note: coords are centroids of reporting areas, not exact incident locations.
+[fields.lat]
+field = "reporting_area_lat"
+type = "string"
+
+[fields.lng]
+field = "reporting_area_lon"
+type = "string"
+
+[fields.description]
+type = "single"
+field = "crime"
+
+[fields.arrest]
+type = "none"

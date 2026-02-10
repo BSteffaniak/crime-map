@@ -1,0 +1,38 @@
+id = "pittsburgh_pd_current"
+name = "Pittsburgh Bureau of Police (2024+)"
+city = "Pittsburgh"
+state = "PA"
+output_filename = "pittsburgh_crimes_current.json"
+
+[fetcher]
+type = "ckan"
+api_url = "https://data.wprdc.org/api/3/action/datastore_search"
+resource_ids = ["bd41992a-987a-4cca-8798-fbe1cd946b07"]
+page_size = 10000
+date_column = "ReportedDate"
+
+[fields]
+incident_id = ["Report_Number"]
+crime_type = ["NIBRS_Coded_Offense", "NIBRS_Offense_Type"]
+block_address = "Block_Address"
+location_type = "Neighborhood"
+
+[fields.occurred_at]
+type = "simple"
+field = "ReportedDate"
+
+[fields.lat]
+field = "YCOORD"
+type = "string"
+
+[fields.lng]
+field = "XCOORD"
+type = "string"
+
+[fields.description]
+type = "combine"
+fields = ["NIBRS_Offense_Category", "NIBRS_Offense_Type"]
+separator = ": "
+
+[fields.arrest]
+type = "none"

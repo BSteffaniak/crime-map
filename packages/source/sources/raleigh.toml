@@ -1,0 +1,40 @@
+id = "raleigh_pd"
+name = "Raleigh Police Department"
+city = "Raleigh"
+state = "NC"
+output_filename = "raleigh_crimes.json"
+
+[fetcher]
+type = "arcgis"
+query_urls = [
+  "https://services.arcgis.com/v400IkDOw1ad7Yad/arcgis/rest/services/Police_Incidents/FeatureServer/0/query",
+]
+page_size = 2000
+date_column = "reported_date"
+where_clause = "latitude <> 0 AND longitude <> 0"
+
+[fields]
+incident_id = ["case_number"]
+crime_type = ["crime_description", "crime_category"]
+block_address = "reported_block_address"
+location_type = "district"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "reported_date"
+
+[fields.lat]
+field = "latitude"
+type = "f64"
+
+[fields.lng]
+field = "longitude"
+type = "f64"
+
+[fields.description]
+type = "combine"
+fields = ["crime_category", "crime_description"]
+separator = ": "
+
+[fields.arrest]
+type = "none"

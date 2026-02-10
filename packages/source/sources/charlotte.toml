@@ -1,0 +1,39 @@
+id = "charlotte_pd"
+name = "Charlotte-Mecklenburg Police Department"
+city = "Charlotte"
+state = "NC"
+output_filename = "charlotte_crimes.json"
+
+[fetcher]
+type = "arcgis"
+query_urls = [
+  "https://gis.charlottenc.gov/arcgis/rest/services/CMPD/CMPDIncidents/MapServer/0/query",
+]
+page_size = 2000
+date_column = "DATE_INCIDENT_BEGAN"
+
+[fields]
+incident_id = ["INCIDENT_REPORT_ID"]
+crime_type = ["HIGHEST_NIBRS_DESCRIPTION"]
+block_address = "LOCATION"
+location_type = "CMPD_PATROL_DIVISION"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "DATE_INCIDENT_BEGAN"
+
+[fields.lat]
+field = "LATITUDE_PUBLIC"
+type = "f64"
+
+[fields.lng]
+field = "LONGITUDE_PUBLIC"
+type = "f64"
+
+[fields.description]
+type = "single"
+field = "HIGHEST_NIBRS_DESCRIPTION"
+
+[fields.arrest]
+type = "string_contains"
+field = "CLEARANCE_STATUS"

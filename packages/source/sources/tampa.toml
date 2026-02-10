@@ -1,0 +1,41 @@
+id = "tampa_pd"
+name = "Tampa Police Department"
+city = "Tampa"
+state = "FL"
+output_filename = "tampa_crimes.json"
+
+[fetcher]
+type = "arcgis"
+# Rolling 365-day dataset, updated nightly.
+query_urls = [
+  "https://services1.arcgis.com/IbNXlmt2RVVRCZ6M/arcgis/rest/services/crimes_public_365days/FeatureServer/0/query",
+]
+page_size = 2000
+date_column = "occurfrdate"
+
+[fields]
+incident_id = ["offenseid"]
+crime_type = ["nibrsoffense", "nibrsdesc"]
+block_address = "fulladdr"
+location_type = "neighborhood"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "occurfrdate"
+
+[fields.lat]
+field = "y"
+type = "f64"
+
+[fields.lng]
+field = "x"
+type = "f64"
+
+[fields.description]
+type = "combine"
+fields = ["nibrsdesc", "crimegroup"]
+separator = " — "
+
+[fields.arrest]
+type = "string_contains"
+field = "casestatus"

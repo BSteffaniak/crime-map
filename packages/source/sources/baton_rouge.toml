@@ -1,0 +1,38 @@
+id = "baton_rouge_pd"
+name = "Baton Rouge Police Department"
+city = "Baton Rouge"
+state = "LA"
+output_filename = "baton_rouge_crimes.json"
+
+[fetcher]
+type = "socrata"
+api_url = "https://data.brla.gov/resource/pbin-pcm7.json"
+date_column = "report_date"
+page_size = 50000
+
+[fields]
+incident_id = ["incident_number", "charge_id"]
+crime_type = ["offense_description", "statute_category"]
+reported_at = "report_date"
+block_address = "street"
+location_type = "neighborhood"
+
+[fields.occurred_at]
+type = "simple"
+field = "charge_date"
+
+[fields.lat]
+field = "latitude"
+type = "string"
+
+[fields.lng]
+field = "longitude"
+type = "string"
+
+[fields.description]
+type = "combine"
+fields = ["statute_category", "offense_description"]
+separator = ": "
+
+[fields.arrest]
+type = "none"
