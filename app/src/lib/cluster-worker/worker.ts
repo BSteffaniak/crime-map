@@ -112,16 +112,20 @@ function respond(msg: WorkerResponse) {
 async function loadAllFeatures(url: string): Promise<void> {
   respond({ type: "progress", loaded: 0, total: null, phase: "loading" });
 
-  // Deserialize with a world-encompassing bbox to load all features.
-  // FlatGeobuf's HTTP reader requires a bbox (passing undefined causes a
-  // runtime error). A full-world rect matches every feature via the spatial
-  // index with negligible overhead.
-  const iter = flatgeobuf.deserialize(url, {
-    minX: -180,
-    minY: -90,
-    maxX: 180,
-    maxY: 90,
-  });
+  // Fetch the file as a stream and deserialize sequentially. Using a
+  // ReadableStream instead of a URL avoids the FlatGeobuf HTTP range-request
+  // path which traverses the packed R-tree spatial index — that approach
+  // issues thousands of small range requests and does not scale for bulk
+  // loading large datasets. A single sequential download is dramatically
+  // faster when we need all features anyway.
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch ${url}: ${response.status}`);
+  }
+  if (!response.body) {
+    throw new Error(`Response body is null for ${url}`);
+  }
+  const iter = flatgeobuf.deserialize(response.body as ReadableStream);
 
   for await (const feature of iter) {
     const f = feature as GeoJSON.Feature<GeoJSON.Point>;

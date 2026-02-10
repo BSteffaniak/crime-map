@@ -145,7 +145,11 @@ export function useClusterWorker(filters: FilterState) {
 
         case "error":
           console.error("Cluster worker error:", msg.message);
-          setState((prev) => ({ ...prev, loading: false }));
+          setState((prev) => ({
+            ...prev,
+            loading: false,
+            dataProgress: { ...prev.dataProgress, phase: "complete" },
+          }));
           break;
       }
     };
