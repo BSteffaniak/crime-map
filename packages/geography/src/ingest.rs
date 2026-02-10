@@ -89,7 +89,7 @@ async fn ingest_state(
     let url = format!(
         "https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/tigerWMS_ACS2023/MapServer/8/query\
          ?where=STATE%3D'{state_fips}'\
-         &outFields=GEOID,NAME,STATE,COUNTY,ALAND,CENTLAT,CENTLON\
+         &outFields=GEOID,NAME,STATE,COUNTY,AREALAND,CENTLAT,CENTLON\
          &outSR=4326\
          &f=geojson\
          &returnGeometry=true"
@@ -129,7 +129,7 @@ async fn ingest_state(
 
         let county_fips = props["COUNTY"].as_str().unwrap_or("").to_string();
 
-        let aland = props["ALAND"].as_f64();
+        let aland = props["AREALAND"].as_f64();
         // Convert square meters to square miles
         let land_area_sq_mi = aland.map(|a| a / 2_589_988.11);
 

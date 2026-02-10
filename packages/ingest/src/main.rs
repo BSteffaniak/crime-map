@@ -55,6 +55,13 @@ enum Commands {
     Sources,
     /// Run database migrations
     Migrate,
+    /// Ingest census tract boundaries from the Census Bureau `TIGERweb` API
+    Tracts {
+        /// Comma-separated list of state FIPS codes (e.g., "11" for DC, "06" for CA).
+        /// If not specified, ingests tracts for all 50 states + DC.
+        #[arg(long)]
+        states: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -113,6 +120,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     log::error!("Failed to sync {}: {e}", src.id());
                 }
             }
+        }
+        Commands::Tracts { states } => {
+            let db = db::connect_from_env().await?;
+            run_migrations(db.as_ref()).await?;
+
+            let start = Instant::now();
+            let total = if let Some(states_str) = states {
+                let fips_codes: Vec<&str> = states_str.split(',').map(str::trim).collect();
+                log::info!("Ingesting census tracts for states: {states_str}");
+                crime_map_geography::ingest::ingest_tracts_for_states(db.as_ref(), &fips_codes)
+                    .await?
+            } else {
+                log::info!("Ingesting census tracts for all states...");
+                crime_map_geography::ingest::ingest_all_tracts(db.as_ref()).await?
+            };
+
+            let elapsed = start.elapsed();
+            log::info!(
+                "Census tract ingestion complete: {total} tracts in {:.1}s",
+                elapsed.as_secs_f64()
+            );
         }
     }
 
