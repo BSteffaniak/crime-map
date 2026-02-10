@@ -17,7 +17,13 @@ crime_map_database_models = { workspace = true }
 crime_map_database = { workspace = true }
 crime_map_server_models = { workspace = true }
 moosicbox_json_utils = { workspace = true, features = ["database"] }
-switchy_database = { workspace = true, features = ["postgres-raw"] }
+switchy_database = { workspace = true, features = [
+  "postgres-raw",
+  "sqlite-rusqlite",
+] }
+switchy_database_connection = { workspace = true, features = [
+  "sqlite-rusqlite",
+] }
 
 actix-web = { workspace = true, features = ["macros"] }
 actix-cors = { workspace = true }

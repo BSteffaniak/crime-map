@@ -141,3 +141,73 @@ pub struct ApiHealth {
     /// Service version.
     pub version: String,
 }
+
+/// Query parameters for the sidebar endpoint.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SidebarQueryParams {
+    /// Bounding box as `west,south,east,north`.
+    pub bbox: Option<String>,
+    /// Maximum number of feature results per page.
+    pub limit: Option<u32>,
+    /// Offset for feature pagination.
+    pub offset: Option<u32>,
+    /// Start date for temporal filtering (ISO 8601).
+    pub from: Option<String>,
+    /// End date for temporal filtering (ISO 8601).
+    pub to: Option<String>,
+    /// Comma-separated list of category names to include.
+    pub categories: Option<String>,
+    /// Comma-separated list of subcategory names to include.
+    pub subcategories: Option<String>,
+    /// Minimum severity value (1-5).
+    pub severity_min: Option<u8>,
+    /// Filter by arrest status.
+    pub arrest_made: Option<bool>,
+}
+
+/// Response from the sidebar endpoint.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SidebarResponse {
+    /// Paginated incident features.
+    pub features: Vec<SidebarIncident>,
+    /// Total count of incidents matching the query within the bbox.
+    pub total_count: u64,
+    /// Whether more features are available beyond this page.
+    pub has_more: bool,
+}
+
+/// A crime incident as returned by the sidebar endpoint.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SidebarIncident {
+    /// Unique incident ID.
+    pub id: i64,
+    /// Source-specific incident ID.
+    pub source_incident_id: Option<String>,
+    /// Specific subcategory.
+    pub subcategory: String,
+    /// Top-level crime category.
+    pub category: String,
+    /// Severity numeric value (1-5).
+    pub severity: i32,
+    /// Longitude.
+    pub longitude: f64,
+    /// Latitude.
+    pub latitude: f64,
+    /// When the crime occurred (ISO 8601).
+    pub occurred_at: String,
+    /// Short description.
+    pub description: Option<String>,
+    /// Block-level address.
+    pub block_address: Option<String>,
+    /// City.
+    pub city: Option<String>,
+    /// State abbreviation.
+    pub state: Option<String>,
+    /// Whether an arrest was made.
+    pub arrest_made: Option<bool>,
+    /// Location type.
+    pub location_type: Option<String>,
+}

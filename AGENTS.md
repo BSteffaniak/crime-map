@@ -80,7 +80,7 @@
 - Vite + React + TypeScript + TailwindCSS
 - MapLibre GL JS for map rendering
 - PMTiles for vector tile serving (generated offline via tippecanoe)
-- FlatGeobuf for client-side spatial queries (Supercluster web worker)
+- Server-side sidebar via pre-generated SQLite with R-tree spatial index
 - URL search params as single source of truth for filter state
 
 ### Documentation

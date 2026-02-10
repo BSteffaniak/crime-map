@@ -2,13 +2,13 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
 #![allow(clippy::multiple_crate_versions, clippy::cargo_common_metadata)]
 
-//! CLI tool for generating `PMTiles`, cluster tiles, and `FlatGeobuf` files
-//! from `PostGIS` data.
+//! CLI tool for generating `PMTiles`, cluster tiles, and a sidebar `SQLite`
+//! database from `PostGIS` data.
 //!
-//! Exports crime incident data as `GeoJSONSeq`, then runs tippecanoe
-//! (`PMTiles` for heatmap/points and clustered tiles) and ogr2ogr
-//! (`FlatGeobuf` for sidebar spatial queries) to produce optimized spatial
-//! data files for the frontend.
+//! Exports crime incident data as `GeoJSONSeq`, then runs tippecanoe to
+//! produce `PMTiles` (heatmap/points and clustered tiles). A `SQLite`
+//! database with R-tree spatial indexing is generated for server-side
+//! sidebar queries.
 //!
 //! Uses keyset pagination and streaming writes to keep memory usage constant
 //! regardless of dataset size.
@@ -23,6 +23,7 @@ use crime_map_database::db;
 use crime_map_source::registry::all_sources;
 use moosicbox_json_utils::database::ToValue as _;
 use switchy_database::{Database, DatabaseValue};
+use switchy_database_connection::init_sqlite_rusqlite;
 
 /// Number of rows to fetch per database query batch.
 const BATCH_SIZE: i64 = 10_000;
@@ -76,12 +77,12 @@ enum Commands {
         #[command(flatten)]
         args: GenerateArgs,
     },
-    /// Generate `FlatGeobuf` files from `PostGIS` data (sidebar spatial queries)
-    Flatgeobuf {
+    /// Generate sidebar `SQLite` database for server-side queries
+    Sidebar {
         #[command(flatten)]
         args: GenerateArgs,
     },
-    /// Generate all output files (`PMTiles`, clusters, and `FlatGeobuf`)
+    /// Generate all output files (`PMTiles`, clusters, and sidebar `SQLite`)
     All {
         #[command(flatten)]
         args: GenerateArgs,
@@ -108,16 +109,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             generate_cluster_tiles(db.as_ref(), &args, &source_ids, &dir).await?;
             cleanup_intermediate(&args, &dir);
         }
-        Commands::Flatgeobuf { args } => {
+        Commands::Sidebar { args } => {
             let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
-            generate_flatgeobuf(db.as_ref(), &args, &source_ids, &dir).await?;
-            cleanup_intermediate(&args, &dir);
+            generate_sidebar_db(db.as_ref(), &args, &source_ids, &dir).await?;
         }
         Commands::All { args } => {
             let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
             generate_pmtiles(db.as_ref(), &args, &source_ids, &dir).await?;
             generate_cluster_tiles(db.as_ref(), &args, &source_ids, &dir).await?;
-            generate_flatgeobuf(db.as_ref(), &args, &source_ids, &dir).await?;
+            generate_sidebar_db(db.as_ref(), &args, &source_ids, &dir).await?;
             cleanup_intermediate(&args, &dir);
         }
     }
@@ -294,45 +294,195 @@ async fn generate_cluster_tiles(
     Ok(())
 }
 
-/// Exports incidents as a `FlatGeobuf` file via ogr2ogr.
-async fn generate_flatgeobuf(
+/// Inserts a single `PostGIS` incident row into the `SQLite` sidebar database.
+///
+/// Returns the row's primary key ID for keyset pagination tracking.
+///
+/// # Errors
+///
+/// Returns an error if the row extraction or `SQLite` insert fails.
+async fn insert_sidebar_row(
+    txn: &dyn Database,
+    row: &switchy_database::Row,
+) -> Result<i64, Box<dyn std::error::Error>> {
+    let id: i64 = row.to_value("id").unwrap_or(0);
+    let lng: f64 = row.to_value("longitude").unwrap_or(0.0);
+    let lat: f64 = row.to_value("latitude").unwrap_or(0.0);
+    let source_incident_id: String = row.to_value("source_incident_id").unwrap_or_default();
+    let subcategory: String = row.to_value("subcategory").unwrap_or_default();
+    let category: String = row.to_value("category").unwrap_or_default();
+    let severity: i32 = row.to_value("severity").unwrap_or(1);
+    let city: String = row.to_value("city").unwrap_or_default();
+    let state: String = row.to_value("state").unwrap_or_default();
+    let arrest_made: Option<bool> = row.to_value("arrest_made").unwrap_or(None);
+    let description: Option<String> = row.to_value("description").unwrap_or(None);
+    let block_address: Option<String> = row.to_value("block_address").unwrap_or(None);
+    let location_type: Option<String> = row.to_value("location_type").unwrap_or(None);
+
+    let occurred_at_naive: chrono::NaiveDateTime = row.to_value("occurred_at").unwrap_or_default();
+    let occurred_at =
+        chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(occurred_at_naive, chrono::Utc)
+            .to_rfc3339();
+
+    let arrest_int = arrest_made.map(|b| DatabaseValue::Int32(i32::from(b)));
+
+    txn.exec_raw_params(
+        "INSERT INTO incidents (id, source_incident_id, subcategory, category,
+            severity, longitude, latitude, occurred_at, description,
+            block_address, city, state, arrest_made, location_type)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+        &[
+            DatabaseValue::Int64(id),
+            DatabaseValue::String(source_incident_id),
+            DatabaseValue::String(subcategory),
+            DatabaseValue::String(category),
+            DatabaseValue::Int32(severity),
+            DatabaseValue::Real64(lng),
+            DatabaseValue::Real64(lat),
+            DatabaseValue::String(occurred_at),
+            description.map_or(DatabaseValue::Null, DatabaseValue::String),
+            block_address.map_or(DatabaseValue::Null, DatabaseValue::String),
+            DatabaseValue::String(city),
+            DatabaseValue::String(state),
+            arrest_int.unwrap_or(DatabaseValue::Null),
+            location_type.map_or(DatabaseValue::Null, DatabaseValue::String),
+        ],
+    )
+    .await?;
+
+    Ok(id)
+}
+
+/// Generates a `SQLite` database for server-side sidebar queries.
+///
+/// Creates `incidents.db` with:
+/// - A flat `incidents` table containing all incident data
+/// - An R-tree spatial index for efficient count queries
+/// - A date index for efficient paginated feature queries
+///
+/// The R-tree enables fast `COUNT(*)` within a bounding box.
+/// Feature queries walk the date index and check bbox inline,
+/// relying on `LIMIT` to short-circuit early.
+///
+/// # Errors
+///
+/// Returns an error if the `PostGIS` export, `SQLite` creation, or
+/// index population fails.
+async fn generate_sidebar_db(
     db: &dyn Database,
     args: &GenerateArgs,
     source_ids: &[i32],
     dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let geojsonseq_path = dir.join("incidents.geojsonseq");
+    let db_path = dir.join("incidents.db");
 
-    // Ensure GeoJSONSeq exists
-    if !geojsonseq_path.exists() {
-        log::info!("GeoJSONSeq not found, exporting...");
-        export_geojsonseq(db, &geojsonseq_path, args.limit, source_ids).await?;
+    // Remove any existing file so we start fresh
+    if db_path.exists() {
+        std::fs::remove_file(&db_path)?;
     }
 
-    log::info!("Running ogr2ogr to generate FlatGeobuf...");
+    log::info!("Creating sidebar SQLite database...");
 
-    let output_path = dir.join("incidents.fgb");
+    let sqlite = init_sqlite_rusqlite(Some(&db_path))?;
 
-    let status = Command::new("ogr2ogr")
-        .args([
-            "-f",
-            "FlatGeobuf",
-            "-if",
-            "GeoJSONSeq",
-            &output_path.to_string_lossy(),
-            &geojsonseq_path.to_string_lossy(),
-            "-nln",
-            "incidents",
-            "-lco",
-            "SPATIAL_INDEX=YES",
-        ])
-        .status()?;
+    // Create schema
+    sqlite
+        .exec_raw(
+            "CREATE TABLE incidents (
+                id INTEGER PRIMARY KEY,
+                source_incident_id TEXT,
+                subcategory TEXT NOT NULL,
+                category TEXT NOT NULL,
+                severity INTEGER NOT NULL,
+                longitude REAL NOT NULL,
+                latitude REAL NOT NULL,
+                occurred_at TEXT NOT NULL,
+                description TEXT,
+                block_address TEXT,
+                city TEXT,
+                state TEXT,
+                arrest_made INTEGER,
+                location_type TEXT
+            )",
+        )
+        .await?;
 
-    if !status.success() {
-        return Err("ogr2ogr failed".into());
+    sqlite
+        .exec_raw(
+            "CREATE VIRTUAL TABLE incidents_rtree USING rtree(
+                id, min_lng, max_lng, min_lat, max_lat
+            )",
+        )
+        .await?;
+
+    // Populate from PostGIS using keyset pagination
+    let mut last_id: i64 = 0;
+    let mut total_count: u64 = 0;
+    let mut remaining = args.limit;
+
+    loop {
+        #[allow(clippy::cast_sign_loss)]
+        let batch_limit = match remaining {
+            Some(0) => break,
+            Some(r) => i64::try_from(r.min(BATCH_SIZE as u64))?,
+            None => BATCH_SIZE,
+        };
+
+        let (query, params) = build_batch_query(last_id, batch_limit, source_ids);
+        let rows = db.query_raw_params(&query, &params).await?;
+
+        if rows.is_empty() {
+            break;
+        }
+
+        #[allow(clippy::cast_possible_truncation)]
+        let batch_len = rows.len() as u64;
+
+        // Use a transaction for each batch
+        let txn = sqlite.begin_transaction().await?;
+
+        for row in &rows {
+            last_id = insert_sidebar_row(txn.as_ref(), row).await?;
+        }
+
+        txn.commit().await?;
+
+        total_count += batch_len;
+        if let Some(ref mut r) = remaining {
+            *r = r.saturating_sub(batch_len);
+        }
+
+        log::info!("Inserted {total_count} rows into sidebar DB...");
+
+        #[allow(clippy::cast_sign_loss)]
+        let batch_limit_u64 = batch_limit as u64;
+        if batch_len < batch_limit_u64 {
+            break;
+        }
     }
 
-    log::info!("FlatGeobuf generated: {}", output_path.display());
+    // Populate R-tree from incidents table
+    log::info!("Populating R-tree spatial index...");
+    sqlite
+        .exec_raw(
+            "INSERT INTO incidents_rtree (id, min_lng, max_lng, min_lat, max_lat)
+             SELECT id, longitude, longitude, latitude, latitude FROM incidents",
+        )
+        .await?;
+
+    // Create date index for feature queries
+    log::info!("Creating date index...");
+    sqlite
+        .exec_raw("CREATE INDEX idx_incidents_occurred_at ON incidents(occurred_at DESC)")
+        .await?;
+
+    // Analyze for query planner
+    sqlite.exec_raw("ANALYZE").await?;
+
+    log::info!(
+        "Sidebar SQLite database generated: {} ({total_count} rows)",
+        db_path.display()
+    );
     Ok(())
 }
 

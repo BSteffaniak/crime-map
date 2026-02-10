@@ -1,14 +1,15 @@
 import { useCallback, useState } from "react";
-import type maplibregl from "maplibre-gl";
 import CrimeMap from "./components/map/CrimeMap";
 import FilterPanel from "./components/filters/FilterPanel";
 import IncidentSidebar from "./components/sidebar/IncidentSidebar";
 import { useFilters } from "./hooks/useFilters";
+import type { BBox } from "./lib/sidebar/types";
 
 export default function App() {
   const [sidebarTab, setSidebarTab] = useState<"filters" | "incidents">(
     "filters",
   );
+  const [bbox, setBbox] = useState<BBox | null>(null);
 
   const {
     filters,
@@ -22,9 +23,13 @@ export default function App() {
   } = useFilters();
 
   const handleBoundsChange = useCallback(
-    (_bounds: maplibregl.LngLatBounds, _zoom: number) => {
-      // Bounds/zoom are consumed by the cluster worker inside CrimeMap.
-      // We could track them here if needed for other purposes.
+    (bounds: { getWest(): number; getSouth(): number; getEast(): number; getNorth(): number }, _zoom: number) => {
+      setBbox([
+        bounds.getWest(),
+        bounds.getSouth(),
+        bounds.getEast(),
+        bounds.getNorth(),
+      ]);
     },
     [],
   );
@@ -76,7 +81,7 @@ export default function App() {
               activeFilterCount={activeFilterCount}
             />
           ) : (
-            <IncidentSidebar />
+            <IncidentSidebar bbox={bbox} filters={filters} />
           )}
         </div>
       </div>

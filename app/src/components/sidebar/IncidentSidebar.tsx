@@ -1,25 +1,29 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { categoryColor } from "../../lib/types";
-import { useSidebarReader } from "../../lib/cluster-worker";
-import type { SidebarFeature } from "../../lib/cluster-worker/types";
+import { categoryColor, type FilterState } from "../../lib/types";
+import { useSidebar } from "../../lib/sidebar/useSidebar";
+import type { SidebarIncident } from "../../lib/sidebar/types";
+import type { BBox } from "../../lib/sidebar/types";
 
 const ESTIMATED_ROW_HEIGHT = 96;
 const OVERSCAN_COUNT = 5;
 /** Pixels from the bottom of the scroll container to trigger loading more. */
 const LOAD_MORE_THRESHOLD = 200;
 
-export default function IncidentSidebar() {
-  const { sidebarFeatures, totalCount, loading, loadMore } =
-    useSidebarReader();
+interface IncidentSidebarProps {
+  bbox: BBox | null;
+  filters: FilterState;
+}
+
+export default function IncidentSidebar({ bbox, filters }: IncidentSidebarProps) {
+  const { features, totalCount, hasMore, loading, loadMore } =
+    useSidebar(bbox, filters);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const loadingMoreRef = useRef(false);
 
-  const hasMore = sidebarFeatures.length < totalCount;
-
   const rowVirtualizer = useVirtualizer({
-    count: sidebarFeatures.length,
+    count: features.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => ESTIMATED_ROW_HEIGHT,
     overscan: OVERSCAN_COUNT,
@@ -40,7 +44,7 @@ export default function IncidentSidebar() {
   // Reset the loadingMore flag when features change (new page arrived)
   useEffect(() => {
     loadingMoreRef.current = false;
-  }, [sidebarFeatures.length]);
+  }, [features.length]);
 
   // Attach scroll listener
   useEffect(() => {
@@ -66,7 +70,7 @@ export default function IncidentSidebar() {
 
       {/* Virtualized Incident List */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
-        {sidebarFeatures.length === 0 && !loading && (
+        {features.length === 0 && !loading && (
           <div className="px-4 py-8 text-center text-sm text-gray-400">
             No incidents in the current view.
             <br />
@@ -74,13 +78,13 @@ export default function IncidentSidebar() {
           </div>
         )}
 
-        {sidebarFeatures.length > 0 && (
+        {features.length > 0 && (
           <div
             className="relative w-full"
             style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
           >
             {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-              const incident = sidebarFeatures[virtualRow.index];
+              const incident = features[virtualRow.index];
               return (
                 <div
                   key={incident.id}
@@ -99,7 +103,7 @@ export default function IncidentSidebar() {
         {/* Loading more indicator */}
         {hasMore && (
           <div className="px-4 py-3 text-center text-xs text-gray-400">
-            {loadingMoreRef.current ? "Loading more..." : `${totalCount - sidebarFeatures.length} more`}
+            {loadingMoreRef.current ? "Loading more..." : `${totalCount - features.length} more`}
           </div>
         )}
       </div>
@@ -107,7 +111,7 @@ export default function IncidentSidebar() {
   );
 }
 
-function IncidentCard({ incident }: { incident: SidebarFeature }) {
+function IncidentCard({ incident }: { incident: SidebarIncident }) {
   return (
     <div className="border-b border-gray-100 px-4 py-3 transition-colors hover:bg-gray-50">
       <div className="flex items-start justify-between">
@@ -127,27 +131,29 @@ function IncidentCard({ incident }: { incident: SidebarFeature }) {
         </span>
       </div>
 
-      {incident.desc && (
+      {incident.description && (
         <p className="mt-1 ml-[18px] text-xs text-gray-600 line-clamp-2">
-          {incident.desc}
+          {incident.description}
         </p>
       )}
 
       <div className="mt-1 ml-[18px] flex items-center gap-3 text-xs text-gray-400">
         <span>
-          {new Date(incident.date).toLocaleDateString("en-US", {
+          {new Date(incident.occurredAt).toLocaleDateString("en-US", {
             month: "short",
             day: "numeric",
             year: "numeric",
           })}
         </span>
-        {incident.addr && <span>{incident.addr}</span>}
-        <span>
-          {incident.city}, {incident.state}
-        </span>
+        {incident.blockAddress && <span>{incident.blockAddress}</span>}
+        {(incident.city || incident.state) && (
+          <span>
+            {[incident.city, incident.state].filter(Boolean).join(", ")}
+          </span>
+        )}
       </div>
 
-      {incident.arrest && (
+      {incident.arrestMade && (
         <span className="mt-1 ml-[18px] inline-block rounded-full bg-green-100 px-2 py-0.5 text-xs text-green-700">
           Arrest made
         </span>

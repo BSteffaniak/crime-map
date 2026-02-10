@@ -9,17 +9,8 @@ import {
   CLUSTER_MAX_ZOOM,
 } from "../../lib/map-config";
 import { severityColor, type FilterState } from "../../lib/types";
-import { useSidebarDriver } from "../../lib/cluster-worker";
 import { buildIncidentFilter } from "../../lib/map-filters/expressions";
-import type { BBox } from "../../lib/cluster-worker/types";
 import type { FilterSpecification } from "maplibre-gl";
-
-/** Formats a number with K/M suffixes for compact display. */
-function formatCount(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
-  return n.toLocaleString();
-}
 
 interface CrimeMapProps {
   filters: FilterState;
@@ -30,8 +21,6 @@ export default function CrimeMap({ filters, onBoundsChange }: CrimeMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const [loaded, setLoaded] = useState(false);
-
-  const { updateSidebar, dataProgress } = useSidebarDriver(filters);
 
   // -- Layer setup --
 
@@ -296,28 +285,12 @@ export default function CrimeMap({ filters, onBoundsChange }: CrimeMapProps) {
       const bounds = map.getBounds();
       const zoom = map.getZoom();
       onBoundsChange?.(bounds, zoom);
-
-      const bbox: BBox = [
-        bounds.getWest(),
-        bounds.getSouth(),
-        bounds.getEast(),
-        bounds.getNorth(),
-      ];
-      updateSidebar(bbox, zoom);
     });
 
     map.on("moveend", () => {
       const bounds = map.getBounds();
       const zoom = map.getZoom();
       onBoundsChange?.(bounds, zoom);
-
-      const bbox: BBox = [
-        bounds.getWest(),
-        bounds.getSouth(),
-        bounds.getEast(),
-        bounds.getNorth(),
-      ];
-      updateSidebar(bbox, zoom);
     });
 
     mapRef.current = map;
@@ -327,7 +300,7 @@ export default function CrimeMap({ filters, onBoundsChange }: CrimeMapProps) {
       map.remove();
       mapRef.current = null;
     };
-  }, [setupLayers, onBoundsChange, updateSidebar]);
+  }, [setupLayers, onBoundsChange]);
 
   // -- Apply MapLibre filters on tile layers when filters change --
 
@@ -355,28 +328,11 @@ export default function CrimeMap({ filters, onBoundsChange }: CrimeMapProps) {
     }
   }, [filters, loaded]);
 
-  const showDataLoading =
-    loaded && dataProgress.phase !== "complete" && dataProgress.phase !== "idle";
-
   return (
     <div ref={containerRef} className="relative h-full w-full">
       {!loaded && (
         <div className="flex h-full items-center justify-center bg-gray-100 text-gray-500">
           Loading map...
-        </div>
-      )}
-
-      {/* Per-viewport loading indicator (non-blocking) */}
-      {showDataLoading && (
-        <div className="absolute bottom-4 right-4 z-10">
-          <div className="flex items-center gap-2 rounded-full bg-white/90 px-3 py-1.5 shadow-md backdrop-blur-sm">
-            <div className="h-3 w-3 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
-            <span className="text-xs font-medium text-gray-600">
-              {dataProgress.phase === "indexing"
-                ? "Indexing..."
-                : `Loading${dataProgress.loaded > 0 ? ` ${formatCount(dataProgress.loaded)}` : "..."}`}
-            </span>
-          </div>
         </div>
       )}
     </div>

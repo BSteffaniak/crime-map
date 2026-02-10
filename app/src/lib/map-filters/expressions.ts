@@ -2,7 +2,7 @@
  * Builds MapLibre filter expressions from FilterState.
  *
  * Applied to PMTiles vector tile layers for client-side filtering at high zoom.
- * The logic mirrors the JS predicates in predicates.ts.
+ * The logic mirrors the server-side SQL filters in the sidebar endpoint.
  */
 
 import type { FilterSpecification } from "maplibre-gl";

@@ -1,6 +1,6 @@
 [package]
 authors = { workspace = true }
-description = "CLI tool for generating PMTiles and FlatGeobuf from PostGIS"
+description = "CLI tool for generating PMTiles and sidebar SQLite from PostGIS"
 edition = { workspace = true }
 license = { workspace = true }
 name = "crime_map_generate"
@@ -17,7 +17,13 @@ crime_map_database_models = { workspace = true }
 crime_map_database = { workspace = true }
 crime_map_source = { workspace = true }
 moosicbox_json_utils = { workspace = true, features = ["database"] }
-switchy_database = { workspace = true, features = ["postgres-raw"] }
+switchy_database = { workspace = true, features = [
+  "postgres-raw",
+  "sqlite-rusqlite",
+] }
+switchy_database_connection = { workspace = true, features = [
+  "sqlite-rusqlite",
+] }
 
 clap = { workspace = true }
 chrono = { workspace = true }
