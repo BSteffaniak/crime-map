@@ -62,8 +62,16 @@ enum Commands {
         #[arg(long)]
         states: Option<String>,
     },
+    /// Ingest neighborhood boundaries from city open data portals
+    Neighborhoods {
+        /// Comma-separated list of source IDs (e.g., `"dc_neighborhoods"`).
+        /// If not specified, ingests from all configured sources.
+        #[arg(long)]
+        sources: Option<String>,
+    },
 }
 
+#[allow(clippy::too_many_lines)]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     pretty_env_logger::init();
@@ -139,6 +147,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let elapsed = start.elapsed();
             log::info!(
                 "Census tract ingestion complete: {total} tracts in {:.1}s",
+                elapsed.as_secs_f64()
+            );
+        }
+        Commands::Neighborhoods { sources } => {
+            let db = db::connect_from_env().await?;
+            run_migrations(db.as_ref()).await?;
+
+            let all_sources = crime_map_neighborhood::registry::all_sources();
+            let sources_to_ingest = if let Some(filter_str) = sources {
+                let ids: Vec<&str> = filter_str.split(',').map(str::trim).collect();
+                all_sources
+                    .into_iter()
+                    .filter(|s| ids.contains(&s.id()))
+                    .collect::<Vec<_>>()
+            } else {
+                all_sources
+            };
+
+            log::info!(
+                "Ingesting neighborhoods from {} source(s)",
+                sources_to_ingest.len()
+            );
+
+            let client = reqwest::Client::builder()
+                .user_agent("crime-map/1.0")
+                .build()?;
+
+            let start = Instant::now();
+            let mut total = 0u64;
+
+            for source in &sources_to_ingest {
+                match crime_map_neighborhood::ingest::ingest_source(db.as_ref(), &client, source)
+                    .await
+                {
+                    Ok(count) => total += count,
+                    Err(e) => {
+                        log::error!("Failed to ingest {}: {e}", source.id());
+                    }
+                }
+            }
+
+            // Build the tract-to-neighborhood crosswalk
+            if let Err(e) = crime_map_neighborhood::ingest::build_crosswalk(db.as_ref()).await {
+                log::error!("Failed to build crosswalk: {e}");
+            }
+
+            let elapsed = start.elapsed();
+            log::info!(
+                "Neighborhood ingestion complete: {total} neighborhoods in {:.1}s",
                 elapsed.as_secs_f64()
             );
         }

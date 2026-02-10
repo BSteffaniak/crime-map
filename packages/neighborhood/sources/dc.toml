@@ -1,0 +1,15 @@
+id = "dc_neighborhoods"
+name = "Washington DC Neighborhood Clusters"
+city = "Washington"
+state = "DC"
+
+[fetcher]
+type = "arcgis"
+url = "https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Administrative_Other_Boundaries_WebMercator/MapServer/17/query"
+max_records = 100
+
+[fields]
+name = "NBH_NAMES"
+
+[fields.geometry]
+type = "geojson"

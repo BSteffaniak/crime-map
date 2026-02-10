@@ -1,0 +1,15 @@
+id = "dallas_neighborhoods"
+name = "Dallas Neighborhood Associations"
+city = "Dallas"
+state = "TX"
+
+[fetcher]
+type = "arcgis"
+url = "https://services2.arcgis.com/rwnOSbfKSwyTBcwN/arcgis/rest/services/NeighborhoodAssociations/FeatureServer/0/query"
+max_records = 300
+
+[fields]
+name = "ASSO_NAME"
+
+[fields.geometry]
+type = "geojson"

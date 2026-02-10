@@ -1,0 +1,15 @@
+id = "pittsburgh_neighborhoods"
+name = "Pittsburgh Neighborhoods"
+city = "Pittsburgh"
+state = "PA"
+
+[fetcher]
+type = "arcgis"
+url = "https://services1.arcgis.com/0MSEUqKaxRlEPj5g/arcgis/rest/services/Neighborhoods_and_Streets_of_Pittsburgh/FeatureServer/0/query"
+max_records = 100
+
+[fields]
+name = "NAME"
+
+[fields.geometry]
+type = "geojson"

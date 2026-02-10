@@ -1,0 +1,15 @@
+id = "kansas_city_neighborhoods"
+name = "Kansas City Neighborhoods"
+city = "Kansas City"
+state = "MO"
+
+[fetcher]
+type = "arcgis"
+url = "https://services2.arcgis.com/yL7v93RXrxlqkeDx/arcgis/rest/services/KC_Neighborhoods_MB/FeatureServer/0/query"
+max_records = 300
+
+[fields]
+name = "NBHNAME"
+
+[fields.geometry]
+type = "geojson"

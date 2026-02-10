@@ -244,21 +244,25 @@ pub async fn rank_areas(
             "c.parent_id = (SELECT id FROM crime_categories WHERE name = ${idx} AND parent_id IS NULL)"
         ));
         db_params.push(DatabaseValue::String(cat.to_uppercase()));
-        let _ = idx;
+        idx += 1;
     }
 
+    let _ = idx; // suppress unused-after-increment; kept for safety if filters are added
     let wc = where_clause(&frags);
 
     let sql = format!(
-        "SELECT ct.geoid, ct.name as tract_name, ct.population, ct.land_area_sq_mi,
+        "SELECT ct.geoid, COALESCE(n.name, ct.name) as tract_name,
+                ct.population, ct.land_area_sq_mi,
                 COUNT(*) as incident_count,
                 pc.name as category, COUNT(*) as cat_cnt
          FROM crime_incidents i
          JOIN crime_categories c ON i.category_id = c.id
          LEFT JOIN crime_categories pc ON c.parent_id = pc.id
          JOIN census_tracts ct ON ST_Covers(ct.boundary, i.location)
+         LEFT JOIN tract_neighborhoods tn ON ct.geoid = tn.geoid
+         LEFT JOIN neighborhoods n ON tn.neighborhood_id = n.id
          {wc}
-         GROUP BY ct.geoid, ct.name, ct.population, ct.land_area_sq_mi, pc.name
+         GROUP BY ct.geoid, COALESCE(n.name, ct.name), ct.population, ct.land_area_sq_mi, pc.name
          ORDER BY incident_count {order}"
     );
 
@@ -272,6 +276,7 @@ pub async fn rank_areas(
         let geoid: String = row.to_value("geoid").unwrap_or_default();
         let tract_name: String = row.to_value("tract_name").unwrap_or_default();
         let population: Option<i32> = row.to_value("population").unwrap_or(None);
+        let land_area: Option<f64> = row.to_value("land_area_sq_mi").unwrap_or(None);
         let cat: String = row.to_value("category").unwrap_or_default();
         let cat_cnt: i64 = row.to_value("cat_cnt").unwrap_or(0);
 
@@ -280,6 +285,8 @@ pub async fn rank_areas(
             area_name: tract_name,
             total_incidents: 0,
             incidents_per_1k: None,
+            land_area_sq_mi: land_area,
+            incidents_per_sq_mi: None,
             by_category: Vec::new(),
         });
 
@@ -302,14 +309,32 @@ pub async fn rank_areas(
             let rate = (entry.total_incidents as f64 / f64::from(pop)) * 1000.0;
             entry.incidents_per_1k = Some(rate);
         }
+
+        // Compute crime density if land area is available
+        if let Some(area) = land_area
+            && area > 0.0
+        {
+            #[allow(clippy::cast_precision_loss)]
+            let density = entry.total_incidents as f64 / area;
+            entry.incidents_per_sq_mi = Some(density);
+        }
     }
 
     let mut areas: Vec<AreaStats> = tract_map.into_values().collect();
-    if safest_first {
-        areas.sort_by(|a, b| a.total_incidents.cmp(&b.total_incidents));
-    } else {
-        areas.sort_by(|a, b| b.total_incidents.cmp(&a.total_incidents));
-    }
+
+    // Sort by per-capita rate when available, falling back to absolute count
+    areas.sort_by(|a, b| {
+        let cmp = match (a.incidents_per_1k, b.incidents_per_1k) {
+            (Some(a_rate), Some(b_rate)) => a_rate
+                .partial_cmp(&b_rate)
+                .unwrap_or(std::cmp::Ordering::Equal),
+            // Tracts with known rate sort before those without
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.total_incidents.cmp(&b.total_incidents),
+        };
+        if safest_first { cmp } else { cmp.reverse() }
+    });
     areas.truncate(limit as usize);
 
     let label = if safest_first {

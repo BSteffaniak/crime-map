@@ -1,0 +1,15 @@
+id = "cincinnati_neighborhoods"
+name = "Cincinnati Statistical Neighborhood Approximations"
+city = "Cincinnati"
+state = "OH"
+
+[fetcher]
+type = "arcgis"
+url = "https://cagisonline.hamilton-co.org/arcgis/rest/services/CINC_PLANNING/Cincinnati_Neighborhoods/MapServer/0/query"
+max_records = 100
+
+[fields]
+name = "SNA_NAME"
+
+[fields.geometry]
+type = "geojson"

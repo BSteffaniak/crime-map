@@ -1,0 +1,15 @@
+id = "chicago_neighborhoods"
+name = "Chicago Community Areas"
+city = "Chicago"
+state = "IL"
+
+[fetcher]
+type = "socrata_geo"
+url = "https://data.cityofchicago.org/resource/igwz-8jzy.geojson"
+limit = 100
+
+[fields]
+name = "community"
+
+[fields.geometry]
+type = "geojson"

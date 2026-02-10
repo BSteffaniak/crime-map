@@ -1,0 +1,15 @@
+id = "philadelphia_neighborhoods"
+name = "Philadelphia Neighborhoods"
+city = "Philadelphia"
+state = "PA"
+
+[fetcher]
+type = "arcgis"
+url = "https://services1.arcgis.com/a6oRSxEw6eIY5Zfb/arcgis/rest/services/Philadelphia_Neighborhoods/FeatureServer/0/query"
+max_records = 200
+
+[fields]
+name = "LISTNAME"
+
+[fields.geometry]
+type = "geojson"

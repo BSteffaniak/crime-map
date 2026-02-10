@@ -1,0 +1,15 @@
+id = "atlanta_neighborhoods"
+name = "Atlanta Neighborhoods"
+city = "Atlanta"
+state = "GA"
+
+[fetcher]
+type = "arcgis"
+url = "https://services.arcgis.com/cJ9YHowT8TU7DUyn/arcgis/rest/services/Neighborhoods/FeatureServer/0/query"
+max_records = 300
+
+[fields]
+name = "NAME"
+
+[fields.geometry]
+type = "geojson"

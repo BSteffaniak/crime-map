@@ -1,0 +1,15 @@
+id = "la_neighborhoods"
+name = "Los Angeles Neighborhoods (LA Times)"
+city = "Los Angeles"
+state = "CA"
+
+[fetcher]
+type = "arcgis"
+url = "https://services5.arcgis.com/7nsPwEMP38bSkCjy/arcgis/rest/services/LA_Times_Neighborhoods/FeatureServer/0/query"
+max_records = 1000
+
+[fields]
+name = "name"
+
+[fields.geometry]
+type = "geojson"

@@ -18,6 +18,7 @@ crime_map_source = { workspace = true }
 crime_map_database_models = { workspace = true }
 crime_map_database = { workspace = true }
 crime_map_geography = { workspace = true }
+crime_map_neighborhood = { workspace = true }
 crime_map_ingest_models = { workspace = true }
 switchy_database = { workspace = true, features = ["postgres-raw"] }
 

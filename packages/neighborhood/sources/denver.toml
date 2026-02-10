@@ -1,0 +1,15 @@
+id = "denver_neighborhoods"
+name = "Denver NEST Neighborhoods"
+city = "Denver"
+state = "CO"
+
+[fetcher]
+type = "arcgis"
+url = "https://services1.arcgis.com/zdB7qR0BtYrg0Xpl/arcgis/rest/services/2022_NEST_Neighborhoods/FeatureServer/0/query"
+max_records = 100
+
+[fields]
+name = "NBHD_NAME"
+
+[fields.geometry]
+type = "geojson"

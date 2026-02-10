@@ -17,6 +17,8 @@ members = [
   "packages/server",
   "packages/discover/models",
   "packages/discover",
+  "packages/neighborhood/models",
+  "packages/neighborhood",
   "packages/scraper",
 ]
 
@@ -58,6 +60,8 @@ crime_map_analytics = { default-features = false, path = "packages/analytics" }
 crime_map_ai = { default-features = false, path = "packages/ai" }
 crime_map_discover_models = { default-features = false, path = "packages/discover/models" }
 crime_map_discover = { default-features = false, path = "packages/discover" }
+crime_map_neighborhood_models = { default-features = false, path = "packages/neighborhood/models" }
+crime_map_neighborhood = { default-features = false, path = "packages/neighborhood" }
 crime_map_scraper = { default-features = false, path = "packages/scraper" }
 
 # MoosicBox / Switchy (git references)

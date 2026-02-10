@@ -1,0 +1,15 @@
+id = "detroit_neighborhoods"
+name = "Detroit Neighborhoods"
+city = "Detroit"
+state = "MI"
+
+[fetcher]
+type = "arcgis"
+url = "https://services2.arcgis.com/qvkbeam7Wirps6zC/arcgis/rest/services/Current_City_of_Detroit_Neighborhoods/FeatureServer/0/query"
+max_records = 300
+
+[fields]
+name = "nhood_name"
+
+[fields.geometry]
+type = "geojson"

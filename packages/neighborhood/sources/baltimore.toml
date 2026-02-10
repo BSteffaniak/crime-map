@@ -1,0 +1,15 @@
+id = "baltimore_neighborhoods"
+name = "Baltimore Neighborhoods"
+city = "Baltimore"
+state = "MD"
+
+[fetcher]
+type = "arcgis"
+url = "https://geodata.baltimorecity.gov/egis/rest/services/CityView/Neighborhoods/MapServer/0/query"
+max_records = 300
+
+[fields]
+name = "Name"
+
+[fields.geometry]
+type = "geojson"

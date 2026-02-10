@@ -1,0 +1,15 @@
+id = "boston_neighborhoods"
+name = "Boston Neighborhood Boundaries"
+city = "Boston"
+state = "MA"
+
+[fetcher]
+type = "arcgis"
+url = "https://gis.bostonplans.org/hosting/rest/services/Hosted/Boston_Neighborhood_Boundaries/FeatureServer/5/query"
+max_records = 30
+
+[fields]
+name = "name"
+
+[fields.geometry]
+type = "geojson"

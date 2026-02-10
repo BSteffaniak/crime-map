@@ -48,6 +48,10 @@ pub struct AreaStats {
     pub total_incidents: u64,
     /// Incidents per 1,000 residents (if population data available).
     pub incidents_per_1k: Option<f64>,
+    /// Land area in square miles.
+    pub land_area_sq_mi: Option<f64>,
+    /// Incidents per square mile (if land area data available).
+    pub incidents_per_sq_mi: Option<f64>,
     /// Breakdown by top-level category.
     pub by_category: Vec<CategoryCount>,
 }

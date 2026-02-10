@@ -1,0 +1,15 @@
+id = "minneapolis_neighborhoods"
+name = "Minneapolis Neighborhoods"
+city = "Minneapolis"
+state = "MN"
+
+[fetcher]
+type = "arcgis"
+url = "https://services.arcgis.com/afSMGVsC7QlRK1kZ/arcgis/rest/services/Minneapolis_Neighborhoods/FeatureServer/0/query"
+max_records = 100
+
+[fields]
+name = "BDNAME"
+
+[fields.geometry]
+type = "geojson"

@@ -1,0 +1,15 @@
+id = "nyc_neighborhoods"
+name = "NYC Neighborhood Tabulation Areas 2020"
+city = "New York"
+state = "NY"
+
+[fetcher]
+type = "arcgis"
+url = "https://services5.arcgis.com/GfwWNkhOj9bNBqoJ/arcgis/rest/services/NYC_Neighborhood_Tabulation_Areas_2020/FeatureServer/0/query"
+max_records = 300
+
+[fields]
+name = "NTAName"
+
+[fields.geometry]
+type = "geojson"

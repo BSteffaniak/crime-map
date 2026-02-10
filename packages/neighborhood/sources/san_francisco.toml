@@ -1,0 +1,15 @@
+id = "sf_neighborhoods"
+name = "San Francisco Neighborhoods"
+city = "San Francisco"
+state = "CA"
+
+[fetcher]
+type = "socrata_geo"
+url = "https://data.sfgov.org/resource/j2bu-swwd.geojson"
+limit = 5000
+
+[fields]
+name = "nhood"
+
+[fields.geometry]
+type = "geojson"

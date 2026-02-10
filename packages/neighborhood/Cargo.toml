@@ -1,0 +1,24 @@
+[package]
+authors = { workspace = true }
+description = "Neighborhood boundary data fetching, normalization, and ingestion"
+edition = { workspace = true }
+license = { workspace = true }
+name = "crime_map_neighborhood"
+repository = { workspace = true }
+version = "0.1.0"
+
+[dependencies]
+crime_map_neighborhood_models = { workspace = true }
+
+switchy_database = { workspace = true, features = ["postgres-raw"] }
+
+log = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+thiserror = { workspace = true }
+toml = { workspace = true }
+
+[features]
+default = []
+fail-on-warnings = []

@@ -1,0 +1,15 @@
+id = "tampa_neighborhoods"
+name = "Tampa Neighborhood Associations"
+city = "Tampa"
+state = "FL"
+
+[fetcher]
+type = "arcgis"
+url = "https://arcgis.tampagov.net/arcgis/rest/services/OpenData/Boundary/MapServer/5/query"
+max_records = 200
+
+[fields]
+name = "AssocLabel"
+
+[fields.geometry]
+type = "geojson"

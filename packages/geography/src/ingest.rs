@@ -188,6 +188,8 @@ async fn ingest_state(
 /// Ingests census tract boundaries for all US states.
 ///
 /// Downloads from the `TIGERweb` REST API and loads into `PostGIS`.
+/// After loading boundaries, also fetches population data from the ACS
+/// and county names from `TIGERweb`.
 /// Processes states sequentially to avoid overwhelming the API.
 ///
 /// # Errors
@@ -202,7 +204,16 @@ pub async fn ingest_all_tracts(db: &dyn Database) -> Result<u64, GeoError> {
 
     for fips in STATE_FIPS {
         match ingest_state(db, &client, fips).await {
-            Ok(count) => total += count,
+            Ok(count) => {
+                total += count;
+                // Populate supplemental data for this state
+                if let Err(e) = populate_population(db, &client, fips).await {
+                    log::error!("Failed to populate population for state {fips}: {e}");
+                }
+                if let Err(e) = populate_county_names(db, &client, fips).await {
+                    log::error!("Failed to populate county names for state {fips}: {e}");
+                }
+            }
             Err(e) => {
                 log::error!("Failed to ingest state {fips}: {e}");
                 // Continue with other states
@@ -215,6 +226,8 @@ pub async fn ingest_all_tracts(db: &dyn Database) -> Result<u64, GeoError> {
 }
 
 /// Ingests census tract boundaries for specific states only.
+///
+/// Also fetches population data and county names for the specified states.
 ///
 /// # Errors
 ///
@@ -231,7 +244,15 @@ pub async fn ingest_tracts_for_states(
 
     for fips in state_fips_codes {
         match ingest_state(db, &client, fips).await {
-            Ok(count) => total += count,
+            Ok(count) => {
+                total += count;
+                if let Err(e) = populate_population(db, &client, fips).await {
+                    log::error!("Failed to populate population for state {fips}: {e}");
+                }
+                if let Err(e) = populate_county_names(db, &client, fips).await {
+                    log::error!("Failed to populate county names for state {fips}: {e}");
+                }
+            }
             Err(e) => {
                 log::error!("Failed to ingest state {fips}: {e}");
             }
@@ -239,4 +260,139 @@ pub async fn ingest_tracts_for_states(
     }
 
     Ok(total)
+}
+
+/// Fetches ACS 5-year population estimates and updates the `census_tracts`
+/// table.
+///
+/// Uses the Census Bureau API to get the total population (`B01001_001E`)
+/// for every tract in a state. No API key is required.
+///
+/// # Errors
+///
+/// Returns [`GeoError`] if the HTTP request or database update fails.
+async fn populate_population(
+    db: &dyn Database,
+    client: &reqwest::Client,
+    state_fips: &str,
+) -> Result<(), GeoError> {
+    let url = format!(
+        "https://api.census.gov/data/2023/acs/acs5\
+         ?get=B01001_001E\
+         &for=tract:*\
+         &in=state:{state_fips}"
+    );
+
+    log::info!("Fetching ACS population data for state FIPS {state_fips}...");
+
+    let resp = client.get(&url).send().await?;
+    let body = resp.text().await?;
+
+    // Response is a JSON array of arrays:
+    // [["B01001_001E","state","county","tract"],
+    //  ["1181","11","001","000101"], ...]
+    let rows: Vec<Vec<String>> = serde_json::from_str(&body).map_err(|e| GeoError::Conversion {
+        message: format!("Failed to parse ACS response for state {state_fips}: {e}"),
+    })?;
+
+    let mut updated = 0u64;
+
+    // Skip the header row
+    for row in rows.iter().skip(1) {
+        if row.len() < 4 {
+            continue;
+        }
+
+        let population: Option<i32> = row[0].parse().ok();
+        let state = &row[1];
+        let county = &row[2];
+        let tract = &row[3];
+
+        // Construct the GEOID: state FIPS + county FIPS + tract code
+        let geoid = format!("{state}{county}{tract}");
+
+        if let Some(pop) = population {
+            let result = db
+                .exec_raw_params(
+                    "UPDATE census_tracts SET population = $1 WHERE geoid = $2",
+                    &[DatabaseValue::Int32(pop), DatabaseValue::String(geoid)],
+                )
+                .await?;
+            updated += result;
+        }
+    }
+
+    let abbr = state_abbr(state_fips);
+    log::info!("State {state_fips} ({abbr}): updated population for {updated} tracts");
+
+    Ok(())
+}
+
+/// Fetches county names from the `TIGERweb` Counties layer and updates
+/// the `census_tracts` table.
+///
+/// # Errors
+///
+/// Returns [`GeoError`] if the HTTP request or database update fails.
+async fn populate_county_names(
+    db: &dyn Database,
+    client: &reqwest::Client,
+    state_fips: &str,
+) -> Result<(), GeoError> {
+    let url = format!(
+        "https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/tigerWMS_ACS2023/MapServer/82/query\
+         ?where=STATE%3D'{state_fips}'\
+         &outFields=STATE,COUNTY,BASENAME\
+         &f=json\
+         &returnGeometry=false"
+    );
+
+    log::info!("Fetching county names for state FIPS {state_fips}...");
+
+    let resp = client.get(&url).send().await?;
+    let body = resp.text().await?;
+
+    let json: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| GeoError::Conversion {
+            message: format!("Failed to parse county response for state {state_fips}: {e}"),
+        })?;
+
+    let features = json["features"]
+        .as_array()
+        .ok_or_else(|| GeoError::Conversion {
+            message: format!("No features in county response for state {state_fips}"),
+        })?;
+
+    let mut updated = 0u64;
+
+    for feature in features {
+        let attrs = &feature["attributes"];
+        let county_fips = attrs["COUNTY"].as_str().unwrap_or_default();
+        let county_name = attrs["BASENAME"].as_str().unwrap_or_default();
+
+        if county_fips.is_empty() || county_name.is_empty() {
+            continue;
+        }
+
+        let result = db
+            .exec_raw_params(
+                "UPDATE census_tracts SET county_name = $1 \
+                 WHERE state_fips = $2 AND county_fips = $3",
+                &[
+                    DatabaseValue::String(county_name.to_string()),
+                    DatabaseValue::String(state_fips.to_string()),
+                    DatabaseValue::String(county_fips.to_string()),
+                ],
+            )
+            .await?;
+        updated += result;
+    }
+
+    let abbr = state_abbr(state_fips);
+    log::info!(
+        "State {state_fips} ({abbr}): updated county names for {updated} tracts ({} counties)",
+        features.len()
+    );
+
+    Ok(())
 }
