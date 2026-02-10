@@ -1,0 +1,26 @@
+[package]
+authors = { workspace = true }
+description = "Census tract boundary data management and ingestion"
+edition = { workspace = true }
+license = { workspace = true }
+name = "crime_map_geography"
+repository = { workspace = true }
+version = "0.1.0"
+
+[dependencies]
+crime_map_geography_models = { workspace = true }
+
+switchy_database = { workspace = true, features = ["postgres-raw"] }
+moosicbox_json_utils = { workspace = true, features = ["database"] }
+
+chrono = { workspace = true }
+log = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+
+[features]
+default = []
+fail-on-warnings = []

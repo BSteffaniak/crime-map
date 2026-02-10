@@ -2,13 +2,14 @@ import { useCallback, useState } from "react";
 import CrimeMap from "./components/map/CrimeMap";
 import FilterPanel from "./components/filters/FilterPanel";
 import IncidentSidebar from "./components/sidebar/IncidentSidebar";
+import AiChat from "./components/ai/AiChat";
 import { useFilters } from "./hooks/useFilters";
 import type { BBox } from "./lib/sidebar/types";
 
+type SidebarTab = "filters" | "incidents" | "ai";
+
 export default function App() {
-  const [sidebarTab, setSidebarTab] = useState<"filters" | "incidents">(
-    "filters",
-  );
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("filters");
   const [bbox, setBbox] = useState<BBox | null>(null);
 
   const {
@@ -65,6 +66,16 @@ export default function App() {
           >
             Incidents
           </button>
+          <button
+            onClick={() => setSidebarTab("ai")}
+            className={`flex-1 px-4 py-2.5 text-sm font-medium transition-colors ${
+              sidebarTab === "ai"
+                ? "border-b-2 border-blue-600 text-blue-600"
+                : "text-gray-500 hover:text-gray-700"
+            }`}
+          >
+            Ask AI
+          </button>
         </div>
 
         {/* Tab content */}
@@ -80,8 +91,10 @@ export default function App() {
               onClearAll={clearAll}
               activeFilterCount={activeFilterCount}
             />
-          ) : (
+          ) : sidebarTab === "incidents" ? (
             <IncidentSidebar bbox={bbox} filters={filters} />
+          ) : (
+            <AiChat />
           )}
         </div>
       </div>

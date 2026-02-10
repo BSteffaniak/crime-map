@@ -1,0 +1,18 @@
+[package]
+authors = { workspace = true }
+description = "Analytics query result types for the AI agent tools"
+edition = { workspace = true }
+license = { workspace = true }
+name = "crime_map_analytics_models"
+repository = { workspace = true }
+version = "0.1.0"
+
+[dependencies]
+crime_map_geography_models = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+
+[features]
+default = []
+fail-on-warnings = []

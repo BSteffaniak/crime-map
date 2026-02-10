@@ -1,0 +1,15 @@
+[package]
+authors = { workspace = true }
+description = "Census tract and geographic boundary types"
+edition = { workspace = true }
+license = { workspace = true }
+name = "crime_map_geography_models"
+repository = { workspace = true }
+version = "0.1.0"
+
+[dependencies]
+serde = { workspace = true }
+
+[features]
+default = []
+fail-on-warnings = []

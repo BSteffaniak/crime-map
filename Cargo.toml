@@ -5,6 +5,11 @@ members = [
   "packages/source",
   "packages/database/models",
   "packages/database",
+  "packages/geography/models",
+  "packages/geography",
+  "packages/analytics/models",
+  "packages/analytics",
+  "packages/ai",
   "packages/ingest/models",
   "packages/ingest",
   "packages/generate",
@@ -43,6 +48,11 @@ crime_map_ingest = { default-features = false, path = "packages/ingest" }
 crime_map_generate = { default-features = false, path = "packages/generate" }
 crime_map_server_models = { default-features = false, path = "packages/server/models" }
 crime_map_server = { default-features = false, path = "packages/server" }
+crime_map_geography_models = { default-features = false, path = "packages/geography/models" }
+crime_map_geography = { default-features = false, path = "packages/geography" }
+crime_map_analytics_models = { default-features = false, path = "packages/analytics/models" }
+crime_map_analytics = { default-features = false, path = "packages/analytics" }
+crime_map_ai = { default-features = false, path = "packages/ai" }
 
 # MoosicBox / Switchy (git references)
 moosicbox_assert = { git = "https://github.com/MoosicBox/MoosicBox.git", branch = "master", default-features = false }
@@ -63,6 +73,7 @@ actix-files = { version = "0.6.10", default-features = false }
 actix-rt = { version = "2.11.0", default-features = false }
 
 async-trait = { version = "0.1.89", default-features = false }
+async-stream = { version = "0.3.6", default-features = false }
 chrono = { version = "0.4.43", default-features = false, features = [
   "clock",
   "serde",

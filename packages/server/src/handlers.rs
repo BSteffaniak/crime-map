@@ -525,3 +525,105 @@ fn parse_bbox(s: &str) -> Option<BoundingBox> {
         None
     }
 }
+
+/// Query parameters for the AI ask endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub struct AiQueryParams {
+    /// The user's natural-language question.
+    pub q: String,
+}
+
+/// `GET /api/ai/ask?q=...`
+///
+/// Server-Sent Events endpoint that streams AI agent progress and final
+/// answer. The agent interprets the user's question, calls analytical
+/// tools against the crime database, and produces a markdown answer.
+pub async fn ai_ask(state: web::Data<AppState>, params: web::Query<AiQueryParams>) -> HttpResponse {
+    let question = params.q.trim().to_string();
+
+    if question.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Query parameter 'q' is required"
+        }));
+    }
+
+    if question.len() > 2000 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Question too long (max 2000 characters)"
+        }));
+    }
+
+    // Check if AI is configured
+    let provider = match crime_map_ai::providers::create_provider_from_env() {
+        Ok(p) => p,
+        Err(e) => {
+            log::error!("AI provider not configured: {e}");
+            return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+                "error": format!("AI not configured: {e}")
+            }));
+        }
+    };
+
+    let db = state.db.clone();
+    let context = state.ai_context.clone();
+
+    // Create channel for agent events
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<crime_map_ai::AgentEvent>(32);
+
+    // Spawn the agent loop with a 60-second timeout
+    let agent_handle = tokio::spawn(async move {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            crime_map_ai::agent::run_agent(
+                provider.as_ref(),
+                db.as_ref(),
+                &context,
+                &question,
+                tx.clone(),
+            ),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                log::error!("Agent error: {e}");
+                let _ = tx
+                    .send(crime_map_ai::AgentEvent::Error {
+                        message: format!("Agent error: {e}"),
+                    })
+                    .await;
+            }
+            Err(_) => {
+                log::error!("Agent timed out after 60 seconds");
+                let _ = tx
+                    .send(crime_map_ai::AgentEvent::Error {
+                        message: "Request timed out. Please try a simpler question.".to_string(),
+                    })
+                    .await;
+            }
+        }
+    });
+
+    // Stream events as SSE
+    let stream = async_stream::stream! {
+        while let Some(event) = rx.recv().await {
+            let json = serde_json::to_string(&event).unwrap_or_default();
+            let sse = format!("data: {json}\n\n");
+            yield Ok::<_, actix_web::Error>(actix_web::web::Bytes::from(sse));
+        }
+
+        // Wait for agent to finish
+        let _ = agent_handle.await;
+
+        // Send done event
+        yield Ok::<_, actix_web::Error>(actix_web::web::Bytes::from("data: {\"type\":\"done\"}\n\n"));
+    };
+
+    HttpResponse::Ok()
+        .content_type("text/event-stream")
+        .insert_header(("Cache-Control", "no-cache"))
+        .insert_header(("Connection", "keep-alive"))
+        .insert_header(("X-Accel-Buffering", "no"))
+        .streaming(stream)
+}

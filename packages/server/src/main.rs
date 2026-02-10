@@ -7,6 +7,8 @@
 //! Serves the REST API for querying crime data and static tile files
 //! (`PMTiles`) for the `MapLibre` frontend. Sidebar queries are served
 //! from a pre-generated `SQLite` database with R-tree spatial indexing.
+//! AI-powered queries are served via SSE streaming from the `/api/ai/ask`
+//! endpoint.
 
 mod handlers;
 
@@ -14,6 +16,7 @@ use actix_cors::Cors;
 use actix_files::Files;
 use actix_web::{App, HttpServer, middleware, web};
 use crime_map_database::{db, run_migrations};
+use crime_map_geography::queries as geo_queries;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use switchy_database::Database;
@@ -28,6 +31,8 @@ pub struct AppState {
     /// `DuckDB` connection for fast pre-aggregated count queries.
     /// `duckdb::Connection` is `Send` but not `Sync`, so a `Mutex` is needed.
     pub count_db: Arc<Mutex<duckdb::Connection>>,
+    /// AI agent context (available cities, date range).
+    pub ai_context: Arc<crime_map_ai::agent::AgentContext>,
 }
 
 #[actix_web::main]
@@ -59,10 +64,25 @@ async fn main() -> std::io::Result<()> {
     )
     .expect("Failed to open DuckDB count database");
 
+    // Build AI context: discover available cities and date range
+    log::info!("Building AI context...");
+    let available_cities = geo_queries::get_available_cities(db_conn.as_ref())
+        .await
+        .unwrap_or_default();
+    let (min_date, max_date) = geo_queries::get_data_date_range(db_conn.as_ref())
+        .await
+        .unwrap_or((None, None));
+    let ai_context = crime_map_ai::agent::AgentContext {
+        available_cities,
+        min_date,
+        max_date,
+    };
+
     let state = web::Data::new(AppState {
         db: Arc::from(db_conn),
         sidebar_db: Arc::from(sidebar_db),
         count_db: Arc::new(Mutex::new(count_db)),
+        ai_context: Arc::new(ai_context),
     });
 
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -86,7 +106,8 @@ async fn main() -> std::io::Result<()> {
                     .route("/categories", web::get().to(handlers::categories))
                     .route("/incidents", web::get().to(handlers::incidents))
                     .route("/sources", web::get().to(handlers::sources))
-                    .route("/sidebar", web::get().to(handlers::sidebar)),
+                    .route("/sidebar", web::get().to(handlers::sidebar))
+                    .route("/ai/ask", web::get().to(handlers::ai_ask)),
             )
             // Serve generated tile data
             .service(Files::new("/tiles", "data/generated").show_files_listing())
