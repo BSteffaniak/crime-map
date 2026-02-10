@@ -10,9 +10,15 @@
 //! database with R-tree spatial indexing is generated for server-side
 //! sidebar queries.
 //!
+//! Supports checksum-based caching: a manifest file tracks per-source
+//! fingerprints so unchanged data is not re-exported. Each output is
+//! tracked independently, allowing partial regeneration after interrupted
+//! runs or when only some outputs are missing.
+//!
 //! Uses keyset pagination and streaming writes to keep memory usage constant
 //! regardless of dataset size.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
@@ -22,11 +28,52 @@ use clap::{Args, Parser, Subcommand};
 use crime_map_database::db;
 use crime_map_source::registry::all_sources;
 use moosicbox_json_utils::database::ToValue as _;
+use serde::{Deserialize, Serialize};
 use switchy_database::{Database, DatabaseValue};
 use switchy_database_connection::init_sqlite_rusqlite;
 
 /// Number of rows to fetch per database query batch.
 const BATCH_SIZE: i64 = 10_000;
+
+/// Current manifest schema version. Bump this when the manifest format
+/// changes in a backward-incompatible way.
+const MANIFEST_VERSION: u32 = 1;
+
+// Output name constants used as keys in the manifest.
+const OUTPUT_INCIDENTS_PMTILES: &str = "incidents_pmtiles";
+const OUTPUT_CLUSTERS_PMTILES: &str = "clusters_pmtiles";
+const OUTPUT_INCIDENTS_DB: &str = "incidents_db";
+
+/// Per-source fingerprint capturing the data state at generation time.
+///
+/// Since `crime_incidents` is insert-only (`ON CONFLICT DO NOTHING`),
+/// the combination of `record_count`, `last_synced_at`, and
+/// `max_incident_id` is a reliable change indicator.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct SourceFingerprint {
+    source_id: i32,
+    name: String,
+    record_count: i64,
+    last_synced_at: Option<String>,
+    max_incident_id: i64,
+}
+
+/// Generation manifest stored at `data/generated/manifest.json`.
+///
+/// Records the data state and CLI config at the time of last generation
+/// so subsequent runs can skip unchanged outputs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Manifest {
+    version: u32,
+    source_fingerprints: Vec<SourceFingerprint>,
+    /// Sorted list of `--sources` short IDs, or `None` for all sources.
+    sources_filter: Option<Vec<String>>,
+    /// The `--limit` value used, or `None` for unlimited.
+    limit: Option<u64>,
+    /// Map of output name to ISO 8601 timestamp of last successful
+    /// generation.
+    outputs: BTreeMap<String, String>,
+}
 
 /// Returns the workspace root directory, resolved at compile time from
 /// `CARGO_MANIFEST_DIR`. This ensures output paths are always relative to
@@ -63,6 +110,10 @@ struct GenerateArgs {
     /// deleting it.
     #[arg(long)]
     keep_intermediate: bool,
+
+    /// Force regeneration even if source data hasn't changed.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Subcommand)]
@@ -101,28 +152,340 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Pmtiles { args } => {
             let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
-            generate_pmtiles(db.as_ref(), &args, &source_ids, &dir).await?;
-            cleanup_intermediate(&args, &dir);
+            run_with_cache(
+                db.as_ref(),
+                &args,
+                &source_ids,
+                &dir,
+                &[OUTPUT_INCIDENTS_PMTILES],
+            )
+            .await?;
         }
         Commands::Clusters { args } => {
             let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
-            generate_cluster_tiles(db.as_ref(), &args, &source_ids, &dir).await?;
-            cleanup_intermediate(&args, &dir);
+            run_with_cache(
+                db.as_ref(),
+                &args,
+                &source_ids,
+                &dir,
+                &[OUTPUT_CLUSTERS_PMTILES],
+            )
+            .await?;
         }
         Commands::Sidebar { args } => {
             let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
-            generate_sidebar_db(db.as_ref(), &args, &source_ids, &dir).await?;
+            run_with_cache(
+                db.as_ref(),
+                &args,
+                &source_ids,
+                &dir,
+                &[OUTPUT_INCIDENTS_DB],
+            )
+            .await?;
         }
         Commands::All { args } => {
             let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
-            generate_pmtiles(db.as_ref(), &args, &source_ids, &dir).await?;
-            generate_cluster_tiles(db.as_ref(), &args, &source_ids, &dir).await?;
-            generate_sidebar_db(db.as_ref(), &args, &source_ids, &dir).await?;
-            cleanup_intermediate(&args, &dir);
+            run_with_cache(
+                db.as_ref(),
+                &args,
+                &source_ids,
+                &dir,
+                &[
+                    OUTPUT_INCIDENTS_PMTILES,
+                    OUTPUT_CLUSTERS_PMTILES,
+                    OUTPUT_INCIDENTS_DB,
+                ],
+            )
+            .await?;
         }
     }
 
     Ok(())
+}
+
+/// Runs the generation pipeline with manifest-based caching.
+///
+/// Compares current source fingerprints against the stored manifest to
+/// determine which `requested_outputs` actually need regeneration. Skips
+/// outputs that are already up-to-date unless `--force` is specified.
+async fn run_with_cache(
+    db: &dyn Database,
+    args: &GenerateArgs,
+    source_ids: &[i32],
+    dir: &Path,
+    requested_outputs: &[&str],
+) -> Result<(), Box<dyn std::error::Error>> {
+    log::info!("Querying source fingerprints...");
+    let fingerprints = query_fingerprints(db, source_ids).await?;
+    let total_records: i64 = fingerprints.iter().map(|f| f.record_count).sum();
+    log::info!(
+        "Found {} sources, {total_records} total records",
+        fingerprints.len()
+    );
+
+    let mut manifest = load_manifest(dir);
+    let sources_filter = sorted_sources_filter(args);
+
+    // Determine what needs regeneration
+    let needs: BTreeMap<&str, bool> = requested_outputs
+        .iter()
+        .map(|&name| {
+            let path = output_file_path(dir, name);
+            let needed = output_needs_regen(
+                manifest.as_ref(),
+                &fingerprints,
+                name,
+                &path,
+                sources_filter.as_deref(),
+                args.limit,
+                args.force,
+            );
+            (name, needed)
+        })
+        .collect();
+
+    if needs.values().all(|&v| !v) {
+        log::info!("All requested outputs are up-to-date, nothing to regenerate");
+        return Ok(());
+    }
+
+    for (&name, &needed) in &needs {
+        if needed {
+            log::info!("{name}: needs regeneration");
+        } else {
+            log::info!("{name}: up-to-date, skipping");
+        }
+    }
+
+    // Ensure we have a manifest to update
+    let manifest = manifest.get_or_insert_with(|| Manifest {
+        version: MANIFEST_VERSION,
+        source_fingerprints: Vec::new(),
+        sources_filter: None,
+        limit: None,
+        outputs: BTreeMap::new(),
+    });
+
+    // Run each output that needs it
+    if needs.get(OUTPUT_INCIDENTS_PMTILES) == Some(&true) {
+        generate_pmtiles(db, args, source_ids, dir).await?;
+        record_output(manifest, OUTPUT_INCIDENTS_PMTILES);
+        save_manifest(dir, manifest)?;
+    }
+
+    if needs.get(OUTPUT_CLUSTERS_PMTILES) == Some(&true) {
+        generate_cluster_tiles(db, args, source_ids, dir).await?;
+        record_output(manifest, OUTPUT_CLUSTERS_PMTILES);
+        save_manifest(dir, manifest)?;
+    }
+
+    if needs.get(OUTPUT_INCIDENTS_DB) == Some(&true) {
+        generate_sidebar_db(db, args, source_ids, dir).await?;
+        record_output(manifest, OUTPUT_INCIDENTS_DB);
+        save_manifest(dir, manifest)?;
+    }
+
+    // Update manifest with current fingerprints and config
+    manifest.source_fingerprints.clone_from(&fingerprints);
+    manifest.sources_filter.clone_from(&sources_filter);
+    manifest.limit = args.limit;
+    manifest.version = MANIFEST_VERSION;
+    save_manifest(dir, manifest)?;
+
+    cleanup_intermediate(args, dir);
+
+    Ok(())
+}
+
+// ============================================================
+// Manifest / caching infrastructure
+// ============================================================
+
+/// Queries `PostGIS` for per-source fingerprints used to detect data changes.
+///
+/// Returns one [`SourceFingerprint`] per source, ordered by `source_id`.
+/// If `source_ids` is empty, returns fingerprints for all sources.
+///
+/// # Errors
+///
+/// Returns an error if the database query fails.
+async fn query_fingerprints(
+    db: &dyn Database,
+    source_ids: &[i32],
+) -> Result<Vec<SourceFingerprint>, Box<dyn std::error::Error>> {
+    let (query, params) = if source_ids.is_empty() {
+        (
+            "SELECT cs.id as source_id, cs.name, cs.record_count,
+                    cs.last_synced_at, COALESCE(MAX(ci.id), 0) as max_incident_id
+             FROM crime_sources cs
+             LEFT JOIN crime_incidents ci ON ci.source_id = cs.id
+             GROUP BY cs.id, cs.name, cs.record_count, cs.last_synced_at
+             ORDER BY cs.id"
+                .to_string(),
+            Vec::new(),
+        )
+    } else {
+        let mut params: Vec<DatabaseValue> = Vec::new();
+        let placeholders: Vec<String> = source_ids
+            .iter()
+            .enumerate()
+            .map(|(i, &sid)| {
+                params.push(DatabaseValue::Int32(sid));
+                format!("${}", i + 1)
+            })
+            .collect();
+        let query = format!(
+            "SELECT cs.id as source_id, cs.name, cs.record_count,
+                    cs.last_synced_at, COALESCE(MAX(ci.id), 0) as max_incident_id
+             FROM crime_sources cs
+             LEFT JOIN crime_incidents ci ON ci.source_id = cs.id
+             WHERE cs.id IN ({})
+             GROUP BY cs.id, cs.name, cs.record_count, cs.last_synced_at
+             ORDER BY cs.id",
+            placeholders.join(", ")
+        );
+        (query, params)
+    };
+
+    let rows = db.query_raw_params(&query, &params).await?;
+
+    let fingerprints = rows
+        .iter()
+        .map(|row| {
+            let last_synced: Option<chrono::NaiveDateTime> =
+                row.to_value("last_synced_at").unwrap_or(None);
+            let last_synced_str = last_synced.map(|dt| {
+                chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc)
+                    .to_rfc3339()
+            });
+
+            SourceFingerprint {
+                source_id: row.to_value("source_id").unwrap_or(0),
+                name: row.to_value("name").unwrap_or_default(),
+                record_count: row.to_value("record_count").unwrap_or(0),
+                last_synced_at: last_synced_str,
+                max_incident_id: row.to_value("max_incident_id").unwrap_or(0),
+            }
+        })
+        .collect();
+
+    Ok(fingerprints)
+}
+
+/// Loads the generation manifest from `dir/manifest.json`.
+///
+/// Returns `None` if the file does not exist or cannot be parsed.
+fn load_manifest(dir: &Path) -> Option<Manifest> {
+    let path = dir.join("manifest.json");
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        log::info!("No existing manifest found");
+        return None;
+    };
+    match serde_json::from_str(&contents) {
+        Ok(m) => {
+            log::info!("Loaded manifest from {}", path.display());
+            Some(m)
+        }
+        Err(e) => {
+            log::warn!("Failed to parse manifest {}: {e}", path.display());
+            None
+        }
+    }
+}
+
+/// Writes the generation manifest to `dir/manifest.json`.
+///
+/// Uses an atomic write pattern (write to `.tmp`, then rename) to avoid
+/// corrupt manifests from interrupted writes.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be written.
+fn save_manifest(dir: &Path, manifest: &Manifest) -> Result<(), Box<dyn std::error::Error>> {
+    let path = dir.join("manifest.json");
+    let tmp_path = dir.join("manifest.json.tmp");
+    let contents = serde_json::to_string_pretty(manifest)?;
+    std::fs::write(&tmp_path, contents)?;
+    std::fs::rename(&tmp_path, &path)?;
+    log::info!("Saved manifest to {}", path.display());
+    Ok(())
+}
+
+/// Records a successful output generation in the manifest.
+fn record_output(manifest: &mut Manifest, output_name: &str) {
+    manifest
+        .outputs
+        .insert(output_name.to_string(), chrono::Utc::now().to_rfc3339());
+}
+
+/// Returns the file path for a given output name.
+#[must_use]
+fn output_file_path(dir: &Path, output_name: &str) -> PathBuf {
+    match output_name {
+        OUTPUT_INCIDENTS_PMTILES => dir.join("incidents.pmtiles"),
+        OUTPUT_CLUSTERS_PMTILES => dir.join("clusters.pmtiles"),
+        OUTPUT_INCIDENTS_DB => dir.join("incidents.db"),
+        _ => dir.join(output_name),
+    }
+}
+
+/// Normalizes the `--sources` flag into a sorted list for manifest comparison.
+fn sorted_sources_filter(args: &GenerateArgs) -> Option<Vec<String>> {
+    args.sources.as_ref().map(|s| {
+        let mut v: Vec<String> = s.split(',').map(|x| x.trim().to_string()).collect();
+        v.sort();
+        v
+    })
+}
+
+/// Determines whether a specific output needs regeneration.
+///
+/// Returns `true` if any of: `force` is set, no manifest exists, manifest
+/// version mismatch, source fingerprints changed, CLI config changed
+/// (`--sources` or `--limit`), output not recorded in manifest, or output
+/// file missing from disk.
+fn output_needs_regen(
+    manifest: Option<&Manifest>,
+    current_fingerprints: &[SourceFingerprint],
+    output_name: &str,
+    output_path: &Path,
+    sources_filter: Option<&[String]>,
+    limit: Option<u64>,
+    force: bool,
+) -> bool {
+    if force {
+        return true;
+    }
+
+    let Some(m) = manifest else {
+        return true;
+    };
+
+    if m.version != MANIFEST_VERSION {
+        return true;
+    }
+
+    if m.source_fingerprints != current_fingerprints {
+        return true;
+    }
+
+    if m.sources_filter.as_deref() != sources_filter {
+        return true;
+    }
+
+    if m.limit != limit {
+        return true;
+    }
+
+    if !m.outputs.contains_key(output_name) {
+        return true;
+    }
+
+    if !output_path.exists() {
+        return true;
+    }
+
+    false
 }
 
 /// Resolves `--sources` short IDs (e.g., "chicago") to database integer
