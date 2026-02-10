@@ -250,7 +250,12 @@ async fn sync_source(
     let mut total_raw: u64 = 0;
     let mut total_normalized: u64 = 0;
     let mut total_inserted: u64 = 0;
-    let mut page_num: u64 = 0;
+    let page_size = source.page_size();
+    let mut page_num: u64 = if page_size > 0 {
+        resume_offset / page_size
+    } else {
+        0
+    };
 
     // Process pages as they arrive
     while let Some(page) = rx.recv().await {

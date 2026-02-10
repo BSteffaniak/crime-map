@@ -406,6 +406,17 @@ impl SourceDefinition {
         &self.name
     }
 
+    /// Returns the configured page size for this source's fetcher.
+    #[must_use]
+    pub const fn page_size(&self) -> u64 {
+        match &self.fetcher {
+            FetcherConfig::Socrata { page_size, .. }
+            | FetcherConfig::Arcgis { page_size, .. }
+            | FetcherConfig::Ckan { page_size, .. }
+            | FetcherConfig::Carto { page_size, .. } => *page_size,
+        }
+    }
+
     /// Starts fetching pages in a background task and returns a receiver
     /// that yields one page of raw JSON records at a time.
     ///
