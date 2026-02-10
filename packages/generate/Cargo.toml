@@ -15,6 +15,7 @@ path = "src/main.rs"
 crime_map_crime_models = { workspace = true }
 crime_map_database_models = { workspace = true }
 crime_map_database = { workspace = true }
+crime_map_source = { workspace = true }
 moosicbox_json_utils = { workspace = true, features = ["database"] }
 switchy_database = { workspace = true, features = ["postgres-raw"] }
 

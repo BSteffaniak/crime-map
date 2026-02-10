@@ -4,7 +4,7 @@
 //! at compile time via [`include_str!`]. Adding a new source is as simple as
 //! creating a new TOML file and adding it to the list below.
 
-use crate::source_def::{parse_source_toml, SourceDefinition};
+use crate::source_def::{SourceDefinition, parse_source_toml};
 
 /// TOML configs embedded at compile time.
 const SOURCE_TOMLS: &[(&str, &str)] = &[
