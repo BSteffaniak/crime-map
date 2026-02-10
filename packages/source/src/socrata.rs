@@ -67,11 +67,16 @@ pub async fn fetch_socrata(
 
     if let Some(total) = total_available {
         if fetch_limit >= total {
-            log::info!("{}: {total} records available (fetching all, page size {})", config.label, config.page_size);
+            log::info!(
+                "{}: {total} records available (fetching all, page size {})",
+                config.label,
+                config.page_size
+            );
         } else {
             log::info!(
                 "{}: {total} records available (fetching up to {fetch_limit}, page size {})",
-                config.label, config.page_size
+                config.label,
+                config.page_size
             );
         }
     }

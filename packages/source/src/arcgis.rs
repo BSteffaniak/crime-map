@@ -20,6 +20,30 @@ pub struct ArcGisConfig<'a> {
     /// Optional `where` clause (e.g., `"REPORT_DAT >= '2020-01-01'"`).
     /// Defaults to `"1=1"` if `None`.
     pub where_clause: Option<&'a str>,
+    /// Date column name for incremental `since` filtering (epoch-ms field).
+    /// When set alongside `FetchOptions::since`, adds a
+    /// `{date_column} >= {epoch_ms}` predicate to the WHERE clause.
+    pub date_column: Option<&'a str>,
+}
+
+/// Builds the effective WHERE clause by combining the static base clause
+/// with an optional `since` date predicate.
+///
+/// `ArcGIS` REST API uses `DATE 'YYYY-MM-DD HH:MM:SS'` literals for date
+/// comparisons.
+fn build_where_clause(
+    base: &str,
+    date_column: Option<&str>,
+    since: Option<&chrono::DateTime<chrono::Utc>>,
+) -> String {
+    if let Some(col) = date_column
+        && let Some(since_dt) = since
+    {
+        let date_str = since_dt.format("%Y-%m-%d %H:%M:%S");
+        format!("{base} AND {col} >= DATE '{date_str}'")
+    } else {
+        base.to_string()
+    }
 }
 
 /// Queries each `ArcGIS` layer for its record count using
@@ -74,12 +98,13 @@ pub async fn fetch_arcgis(
 ) -> Result<u64, SourceError> {
     let client = reqwest::Client::new();
     let fetch_limit = options.limit.unwrap_or(u64::MAX);
-    let where_clause = config.where_clause.unwrap_or("1=1");
+    let base_where = config.where_clause.unwrap_or("1=1");
+    let where_clause = build_where_clause(base_where, config.date_column, options.since.as_ref());
     let num_layers = config.query_urls.len();
     let mut total_fetched: u64 = 0;
 
     // ── Pre-fetch count ──────────────────────────────────────────────
-    let total_available = query_arcgis_counts(&client, config, where_clause).await;
+    let total_available = query_arcgis_counts(&client, config, &where_clause).await;
 
     if let Some(total) = total_available {
         let layers_str = if num_layers > 1 {
@@ -90,12 +115,14 @@ pub async fn fetch_arcgis(
         if fetch_limit >= total {
             log::info!(
                 "{}: {total} records available{layers_str} (fetching all, page size {})",
-                config.label, config.page_size
+                config.label,
+                config.page_size
             );
         } else {
             log::info!(
                 "{}: {total} records available{layers_str} (fetching up to {fetch_limit}, page size {})",
-                config.label, config.page_size
+                config.label,
+                config.page_size
             );
         }
     }

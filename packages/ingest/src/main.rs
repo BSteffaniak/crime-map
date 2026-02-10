@@ -12,6 +12,13 @@ use crime_map_database::{db, queries, run_migrations};
 use crime_map_source::FetchOptions;
 use crime_map_source::source_def::SourceDefinition;
 
+/// Safety buffer subtracted from the latest `occurred_at` timestamp when
+/// performing incremental syncs. This ensures we re-fetch a window of
+/// recent data to catch any records that were backfilled or updated after
+/// our previous sync. Duplicates are harmlessly skipped by the
+/// `ON CONFLICT DO NOTHING` clause.
+const INCREMENTAL_BUFFER_DAYS: i64 = 7;
+
 #[derive(Parser)]
 #[command(name = "crime_map_ingest", about = "Crime data ingestion tool")]
 struct Cli {
@@ -29,6 +36,9 @@ enum Commands {
         /// Comma-separated list of source IDs to sync (overrides `CRIME_MAP_SOURCES` env var)
         #[arg(long)]
         sources: Option<String>,
+        /// Force a full sync, ignoring any previously synced data
+        #[arg(long)]
+        force: bool,
     },
     /// Sync data from a specific source
     Sync {
@@ -37,6 +47,9 @@ enum Commands {
         /// Maximum number of records to fetch
         #[arg(long)]
         limit: Option<u64>,
+        /// Force a full sync, ignoring any previously synced data
+        #[arg(long)]
+        force: bool,
     },
     /// List all configured data sources
     Sources,
@@ -64,7 +77,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{:<20} {}", source.id(), source.name());
             }
         }
-        Commands::Sync { source, limit } => {
+        Commands::Sync {
+            source,
+            limit,
+            force,
+        } => {
             let db = db::connect_from_env().await?;
             run_migrations(db.as_ref()).await?;
             let sources = all_sources();
@@ -72,9 +89,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .iter()
                 .find(|s| s.id() == source)
                 .ok_or_else(|| format!("Unknown source: {source}"))?;
-            sync_source(db.as_ref(), src, limit).await?;
+            sync_source(db.as_ref(), src, limit, force).await?;
         }
-        Commands::SyncAll { limit, sources } => {
+        Commands::SyncAll {
+            limit,
+            sources,
+            force,
+        } => {
             let db = db::connect_from_env().await?;
             run_migrations(db.as_ref()).await?;
             let sources = enabled_sources(sources);
@@ -88,7 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .join(", ")
             );
             for src in &sources {
-                if let Err(e) = sync_source(db.as_ref(), src, limit).await {
+                if let Err(e) = sync_source(db.as_ref(), src, limit, force).await {
                     log::error!("Failed to sync {}: {e}", src.id());
                 }
             }
@@ -138,10 +159,15 @@ fn enabled_sources(cli_filter: Option<String>) -> Vec<SourceDefinition> {
 /// Fetches, normalizes, and inserts data from a single source, processing
 /// one page at a time to minimize memory usage and provide incremental
 /// progress.
+///
+/// By default performs an incremental sync, fetching only records newer than
+/// `MAX(occurred_at) - 7 days` for the source. Pass `force = true` to
+/// ignore the previous sync point and fetch everything.
 async fn sync_source(
     db: &dyn switchy_database::Database,
     source: &SourceDefinition,
     limit: Option<u64>,
+    force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     log::info!("Syncing source: {} ({})", source.name(), source.id());
@@ -156,11 +182,55 @@ async fn sync_source(
     )
     .await?;
 
+    // Determine the `since` timestamp for incremental syncing.
+    //
+    // Incremental mode only activates when:
+    //   1. --force is NOT set
+    //   2. The source has completed at least one full (non-limited) sync
+    //   3. Records exist in the database for this source
+    //
+    // A source that was only partially synced (via --limit or a cancelled run)
+    // will have fully_synced = false and will do a full fetch.
+    let since = if force {
+        log::info!("{}: full sync (--force)", source.name());
+        None
+    } else {
+        let fully_synced = queries::get_source_fully_synced(db, source_id).await?;
+        let max_occurred = queries::get_source_max_occurred_at(db, source_id).await?;
+
+        if fully_synced {
+            max_occurred.map_or_else(
+                || {
+                    log::info!("{}: full sync (no records found)", source.name());
+                    None
+                },
+                |latest| {
+                    let buffer = chrono::Duration::days(INCREMENTAL_BUFFER_DAYS);
+                    let since = latest - buffer;
+                    log::info!(
+                        "{}: incremental sync from {} ({INCREMENTAL_BUFFER_DAYS}-day buffer from latest {})",
+                        source.name(),
+                        since.format("%Y-%m-%d"),
+                        latest.format("%Y-%m-%d"),
+                    );
+                    Some(since)
+                },
+            )
+        } else {
+            if max_occurred.is_some() {
+                log::info!("{}: full sync (not yet fully synced)", source.name());
+            } else {
+                log::info!("{}: full sync (first run)", source.name());
+            }
+            None
+        }
+    };
+
     // Get category ID mapping (needed for insertion)
     let category_ids = queries::get_all_category_ids(db).await?;
 
     // Start streaming pages from the fetcher
-    let options = FetchOptions { since: None, limit };
+    let options = FetchOptions { since, limit };
 
     let (mut rx, fetch_handle) = source.fetch_pages(&options);
 
@@ -198,6 +268,11 @@ async fn sync_source(
 
     // Update source stats
     queries::update_source_stats(db, source_id).await?;
+
+    // Mark the source as fully synced only if we didn't cap with --limit.
+    // A limited sync is intentionally partial (for testing), so we don't
+    // want incremental mode to kick in on the next run.
+    queries::set_source_fully_synced(db, source_id, limit.is_none()).await?;
 
     let elapsed = start.elapsed();
     log::info!(

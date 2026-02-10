@@ -167,6 +167,35 @@ pub async fn insert_incidents(
     Ok(inserted)
 }
 
+/// Returns the maximum `occurred_at` timestamp for a given source, or `None`
+/// if the source has no incidents yet.
+///
+/// Used for incremental syncing — we only need to fetch records newer than
+/// this value (minus a safety buffer).
+///
+/// # Errors
+///
+/// Returns [`DbError`] if the database operation fails.
+pub async fn get_source_max_occurred_at(
+    db: &dyn Database,
+    source_id: i32,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, DbError> {
+    let rows = db
+        .query_raw_params(
+            "SELECT MAX(occurred_at) as max_occurred_at FROM crime_incidents WHERE source_id = $1",
+            &[DatabaseValue::Int32(source_id)],
+        )
+        .await?;
+
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+
+    let naive: Option<chrono::NaiveDateTime> = row.to_value("max_occurred_at").unwrap_or(None);
+
+    Ok(naive.map(|n| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(n, chrono::Utc)))
+}
+
 /// Updates the record count and last-synced timestamp for a source.
 ///
 /// # Errors
@@ -179,6 +208,53 @@ pub async fn update_source_stats(db: &dyn Database, source_id: i32) -> Result<()
             last_synced_at = NOW()
          WHERE id = $1",
         &[DatabaseValue::Int32(source_id)],
+    )
+    .await?;
+
+    Ok(())
+}
+
+/// Returns whether a source has ever completed a full (non-limited) sync.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if the database operation fails.
+pub async fn get_source_fully_synced(db: &dyn Database, source_id: i32) -> Result<bool, DbError> {
+    let rows = db
+        .query_raw_params(
+            "SELECT fully_synced FROM crime_sources WHERE id = $1",
+            &[DatabaseValue::Int32(source_id)],
+        )
+        .await?;
+
+    let Some(row) = rows.first() else {
+        return Ok(false);
+    };
+
+    let fully_synced: bool = row.to_value("fully_synced").unwrap_or(false);
+    Ok(fully_synced)
+}
+
+/// Marks whether a source has completed a full sync.
+///
+/// Should be set to `true` only when a sync completes successfully without
+/// a `--limit` cap. A limited or interrupted sync keeps this `false` so
+/// the next run knows to do a full fetch.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if the database operation fails.
+pub async fn set_source_fully_synced(
+    db: &dyn Database,
+    source_id: i32,
+    fully_synced: bool,
+) -> Result<(), DbError> {
+    db.exec_raw_params(
+        "UPDATE crime_sources SET fully_synced = $2 WHERE id = $1",
+        &[
+            DatabaseValue::Int32(source_id),
+            DatabaseValue::Bool(fully_synced),
+        ],
     )
     .await?;
 

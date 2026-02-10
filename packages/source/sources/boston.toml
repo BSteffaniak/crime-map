@@ -19,6 +19,7 @@ resource_ids = [
   "792031bf-b9bb-467c-b118-fe795befdf00",
 ]
 page_size = 10000
+date_column = "OCCURRED_ON_DATE"
 
 [fields]
 incident_id = ["INCIDENT_NUMBER"]

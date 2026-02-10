@@ -68,6 +68,8 @@ pub enum FetcherConfig {
         page_size: u64,
         /// Optional WHERE clause.
         where_clause: Option<String>,
+        /// Date column for incremental `since` filtering (epoch-ms field).
+        date_column: Option<String>,
     },
     /// CKAN Datastore API (`limit`/`offset`).
     Ckan {
@@ -77,6 +79,8 @@ pub enum FetcherConfig {
         resource_ids: Vec<String>,
         /// Records per page.
         page_size: u64,
+        /// Date column for incremental `since` filtering.
+        date_column: Option<String>,
     },
     /// Carto SQL API (SQL `LIMIT`/`OFFSET`).
     Carto {
@@ -409,6 +413,7 @@ impl SourceDefinition {
                     query_urls,
                     page_size,
                     where_clause,
+                    date_column,
                 } => {
                     fetch_arcgis(
                         &ArcGisConfig {
@@ -416,6 +421,7 @@ impl SourceDefinition {
                             label: &name,
                             page_size: *page_size,
                             where_clause: where_clause.as_deref(),
+                            date_column: date_column.as_deref(),
                         },
                         &options,
                         &tx,
@@ -426,6 +432,7 @@ impl SourceDefinition {
                     api_url,
                     resource_ids,
                     page_size,
+                    date_column,
                 } => {
                     fetch_ckan(
                         &CkanConfig {
@@ -433,6 +440,7 @@ impl SourceDefinition {
                             resource_ids,
                             label: &name,
                             page_size: *page_size,
+                            date_column: date_column.as_deref(),
                         },
                         &options,
                         &tx,

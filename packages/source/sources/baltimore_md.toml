@@ -10,6 +10,7 @@ query_urls = [
   "https://egis.baltimorecity.gov/egis/rest/services/GeoSpatialized_Tables/Arrest/FeatureServer/0/query",
 ]
 page_size = 1000
+date_column = "ArrestDateTime"
 
 [fields]
 incident_id = ["ArrestNumber", "IncidentNumber"]

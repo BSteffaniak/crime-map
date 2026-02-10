@@ -10,6 +10,7 @@ query_urls = [
   "https://services2.arcgis.com/0Q7l03Ls62VG0fy4/arcgis/rest/services/Public_Crime_Reports/FeatureServer/0/query",
 ]
 page_size = 2000
+date_column = "OccurredOn"
 
 [fields]
 incident_id = ["CaseNo"]
