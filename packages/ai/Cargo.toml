@@ -30,9 +30,18 @@ aws-sdk-bedrockruntime = { workspace = true, features = [
 aws-config = { workspace = true, features = [
   "behavior-version-latest",
 ], optional = true }
+aws-smithy-runtime-api = { workspace = true, features = [
+  "client",
+  "http-auth",
+], optional = true }
 aws-smithy-types = { workspace = true, optional = true }
 
 [features]
 default = ["bedrock"]
-bedrock = ["aws-sdk-bedrockruntime", "aws-config", "aws-smithy-types"]
+bedrock = [
+  "aws-sdk-bedrockruntime",
+  "aws-config",
+  "aws-smithy-types",
+  "aws-smithy-runtime-api",
+]
 fail-on-warnings = []

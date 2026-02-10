@@ -107,6 +107,7 @@ pub trait LlmProvider: Send + Sync {
 ///
 /// Returns [`AiError::Config`] if no credentials are found or the
 /// explicitly requested provider is not configured.
+#[allow(clippy::unused_async)] // async is needed when bedrock feature is enabled
 pub async fn create_provider_from_env() -> Result<Box<dyn LlmProvider>, AiError> {
     let provider = std::env::var("AI_PROVIDER").unwrap_or_else(|_| detect_provider());
 
@@ -148,10 +149,18 @@ pub async fn create_provider_from_env() -> Result<Box<dyn LlmProvider>, AiError>
 
 /// Auto-detects which provider to use based on available credentials.
 ///
-/// Checks for credentials in priority order: Anthropic, `OpenAI`, AWS.
+/// Checks for credentials in priority order: Bedrock bearer token,
+/// Anthropic, `OpenAI`, AWS credential chain.
 /// Returns a provider name string that matches the arms in
 /// [`create_provider_from_env`].
 fn detect_provider() -> String {
+    // Bedrock bearer token is highest priority — it's the simplest
+    // single-env-var setup (from the Amazon Bedrock console).
+    if std::env::var("AWS_BEARER_TOKEN_BEDROCK").is_ok() {
+        log::info!("Auto-detected AI provider: Bedrock (AWS_BEARER_TOKEN_BEDROCK found)");
+        return "bedrock".to_string();
+    }
+
     if std::env::var("ANTHROPIC_API_KEY").is_ok() {
         log::info!("Auto-detected AI provider: Anthropic (ANTHROPIC_API_KEY found)");
         return "anthropic".to_string();
@@ -174,9 +183,9 @@ fn detect_provider() -> String {
     }
 
     log::warn!(
-        "No AI credentials detected. Set one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, \
-         or AWS credentials (AWS_ACCESS_KEY_ID/AWS_PROFILE). \
-         You can also set AI_PROVIDER explicitly."
+        "No AI credentials detected. Set one of: AWS_BEARER_TOKEN_BEDROCK, \
+         ANTHROPIC_API_KEY, OPENAI_API_KEY, or AWS credentials \
+         (AWS_ACCESS_KEY_ID/AWS_PROFILE). You can also set AI_PROVIDER explicitly."
     );
 
     // Fall back to anthropic — will produce a clear error about missing key

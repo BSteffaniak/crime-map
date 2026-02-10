@@ -5,6 +5,7 @@ use aws_sdk_bedrockruntime::types::{
     StopReason as BedrockStopReason, SystemContentBlock, Tool, ToolConfiguration, ToolInputSchema,
     ToolResultContentBlock, ToolResultStatus, ToolSpecification,
 };
+use aws_smithy_runtime_api::client::auth::http::HTTP_BEARER_AUTH_SCHEME_ID;
 use aws_smithy_types::Document;
 
 use super::{ContentBlock, LlmProvider, LlmResponse, Message, MessageContent, StopReason};
@@ -13,8 +14,13 @@ use crate::AiError;
 /// AWS Bedrock provider using the Converse API.
 ///
 /// Supports any model available on Bedrock that supports tool use
-/// (Claude, Llama, Mistral, etc.). Authentication uses the standard
-/// AWS credential chain (env vars, IAM role, `~/.aws/credentials`).
+/// (Claude, Llama, Mistral, etc.). Authentication uses either:
+///
+/// - **Bearer token** (`AWS_BEARER_TOKEN_BEDROCK` env var) — a temporary
+///   token from the Amazon Bedrock console that bypasses IAM credential
+///   setup.
+/// - **Standard AWS credential chain** (env vars, IAM role,
+///   `~/.aws/credentials`) — the default when no bearer token is present.
 pub struct BedrockProvider {
     client: aws_sdk_bedrockruntime::Client,
     model_id: String,
@@ -23,10 +29,49 @@ pub struct BedrockProvider {
 impl BedrockProvider {
     /// Creates a new Bedrock provider.
     ///
-    /// Loads AWS configuration from the environment (region, credentials).
+    /// If `AWS_BEARER_TOKEN_BEDROCK` is set, uses bearer-token auth
+    /// directly against the Bedrock Runtime API. Otherwise falls back to
+    /// the standard AWS credential chain.
+    ///
     /// The `model_id` should be a Bedrock model ID such as
     /// `us.anthropic.claude-sonnet-4-20250514-v1:0`.
     pub async fn new(model_id: String, region: Option<String>) -> Self {
+        let client = if let Ok(token) = std::env::var("AWS_BEARER_TOKEN_BEDROCK") {
+            log::info!("Using AWS_BEARER_TOKEN_BEDROCK for Bedrock authentication");
+            Self::build_bearer_token_client(token, region)
+        } else {
+            Self::build_credential_chain_client(region).await
+        };
+
+        Self { client, model_id }
+    }
+
+    /// Builds a Bedrock client using a bearer token for authentication.
+    ///
+    /// This configures the client to prefer HTTP bearer auth over `SigV4`,
+    /// which is what the Amazon Bedrock console's temporary tokens require.
+    fn build_bearer_token_client(
+        token: String,
+        region: Option<String>,
+    ) -> aws_sdk_bedrockruntime::Client {
+        let bearer_token = aws_sdk_bedrockruntime::config::Token::new(token, None);
+
+        let mut builder = aws_sdk_bedrockruntime::config::Config::builder()
+            .behavior_version(aws_sdk_bedrockruntime::config::BehaviorVersion::latest())
+            .bearer_token(bearer_token)
+            .auth_scheme_preference([HTTP_BEARER_AUTH_SCHEME_ID]);
+
+        if let Some(region) = region {
+            builder = builder.region(aws_sdk_bedrockruntime::config::Region::new(region));
+        }
+
+        aws_sdk_bedrockruntime::Client::from_conf(builder.build())
+    }
+
+    /// Builds a Bedrock client using the standard AWS credential chain.
+    async fn build_credential_chain_client(
+        region: Option<String>,
+    ) -> aws_sdk_bedrockruntime::Client {
         let mut config_loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
 
         if let Some(region) = region {
@@ -34,9 +79,7 @@ impl BedrockProvider {
         }
 
         let config = config_loader.load().await;
-        let client = aws_sdk_bedrockruntime::Client::new(&config);
-
-        Self { client, model_id }
+        aws_sdk_bedrockruntime::Client::new(&config)
     }
 }
 
