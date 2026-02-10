@@ -76,7 +76,7 @@ export default function App() {
               activeFilterCount={activeFilterCount}
             />
           ) : (
-            <IncidentSidebar filters={filters} />
+            <IncidentSidebar />
           )}
         </div>
       </div>

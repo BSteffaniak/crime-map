@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.18",
+    "@tanstack/react-virtual": "^3.13.18",
     "flatgeobuf": "^4.4.0",
     "maplibre-gl": "^5.17.0",
     "pmtiles": "^4.4.0",

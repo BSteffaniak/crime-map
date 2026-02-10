@@ -6,12 +6,12 @@
  * viewport bbox are fetched, keeping memory proportional to the visible
  * area.
  *
- * This worker is used exclusively for sidebar data at zoom 8-11 where
- * individual incident details are not available from the cluster PMTiles.
- * At zoom 12+, the main thread uses queryRenderedFeatures() instead.
- *
  * A 1.5x padding factor is applied to the viewport bbox so that small
  * pans are served from the in-memory cache without network requests.
+ *
+ * Only the "driver" hook (CrimeMap) sends messages to this worker. The
+ * "reader" hook (IncidentSidebar) only consumes responses. This avoids
+ * sequence number races between multiple hook instances.
  */
 
 import * as flatgeobuf from "flatgeobuf/lib/mjs/geojson.js";
@@ -31,6 +31,12 @@ const BBOX_PADDING_FACTOR = 1.5;
 const MAX_ZOOM_DELTA = 1;
 const PROGRESS_INTERVAL = 10_000;
 
+/**
+ * Maximum number of features to load from FlatGeobuf per viewport.
+ * Prevents OOM at low zoom levels where the bbox covers a large area.
+ */
+const MAX_FEATURES = 200_000;
+
 // -- State --
 
 let baseUrl = "";
@@ -43,8 +49,6 @@ let currentFilters: FilterState | null = null;
 let viewportSidebarCache: SidebarFeature[] = [];
 let latestSidebarSeq = -1;
 let loadSeq = 0;
-let lastRequestedBbox: BBox | null = null;
-let lastRequestedZoom: number | null = null;
 
 // -- Helpers --
 
@@ -149,6 +153,11 @@ async function loadFeaturesForBbox(
     if (points.length % PROGRESS_INTERVAL === 0) {
       respond({ type: "progress", loaded: points.length, total: null, phase: "loading" });
     }
+
+    // Cap features to prevent OOM at low zoom
+    if (points.length >= MAX_FEATURES) {
+      break;
+    }
   }
 
   if (seq !== loadSeq) return false;
@@ -156,8 +165,8 @@ async function loadFeaturesForBbox(
   cachedPoints = points;
   cachedBbox = paddedBbox;
   cachedZoom = zoom;
-  applyFilters();
   dataReady = true;
+  applyFilters();
 
   respond({ type: "loadComplete", featureCount: points.length });
   return true;
@@ -189,12 +198,12 @@ function handleSetFilters(filters: FilterState) {
   if (dataReady) {
     applyFilters();
   }
+  // Do NOT auto-respond with sidebar data here. The driver hook
+  // will explicitly send a getSidebar request after setFilters.
 }
 
 async function handleGetSidebar(bbox: BBox, zoom: number, seq: number) {
   latestSidebarSeq = seq;
-  lastRequestedBbox = bbox;
-  lastRequestedZoom = zoom;
 
   if (cacheCovers(bbox, zoom)) {
     respondWithSidebar(bbox, seq);
@@ -205,9 +214,15 @@ async function handleGetSidebar(bbox: BBox, zoom: number, seq: number) {
   const mySeq = ++loadSeq;
 
   const loaded = await loadFeaturesForBbox(paddedBbox, zoom, mySeq);
-  if (!loaded) return;
+  if (!loaded) {
+    // Load was pre-empted by a newer request. Do NOT silently drop —
+    // the newer handleGetSidebar call will respond instead.
+    return;
+  }
 
+  // Check we're still the latest sidebar request
   if (seq < latestSidebarSeq) return;
+
   respondWithSidebar(bbox, seq);
 }
 
@@ -237,13 +252,17 @@ function respondWithSidebar(bbox: BBox, seq: number) {
   });
 }
 
-function handleGetMoreSidebar(offset: number, limit: number) {
+function handleGetMoreSidebar(offset: number, limit: number, seq: number) {
+  // Seq guard: only serve pagination for the latest sidebar response
+  if (seq !== latestSidebarSeq) return;
+
   const features = viewportSidebarCache.slice(offset, offset + limit);
   respond({
     type: "moreSidebarFeatures",
     features,
     hasMore: offset + limit < viewportSidebarCache.length,
     offset,
+    seq,
   });
 }
 
@@ -260,9 +279,6 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
 
       case "setFilters":
         handleSetFilters(msg.filters);
-        if (dataReady && lastRequestedBbox && lastRequestedZoom !== null) {
-          respondWithSidebar(lastRequestedBbox, latestSidebarSeq);
-        }
         break;
 
       case "getSidebar":
@@ -270,7 +286,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         break;
 
       case "getMoreSidebarFeatures":
-        handleGetMoreSidebar(msg.offset, msg.limit);
+        handleGetMoreSidebar(msg.offset, msg.limit, msg.seq);
         break;
     }
   } catch (err) {

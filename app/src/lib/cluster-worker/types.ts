@@ -63,6 +63,8 @@ export interface GetMoreSidebarRequest {
   type: "getMoreSidebarFeatures";
   offset: number;
   limit: number;
+  /** Sequence number — must match the last sidebar response's seq. */
+  seq: number;
 }
 
 export type WorkerRequest =
@@ -104,6 +106,8 @@ export interface MoreSidebarResponse {
   features: SidebarFeature[];
   hasMore: boolean;
   offset: number;
+  /** Echoed sequence number for stale response detection. */
+  seq: number;
 }
 
 export interface ErrorResponse {

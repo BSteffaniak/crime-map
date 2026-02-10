@@ -9,7 +9,7 @@ import {
   CLUSTER_MAX_ZOOM,
 } from "../../lib/map-config";
 import { severityColor, type FilterState } from "../../lib/types";
-import { useSidebarWorker } from "../../lib/cluster-worker";
+import { useSidebarDriver } from "../../lib/cluster-worker";
 import { buildIncidentFilter } from "../../lib/map-filters/expressions";
 import type { BBox } from "../../lib/cluster-worker/types";
 import type { FilterSpecification } from "maplibre-gl";
@@ -31,7 +31,7 @@ export default function CrimeMap({ filters, onBoundsChange }: CrimeMapProps) {
   const mapRef = useRef<maplibregl.Map | null>(null);
   const [loaded, setLoaded] = useState(false);
 
-  const { updateSidebar, dataProgress } = useSidebarWorker(filters);
+  const { updateSidebar, dataProgress } = useSidebarDriver(filters);
 
   // -- Layer setup --
 
