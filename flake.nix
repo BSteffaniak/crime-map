@@ -48,7 +48,6 @@
         ];
 
         geoTools = with pkgs; [
-          gdal # ogr2ogr for FlatGeobuf generation
           tippecanoe # PMTiles generation
         ];
 
