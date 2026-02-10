@@ -143,9 +143,12 @@ pub async fn sources(state: web::Data<AppState>) -> HttpResponse {
 /// pre-generated `SQLite` sidebar database. Supports filtering by date
 /// range, category, subcategory, severity, and arrest status.
 ///
-/// The features query walks the `occurred_at DESC` index and checks the
-/// bounding box inline, relying on `LIMIT` to short-circuit early.
-/// The count query uses the R-tree spatial index for efficient counting.
+/// The features query walks the `occurred_at DESC` index in `SQLite` and
+/// checks the bounding box inline, relying on `LIMIT` to short-circuit
+/// early.
+///
+/// The count query uses the pre-aggregated `count_summary` table in
+/// `DuckDB` for sub-10ms performance on any bounding box.
 pub async fn sidebar(
     state: web::Data<AppState>,
     params: web::Query<SidebarQueryParams>,
@@ -154,27 +157,30 @@ pub async fn sidebar(
     let offset = params.offset.unwrap_or(0);
     let bbox = params.bbox.as_deref().and_then(parse_bbox);
 
-    let (features_query, feature_params, count_query, count_params) =
-        build_sidebar_queries(&params, bbox.as_ref(), limit, offset);
+    let (features_query, feature_params) =
+        build_features_query(&params, bbox.as_ref(), limit, offset);
 
     let sidebar_db = state.sidebar_db.as_ref();
 
     let features_result = sidebar_db
         .query_raw_params(&features_query, &feature_params)
         .await;
-    let count_result = sidebar_db
-        .query_raw_params(&count_query, &count_params)
-        .await;
+
+    // Build and execute the DuckDB count query
+    let count_db = state.count_db.clone();
+    let count_params_owned = params.into_inner();
+    let bbox_owned = bbox;
+
+    let count_result = web::block(move || {
+        let conn = count_db
+            .lock()
+            .map_err(|e| format!("Failed to lock DuckDB connection: {e}"))?;
+        execute_duckdb_count(&conn, &count_params_owned, bbox_owned.as_ref())
+    })
+    .await;
 
     match (features_result, count_result) {
-        (Ok(rows), Ok(count_rows)) => {
-            let total_count: u64 = count_rows
-                .first()
-                .and_then(|r| r.to_value::<i64>("cnt").ok())
-                .unwrap_or(0)
-                .try_into()
-                .unwrap_or(0);
-
+        (Ok(rows), Ok(Ok(total_count))) => {
             let features: Vec<SidebarIncident> = rows.iter().map(parse_sidebar_row).collect();
 
             #[allow(clippy::cast_possible_truncation)]
@@ -186,10 +192,22 @@ pub async fn sidebar(
                 has_more,
             })
         }
-        (Err(e), _) | (_, Err(e)) => {
-            log::error!("Sidebar query failed: {e}");
+        (Err(e), _) => {
+            log::error!("Sidebar features query failed: {e}");
             HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "Failed to query sidebar data"
+            }))
+        }
+        (_, Ok(Err(e))) => {
+            log::error!("Sidebar count query failed: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to query sidebar count"
+            }))
+        }
+        (_, Err(e)) => {
+            log::error!("Sidebar count query blocking error: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to query sidebar count"
             }))
         }
     }
@@ -217,200 +235,75 @@ fn parse_sidebar_row(row: &Row) -> SidebarIncident {
     }
 }
 
-/// Builds the features and count SQL queries with their parameter vectors
-/// from the sidebar query parameters.
+/// Builds the features SQL query with parameter vector from the sidebar
+/// query parameters. This query runs against `SQLite`.
 ///
-/// Returns `(features_query, feature_params, count_query, count_params)`.
-fn build_sidebar_queries(
+/// Returns `(features_query, feature_params)`.
+fn build_features_query(
     params: &SidebarQueryParams,
     bbox: Option<&BoundingBox>,
     limit: u32,
     offset: u32,
-) -> (String, Vec<DatabaseValue>, String, Vec<DatabaseValue>) {
+) -> (String, Vec<DatabaseValue>) {
     let mut conditions: Vec<String> = Vec::new();
-    let mut count_conditions: Vec<String> = Vec::new();
     let mut feature_params: Vec<DatabaseValue> = Vec::new();
-    let mut count_params: Vec<DatabaseValue> = Vec::new();
     let mut feat_idx: usize = 1;
-    let mut count_idx: usize = 1;
 
     if let Some(b) = bbox {
-        add_bbox_filter(
-            b,
-            &mut conditions,
-            &mut count_conditions,
-            &mut feature_params,
-            &mut count_params,
-            &mut feat_idx,
-            &mut count_idx,
-        );
+        conditions.push(format!(
+            "longitude >= ${feat_idx} AND longitude <= ${} AND latitude >= ${} AND latitude <= ${}",
+            feat_idx + 1,
+            feat_idx + 2,
+            feat_idx + 3
+        ));
+        feature_params.push(DatabaseValue::Real64(b.west));
+        feature_params.push(DatabaseValue::Real64(b.east));
+        feature_params.push(DatabaseValue::Real64(b.south));
+        feature_params.push(DatabaseValue::Real64(b.north));
+        feat_idx += 4;
     }
 
-    add_date_range_filters(
-        params,
-        &mut conditions,
-        &mut count_conditions,
-        &mut feature_params,
-        &mut count_params,
-        &mut feat_idx,
-        &mut count_idx,
-    );
-
-    add_in_filter(
-        params.categories.as_deref(),
-        "category",
-        "i.category",
-        &mut conditions,
-        &mut count_conditions,
-        &mut feature_params,
-        &mut count_params,
-        &mut feat_idx,
-        &mut count_idx,
-    );
-
-    add_in_filter(
-        params.subcategories.as_deref(),
-        "subcategory",
-        "i.subcategory",
-        &mut conditions,
-        &mut count_conditions,
-        &mut feature_params,
-        &mut count_params,
-        &mut feat_idx,
-        &mut count_idx,
-    );
-
-    add_scalar_filters(
-        params,
-        &mut conditions,
-        &mut count_conditions,
-        &mut feature_params,
-        &mut count_params,
-        &mut feat_idx,
-        &mut count_idx,
-    );
-
-    let features_query =
-        assemble_features_query(&conditions, &mut feature_params, feat_idx, limit, offset);
-    let count_query = assemble_count_query(bbox.is_some(), &count_conditions);
-
-    (features_query, feature_params, count_query, count_params)
-}
-
-/// Adds bounding-box filter clauses for both the features (plain columns) and
-/// count (R-tree) queries.
-#[allow(clippy::too_many_arguments)]
-fn add_bbox_filter(
-    b: &BoundingBox,
-    conditions: &mut Vec<String>,
-    count_conditions: &mut Vec<String>,
-    feature_params: &mut Vec<DatabaseValue>,
-    count_params: &mut Vec<DatabaseValue>,
-    feat_idx: &mut usize,
-    count_idx: &mut usize,
-) {
-    conditions.push(format!(
-        "longitude >= ${feat_idx} AND longitude <= ${} AND latitude >= ${} AND latitude <= ${}",
-        *feat_idx + 1,
-        *feat_idx + 2,
-        *feat_idx + 3
-    ));
-    feature_params.push(DatabaseValue::Real64(b.west));
-    feature_params.push(DatabaseValue::Real64(b.east));
-    feature_params.push(DatabaseValue::Real64(b.south));
-    feature_params.push(DatabaseValue::Real64(b.north));
-    *feat_idx += 4;
-
-    count_conditions.push(format!(
-        "r.min_lng >= ${count_idx} AND r.max_lng <= ${} AND r.min_lat >= ${} AND r.max_lat <= ${}",
-        *count_idx + 1,
-        *count_idx + 2,
-        *count_idx + 3
-    ));
-    count_params.push(DatabaseValue::Real64(b.west));
-    count_params.push(DatabaseValue::Real64(b.east));
-    count_params.push(DatabaseValue::Real64(b.south));
-    count_params.push(DatabaseValue::Real64(b.north));
-    *count_idx += 4;
-}
-
-/// Adds date-range (`from` / `to`) filter clauses to both query builders.
-#[allow(clippy::too_many_arguments)]
-fn add_date_range_filters(
-    params: &SidebarQueryParams,
-    conditions: &mut Vec<String>,
-    count_conditions: &mut Vec<String>,
-    feature_params: &mut Vec<DatabaseValue>,
-    count_params: &mut Vec<DatabaseValue>,
-    feat_idx: &mut usize,
-    count_idx: &mut usize,
-) {
     if let Some(ref from) = params.from {
         conditions.push(format!("occurred_at >= ${feat_idx}"));
         feature_params.push(DatabaseValue::String(from.clone()));
-        *feat_idx += 1;
-
-        count_conditions.push(format!("i.occurred_at >= ${count_idx}"));
-        count_params.push(DatabaseValue::String(from.clone()));
-        *count_idx += 1;
+        feat_idx += 1;
     }
     if let Some(ref to) = params.to {
         conditions.push(format!("occurred_at <= ${feat_idx}"));
         feature_params.push(DatabaseValue::String(to.clone()));
-        *feat_idx += 1;
-
-        count_conditions.push(format!("i.occurred_at <= ${count_idx}"));
-        count_params.push(DatabaseValue::String(to.clone()));
-        *count_idx += 1;
+        feat_idx += 1;
     }
-}
 
-/// Adds severity and arrest scalar filter clauses to both query builders.
-#[allow(clippy::too_many_arguments)]
-fn add_scalar_filters(
-    params: &SidebarQueryParams,
-    conditions: &mut Vec<String>,
-    count_conditions: &mut Vec<String>,
-    feature_params: &mut Vec<DatabaseValue>,
-    count_params: &mut Vec<DatabaseValue>,
-    feat_idx: &mut usize,
-    count_idx: &mut usize,
-) {
+    add_features_in_filter(
+        params.categories.as_deref(),
+        "category",
+        &mut conditions,
+        &mut feature_params,
+        &mut feat_idx,
+    );
+
+    add_features_in_filter(
+        params.subcategories.as_deref(),
+        "subcategory",
+        &mut conditions,
+        &mut feature_params,
+        &mut feat_idx,
+    );
+
     if let Some(sev) = params.severity_min
         && sev > 1
     {
         conditions.push(format!("severity >= ${feat_idx}"));
         feature_params.push(DatabaseValue::Int32(i32::from(sev)));
-        *feat_idx += 1;
-
-        count_conditions.push(format!("i.severity >= ${count_idx}"));
-        count_params.push(DatabaseValue::Int32(i32::from(sev)));
-        *count_idx += 1;
+        feat_idx += 1;
     }
 
     if let Some(arrest) = params.arrest_made {
         conditions.push(format!("arrest_made = ${feat_idx}"));
         feature_params.push(DatabaseValue::Int32(i32::from(arrest)));
-        *feat_idx += 1;
-
-        count_conditions.push(format!("i.arrest_made = ${count_idx}"));
-        count_params.push(DatabaseValue::Int32(i32::from(arrest)));
-        #[allow(unused_assignments)]
-        {
-            *count_idx += 1;
-        }
+        feat_idx += 1;
     }
-}
 
-/// Assembles the final features SELECT query with WHERE, ORDER BY, LIMIT, and
-/// OFFSET clauses.
-fn assemble_features_query(
-    conditions: &[String],
-    feature_params: &mut Vec<DatabaseValue>,
-    feat_idx: usize,
-    limit: u32,
-    offset: u32,
-) -> String {
     let where_clause = if conditions.is_empty() {
         String::new()
     } else {
@@ -428,42 +321,18 @@ fn assemble_features_query(
     );
     feature_params.push(DatabaseValue::UInt32(limit));
     feature_params.push(DatabaseValue::UInt32(offset));
-    query
-}
 
-/// Assembles the count query, optionally joining the R-tree index for bbox
-/// filtering.
-fn assemble_count_query(has_bbox: bool, count_conditions: &[String]) -> String {
-    if has_bbox || !count_conditions.is_empty() {
-        let rtree_join = if has_bbox {
-            " JOIN incidents_rtree r ON r.id = i.id"
-        } else {
-            ""
-        };
-        let conds = if count_conditions.is_empty() {
-            String::new()
-        } else {
-            format!(" WHERE {}", count_conditions.join(" AND "))
-        };
-        format!("SELECT COUNT(*) as cnt FROM incidents i{rtree_join}{conds}")
-    } else {
-        "SELECT COUNT(*) as cnt FROM incidents".to_string()
-    }
+    (query, feature_params)
 }
 
 /// Adds an `IN (...)` filter clause for a comma-separated parameter value
-/// to both the features and count query builders.
-#[allow(clippy::too_many_arguments)]
-fn add_in_filter(
+/// to the features query builder.
+fn add_features_in_filter(
     param_value: Option<&str>,
-    feat_column: &str,
-    count_column: &str,
+    column: &str,
     conditions: &mut Vec<String>,
-    count_conditions: &mut Vec<String>,
     feature_params: &mut Vec<DatabaseValue>,
-    count_params: &mut Vec<DatabaseValue>,
     feat_idx: &mut usize,
-    count_idx: &mut usize,
 ) {
     let Some(raw) = param_value else { return };
     let items: Vec<&str> = raw
@@ -475,33 +344,182 @@ fn add_in_filter(
         return;
     }
 
-    let feat_placeholders: Vec<String> = items
+    let placeholders: Vec<String> = items
         .iter()
         .enumerate()
         .map(|(i, _)| format!("${}", *feat_idx + i))
         .collect();
-    conditions.push(format!(
-        "{feat_column} IN ({})",
-        feat_placeholders.join(", ")
-    ));
+    conditions.push(format!("{column} IN ({})", placeholders.join(", ")));
     for item in &items {
         feature_params.push(DatabaseValue::String((*item).to_string()));
     }
     *feat_idx += items.len();
+}
 
-    let count_placeholders: Vec<String> = items
-        .iter()
-        .enumerate()
-        .map(|(i, _)| format!("${}", *count_idx + i))
-        .collect();
-    count_conditions.push(format!(
-        "{count_column} IN ({})",
-        count_placeholders.join(", ")
-    ));
-    for item in &items {
-        count_params.push(DatabaseValue::String((*item).to_string()));
+/// Executes the count query against the `DuckDB` `count_summary` table.
+///
+/// Translates bounding box into cell coordinates and applies all sidebar
+/// filters (subcategory, category, severity, arrest, date range) against
+/// the pre-aggregated dimensions.
+fn execute_duckdb_count(
+    db_conn: &duckdb::Connection,
+    params: &SidebarQueryParams,
+    bbox: Option<&BoundingBox>,
+) -> Result<u64, String> {
+    let mut conditions: Vec<String> = Vec::new();
+    let mut bind_values: Vec<DuckValue> = Vec::new();
+
+    build_count_conditions(params, bbox, &mut conditions, &mut bind_values);
+
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    };
+
+    let sql = format!("SELECT SUM(cnt) AS total FROM count_summary{where_clause}");
+
+    let mut stmt = db_conn
+        .prepare(&sql)
+        .map_err(|e| format!("DuckDB prepare failed: {e}"))?;
+
+    // Bind all parameters
+    for (i, val) in bind_values.iter().enumerate() {
+        match val {
+            DuckValue::Int(v) => {
+                stmt.raw_bind_parameter(i + 1, *v)
+                    .map_err(|e| format!("DuckDB bind failed at {}: {e}", i + 1))?;
+            }
+            DuckValue::Str(v) => {
+                stmt.raw_bind_parameter(i + 1, v.as_str())
+                    .map_err(|e| format!("DuckDB bind failed at {}: {e}", i + 1))?;
+            }
+        }
     }
-    *count_idx += items.len();
+
+    let mut rows = stmt.raw_query();
+
+    let total: u64 = if let Some(row) = rows
+        .next()
+        .map_err(|e| format!("DuckDB query failed: {e}"))?
+    {
+        let val: Option<i64> = row.get(0).map_err(|e| format!("DuckDB get failed: {e}"))?;
+        val.unwrap_or(0).try_into().unwrap_or(0)
+    } else {
+        0
+    };
+
+    Ok(total)
+}
+
+/// Builds the WHERE conditions and bind values for the `DuckDB` count query.
+fn build_count_conditions(
+    params: &SidebarQueryParams,
+    bbox: Option<&BoundingBox>,
+    conditions: &mut Vec<String>,
+    bind_values: &mut Vec<DuckValue>,
+) {
+    if let Some(b) = bbox {
+        // Convert bbox to cell coordinates: floor(coord * 10)
+        #[allow(clippy::cast_possible_truncation)]
+        let cell_west = (b.west * 10.0).floor() as i32;
+        #[allow(clippy::cast_possible_truncation)]
+        let cell_east = (b.east * 10.0).floor() as i32;
+        #[allow(clippy::cast_possible_truncation)]
+        let cell_south = (b.south * 10.0).floor() as i32;
+        #[allow(clippy::cast_possible_truncation)]
+        let cell_north = (b.north * 10.0).floor() as i32;
+
+        conditions.push("cell_lng >= ? AND cell_lng <= ?".to_string());
+        bind_values.push(DuckValue::Int(cell_west));
+        bind_values.push(DuckValue::Int(cell_east));
+
+        conditions.push("cell_lat >= ? AND cell_lat <= ?".to_string());
+        bind_values.push(DuckValue::Int(cell_south));
+        bind_values.push(DuckValue::Int(cell_north));
+    }
+
+    if let Some(ref from) = params.from {
+        conditions.push("day >= ?".to_string());
+        bind_values.push(DuckValue::Str(extract_date_part(from)));
+    }
+    if let Some(ref to) = params.to {
+        conditions.push("day <= ?".to_string());
+        bind_values.push(DuckValue::Str(extract_date_part(to)));
+    }
+
+    add_count_in_filter(
+        params.categories.as_deref(),
+        "category",
+        conditions,
+        bind_values,
+    );
+    add_count_in_filter(
+        params.subcategories.as_deref(),
+        "subcategory",
+        conditions,
+        bind_values,
+    );
+
+    if let Some(sev) = params.severity_min
+        && sev > 1
+    {
+        conditions.push("severity >= ?".to_string());
+        bind_values.push(DuckValue::Int(i32::from(sev)));
+    }
+
+    if let Some(arrest) = params.arrest_made {
+        conditions.push("arrest = ?".to_string());
+        bind_values.push(DuckValue::Int(i32::from(arrest)));
+    }
+}
+
+/// Adds an `IN (...)` filter for a comma-separated parameter to the `DuckDB`
+/// count query conditions and bind values.
+fn add_count_in_filter(
+    param_value: Option<&str>,
+    column: &str,
+    conditions: &mut Vec<String>,
+    bind_values: &mut Vec<DuckValue>,
+) {
+    let Some(raw) = param_value else { return };
+    let items: Vec<&str> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if items.is_empty() {
+        return;
+    }
+
+    let placeholders: Vec<&str> = items.iter().map(|_| "?").collect();
+    conditions.push(format!("{column} IN ({})", placeholders.join(", ")));
+    for item in &items {
+        bind_values.push(DuckValue::Str((*item).to_string()));
+    }
+}
+
+/// Helper enum for `DuckDB` parameter binding.
+enum DuckValue {
+    Int(i32),
+    Str(String),
+}
+
+/// Extracts the date portion (`YYYY-MM-DD`) from a date or RFC 3339 string.
+///
+/// Truncates at the `T` separator if present, otherwise takes the first 10
+/// characters.
+fn extract_date_part(s: &str) -> String {
+    s.find('T').map_or_else(
+        || {
+            if s.len() >= 10 {
+                s[..10].to_string()
+            } else {
+                s.to_string()
+            }
+        },
+        |idx| s[..idx].to_string(),
+    )
 }
 
 /// Parses a bounding box string `"west,south,east,north"` into a

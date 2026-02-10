@@ -31,6 +31,7 @@ actix-files = { workspace = true }
 actix-rt = { workspace = true }
 
 chrono = { workspace = true }
+duckdb = { workspace = true, features = ["bundled"] }
 log = { workspace = true }
 pretty_env_logger = { workspace = true }
 serde = { workspace = true }

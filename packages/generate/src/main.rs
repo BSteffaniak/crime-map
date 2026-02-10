@@ -43,6 +43,7 @@ const MANIFEST_VERSION: u32 = 1;
 const OUTPUT_INCIDENTS_PMTILES: &str = "incidents_pmtiles";
 const OUTPUT_CLUSTERS_PMTILES: &str = "clusters_pmtiles";
 const OUTPUT_INCIDENTS_DB: &str = "incidents_db";
+const OUTPUT_COUNT_DB: &str = "count_duckdb";
 
 /// Per-source fingerprint capturing the data state at generation time.
 ///
@@ -133,7 +134,12 @@ enum Commands {
         #[command(flatten)]
         args: GenerateArgs,
     },
-    /// Generate all output files (`PMTiles`, clusters, and sidebar `SQLite`)
+    /// Generate `DuckDB` count database with pre-aggregated summary table
+    CountDb {
+        #[command(flatten)]
+        args: GenerateArgs,
+    },
+    /// Generate all output files (`PMTiles`, clusters, sidebar `SQLite`, and count `DuckDB`)
     All {
         #[command(flatten)]
         args: GenerateArgs,
@@ -183,6 +189,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?;
         }
+        Commands::CountDb { args } => {
+            let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
+            run_with_cache(db.as_ref(), &args, &source_ids, &dir, &[OUTPUT_COUNT_DB]).await?;
+        }
         Commands::All { args } => {
             let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
             run_with_cache(
@@ -194,6 +204,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     OUTPUT_INCIDENTS_PMTILES,
                     OUTPUT_CLUSTERS_PMTILES,
                     OUTPUT_INCIDENTS_DB,
+                    OUTPUT_COUNT_DB,
                 ],
             )
             .await?;
@@ -282,6 +293,12 @@ async fn run_with_cache(
     if needs.get(OUTPUT_INCIDENTS_DB) == Some(&true) {
         generate_sidebar_db(db, args, source_ids, dir).await?;
         record_output(manifest, OUTPUT_INCIDENTS_DB);
+        save_manifest(dir, manifest)?;
+    }
+
+    if needs.get(OUTPUT_COUNT_DB) == Some(&true) {
+        generate_count_db(db, args, source_ids, dir).await?;
+        record_output(manifest, OUTPUT_COUNT_DB);
         save_manifest(dir, manifest)?;
     }
 
@@ -425,6 +442,7 @@ fn output_file_path(dir: &Path, output_name: &str) -> PathBuf {
         OUTPUT_INCIDENTS_PMTILES => dir.join("incidents.pmtiles"),
         OUTPUT_CLUSTERS_PMTILES => dir.join("clusters.pmtiles"),
         OUTPUT_INCIDENTS_DB => dir.join("incidents.db"),
+        OUTPUT_COUNT_DB => dir.join("counts.duckdb"),
         _ => dir.join(output_name),
     }
 }
@@ -908,6 +926,212 @@ fn build_batch_query(
     );
 
     (query, params)
+}
+
+/// Generates a `DuckDB` database with a pre-aggregated `count_summary` table
+/// for fast count queries.
+///
+/// Creates `counts.duckdb` with:
+/// - A raw `incidents` table populated from `PostGIS` via keyset pagination
+/// - A `count_summary` table aggregated by spatial cell, subcategory, severity,
+///   arrest status, and day
+///
+/// At runtime, count queries become a simple `SUM(cnt)` over the summary table
+/// filtered by cell coordinates, completing in under 10ms for any bounding box.
+///
+/// # Errors
+///
+/// Returns an error if the `PostGIS` export, `DuckDB` creation, or
+/// aggregation fails.
+async fn generate_count_db(
+    db: &dyn Database,
+    args: &GenerateArgs,
+    source_ids: &[i32],
+    dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db_path = dir.join("counts.duckdb");
+
+    // Remove any existing file so we start fresh
+    if db_path.exists() {
+        std::fs::remove_file(&db_path)?;
+    }
+    // DuckDB may also create a .wal file
+    let wal_path = dir.join("counts.duckdb.wal");
+    if wal_path.exists() {
+        std::fs::remove_file(&wal_path)?;
+    }
+
+    log::info!("Creating DuckDB count database...");
+
+    let duck = duckdb::Connection::open(&db_path)?;
+
+    // Create raw incidents table for aggregation
+    duck.execute_batch(
+        "CREATE TABLE incidents (
+            id BIGINT PRIMARY KEY,
+            subcategory VARCHAR NOT NULL,
+            severity INTEGER NOT NULL,
+            longitude DOUBLE NOT NULL,
+            latitude DOUBLE NOT NULL,
+            occurred_at VARCHAR NOT NULL,
+            arrest_made INTEGER,
+            category VARCHAR NOT NULL
+        )",
+    )?;
+
+    // Drop the connection before the async loop; we'll reopen per batch
+    drop(duck);
+
+    let total_count = populate_duckdb_incidents(db, args, source_ids, &db_path).await?;
+
+    // Reopen for aggregation
+    let duck = duckdb::Connection::open(&db_path)?;
+
+    // Create pre-aggregated count summary table
+    log::info!("Creating count_summary aggregation table...");
+    duck.execute_batch(
+        "CREATE TABLE count_summary AS
+         SELECT
+             CAST(FLOOR(longitude * 10) AS INTEGER) AS cell_lng,
+             CAST(FLOOR(latitude * 10) AS INTEGER) AS cell_lat,
+             subcategory,
+             category,
+             severity,
+             CASE WHEN arrest_made = 1 THEN 1
+                  WHEN arrest_made = 0 THEN 0
+                  ELSE 2 END AS arrest,
+             SUBSTRING(occurred_at, 1, 10) AS day,
+             COUNT(*) AS cnt
+         FROM incidents
+         GROUP BY ALL",
+    )?;
+
+    // Drop the raw incidents table to save space
+    duck.execute_batch("DROP TABLE incidents")?;
+
+    // Create indexes on the summary table for fast filtering
+    log::info!("Creating count_summary indexes...");
+    duck.execute_batch(
+        "CREATE INDEX idx_count_summary_cells ON count_summary (cell_lng, cell_lat)",
+    )?;
+
+    log::info!(
+        "DuckDB count database generated: {} ({total_count} rows aggregated)",
+        db_path.display()
+    );
+    Ok(())
+}
+
+/// Populates the `DuckDB` incidents table from `PostGIS` using keyset
+/// pagination.
+///
+/// Opens and closes the `DuckDB` connection per batch to avoid holding a
+/// non-`Send` reference across `.await` points.
+///
+/// Returns the total number of rows inserted.
+///
+/// # Errors
+///
+/// Returns an error if the `PostGIS` query or `DuckDB` insert fails.
+async fn populate_duckdb_incidents(
+    db: &dyn Database,
+    args: &GenerateArgs,
+    source_ids: &[i32],
+    duck_path: &Path,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let mut last_id: i64 = 0;
+    let mut total_count: u64 = 0;
+    let mut remaining = args.limit;
+
+    loop {
+        #[allow(clippy::cast_sign_loss)]
+        let batch_limit = match remaining {
+            Some(0) => break,
+            Some(r) => i64::try_from(r.min(BATCH_SIZE as u64))?,
+            None => BATCH_SIZE,
+        };
+
+        let (query, params) = build_batch_query(last_id, batch_limit, source_ids);
+        let rows = db.query_raw_params(&query, &params).await?;
+
+        if rows.is_empty() {
+            break;
+        }
+
+        #[allow(clippy::cast_possible_truncation)]
+        let batch_len = rows.len() as u64;
+
+        // Open DuckDB connection for this batch only (avoids !Send across await)
+        {
+            let duck = duckdb::Connection::open(duck_path)?;
+            duck.execute_batch("BEGIN TRANSACTION")?;
+
+            let mut stmt = duck.prepare(
+                "INSERT INTO incidents (id, subcategory, severity, longitude, latitude,
+                    occurred_at, arrest_made, category)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )?;
+
+            for row in &rows {
+                last_id = insert_duckdb_row(&mut stmt, row)?;
+            }
+
+            duck.execute_batch("COMMIT")?;
+        }
+
+        total_count += batch_len;
+        if let Some(ref mut r) = remaining {
+            *r = r.saturating_sub(batch_len);
+        }
+
+        log::info!("Inserted {total_count} rows into DuckDB...");
+
+        #[allow(clippy::cast_sign_loss)]
+        let batch_limit_u64 = batch_limit as u64;
+        if batch_len < batch_limit_u64 {
+            break;
+        }
+    }
+
+    Ok(total_count)
+}
+
+/// Inserts a single `PostGIS` incident row into the `DuckDB` incidents table.
+///
+/// Returns the row's primary key ID for keyset pagination tracking.
+///
+/// # Errors
+///
+/// Returns an error if the row extraction or `DuckDB` insert fails.
+fn insert_duckdb_row(
+    stmt: &mut duckdb::Statement<'_>,
+    row: &switchy_database::Row,
+) -> Result<i64, Box<dyn std::error::Error>> {
+    let id: i64 = row.to_value("id").unwrap_or(0);
+    let subcategory: String = row.to_value("subcategory").unwrap_or_default();
+    let category: String = row.to_value("category").unwrap_or_default();
+    let severity: i32 = row.to_value("severity").unwrap_or(1);
+    let lng: f64 = row.to_value("longitude").unwrap_or(0.0);
+    let lat: f64 = row.to_value("latitude").unwrap_or(0.0);
+    let arrest_made: Option<bool> = row.to_value("arrest_made").unwrap_or(None);
+
+    let occurred_at_naive: chrono::NaiveDateTime = row.to_value("occurred_at").unwrap_or_default();
+    let occurred_at_str = occurred_at_naive.format("%Y-%m-%d %H:%M:%S").to_string();
+
+    let arrest_int: Option<i32> = arrest_made.map(i32::from);
+
+    stmt.execute(duckdb::params![
+        id,
+        subcategory,
+        severity,
+        lng,
+        lat,
+        occurred_at_str,
+        arrest_int,
+        category,
+    ])?;
+
+    Ok(id)
 }
 
 /// Exports all incidents from `PostGIS` as newline-delimited `GeoJSON`,

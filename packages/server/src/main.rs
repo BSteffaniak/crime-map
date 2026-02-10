@@ -15,7 +15,7 @@ use actix_files::Files;
 use actix_web::{App, HttpServer, middleware, web};
 use crime_map_database::{db, run_migrations};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use switchy_database::Database;
 use switchy_database_connection::init_sqlite_rusqlite;
 
@@ -25,6 +25,9 @@ pub struct AppState {
     pub db: Arc<dyn Database>,
     /// `SQLite` database for sidebar queries (pre-generated, read-only).
     pub sidebar_db: Arc<dyn Database>,
+    /// `DuckDB` connection for fast pre-aggregated count queries.
+    /// `duckdb::Connection` is `Send` but not `Sync`, so a `Mutex` is needed.
+    pub count_db: Arc<Mutex<duckdb::Connection>>,
 }
 
 #[actix_web::main]
@@ -46,9 +49,20 @@ async fn main() -> std::io::Result<()> {
     let sidebar_db =
         init_sqlite_rusqlite(Some(sidebar_path)).expect("Failed to open sidebar SQLite database");
 
+    log::info!("Opening DuckDB count database...");
+    let count_path = Path::new("data/generated/counts.duckdb");
+    let count_db = duckdb::Connection::open_with_flags(
+        count_path,
+        duckdb::Config::default()
+            .access_mode(duckdb::AccessMode::ReadOnly)
+            .expect("Failed to set DuckDB access mode"),
+    )
+    .expect("Failed to open DuckDB count database");
+
     let state = web::Data::new(AppState {
         db: Arc::from(db_conn),
         sidebar_db: Arc::from(sidebar_db),
+        count_db: Arc::new(Mutex::new(count_db)),
     });
 
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".to_string());
