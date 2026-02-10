@@ -1,4 +1,4 @@
-/** Types for the cluster web worker message protocol. */
+/** Types for the sidebar web worker message protocol. */
 
 import type { FilterState } from "../types";
 
@@ -51,17 +51,12 @@ export interface SetFiltersRequest {
   filters: FilterState;
 }
 
-export interface GetViewportRequest {
-  type: "getViewport";
+export interface GetSidebarRequest {
+  type: "getSidebar";
   bbox: BBox;
   zoom: number;
   /** Sequence number for request cancellation. */
   seq: number;
-}
-
-export interface GetExpansionZoomRequest {
-  type: "getExpansionZoom";
-  clusterId: number;
 }
 
 export interface GetMoreSidebarRequest {
@@ -73,45 +68,35 @@ export interface GetMoreSidebarRequest {
 export type WorkerRequest =
   | InitRequest
   | SetFiltersRequest
-  | GetViewportRequest
-  | GetExpansionZoomRequest
+  | GetSidebarRequest
   | GetMoreSidebarRequest;
 
 // -- Response messages (worker -> main thread) --
 
 export interface ReadyResponse {
   type: "ready";
-  featureCount: number;
 }
 
 /** Sent periodically during a viewport FlatGeobuf load. */
 export interface ProgressResponse {
   type: "progress";
   loaded: number;
-  /** Approximate total if known, null otherwise. */
   total: number | null;
   phase: "loading" | "indexing";
 }
 
-/** Sent when a viewport spatial load completes and indexes are built. */
+/** Sent when a viewport spatial load completes. */
 export interface LoadCompleteResponse {
   type: "loadComplete";
   featureCount: number;
 }
 
-export interface ViewportResponse {
-  type: "viewport";
-  clusters: GeoJSON.FeatureCollection;
+export interface SidebarResponse {
+  type: "sidebar";
   sidebarFeatures: SidebarFeature[];
   totalCount: number;
   /** Echoed sequence number for stale response detection. */
   seq: number;
-}
-
-export interface ExpansionZoomResponse {
-  type: "expansionZoom";
-  clusterId: number;
-  zoom: number;
 }
 
 export interface MoreSidebarResponse {
@@ -130,7 +115,6 @@ export type WorkerResponse =
   | ReadyResponse
   | ProgressResponse
   | LoadCompleteResponse
-  | ViewportResponse
-  | ExpansionZoomResponse
+  | SidebarResponse
   | MoreSidebarResponse
   | ErrorResponse;

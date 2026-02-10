@@ -1,9 +1,9 @@
 /**
- * React hook for the cluster web worker.
+ * React hook for the sidebar web worker.
  *
- * Provides a singleton worker instance, debounced viewport updates with
- * sequence-number-based cancellation, filter synchronization, progress
- * tracking for per-viewport FlatGeobuf loads, and sidebar pagination.
+ * Provides a singleton worker instance for loading sidebar incident data
+ * from FlatGeobuf at zoom 8-11. At zoom 12+, sidebar data comes from
+ * queryRenderedFeatures() in the map component instead.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -15,30 +15,21 @@ import type {
   WorkerResponse,
 } from "./types";
 
-export interface ClusterWorkerState {
-  clusters: GeoJSON.FeatureCollection;
+export interface SidebarWorkerState {
   sidebarFeatures: SidebarFeature[];
   totalCount: number;
   loading: boolean;
   ready: boolean;
-  /** Progress of the current viewport data load. */
+  /** Progress of the current viewport FlatGeobuf load. */
   dataProgress: {
-    /** Number of points loaded so far. */
     loaded: number;
-    /** Approximate total if known. */
     total: number | null;
-    /** Current phase: loading from network, or indexing in memory. */
     phase: "loading" | "indexing" | "complete" | "idle";
   };
 }
 
-const EMPTY_FC: GeoJSON.FeatureCollection = {
-  type: "FeatureCollection",
-  features: [],
-};
-
-/** Debounce delay for viewport updates (ms). */
-const VIEWPORT_DEBOUNCE = 100;
+/** Debounce delay for sidebar updates (ms). */
+const SIDEBAR_DEBOUNCE = 150;
 
 // Singleton worker shared across all hook instances
 let sharedWorker: Worker | null = null;
@@ -56,7 +47,6 @@ function getOrCreateWorker(): Worker {
         listener(e.data);
       }
     };
-    // Initialize with base URL — worker loads data on demand per viewport
     send({ type: "init", baseUrl: "/tiles" });
   }
   return sharedWorker;
@@ -66,12 +56,11 @@ function send(msg: WorkerRequest) {
   getOrCreateWorker().postMessage(msg);
 }
 
-/** Global sequence counter for viewport request cancellation. */
-let viewportSeq = 0;
+/** Global sequence counter for sidebar request cancellation. */
+let sidebarSeq = 0;
 
-export function useClusterWorker(filters: FilterState) {
-  const [state, setState] = useState<ClusterWorkerState>({
-    clusters: EMPTY_FC,
+export function useSidebarWorker(filters: FilterState) {
+  const [state, setState] = useState<SidebarWorkerState>({
     sidebarFeatures: [],
     totalCount: 0,
     loading: false,
@@ -80,11 +69,10 @@ export function useClusterWorker(filters: FilterState) {
   });
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastViewportRef = useRef<{ bbox: BBox; zoom: number } | null>(null);
+  const lastRequestRef = useRef<{ bbox: BBox; zoom: number } | null>(null);
 
   // Register message listener
   useEffect(() => {
-    // Ensure the worker exists
     getOrCreateWorker();
     listenerCount++;
 
@@ -116,12 +104,10 @@ export function useClusterWorker(filters: FilterState) {
           }));
           break;
 
-        case "viewport":
-          // Phase 4: Only accept if seq matches the latest request
-          if (msg.seq === viewportSeq) {
+        case "sidebar":
+          if (msg.seq === sidebarSeq) {
             setState((prev) => ({
               ...prev,
-              clusters: msg.clusters,
               sidebarFeatures: msg.sidebarFeatures,
               totalCount: msg.totalCount,
               loading: false,
@@ -137,7 +123,7 @@ export function useClusterWorker(filters: FilterState) {
           break;
 
         case "error":
-          console.error("Cluster worker error:", msg.message);
+          console.error("Sidebar worker error:", msg.message);
           setState((prev) => ({
             ...prev,
             loading: false,
@@ -163,45 +149,28 @@ export function useClusterWorker(filters: FilterState) {
   useEffect(() => {
     send({ type: "setFilters", filters });
 
-    // Re-request current viewport with new filters
-    if (lastViewportRef.current) {
-      const { bbox, zoom } = lastViewportRef.current;
-      const seq = ++viewportSeq;
+    // Re-request sidebar with new filters
+    if (lastRequestRef.current) {
+      const { bbox, zoom } = lastRequestRef.current;
+      const seq = ++sidebarSeq;
       setState((prev) => ({ ...prev, loading: true }));
-      send({ type: "getViewport", bbox, zoom, seq });
+      send({ type: "getSidebar", bbox, zoom, seq });
     }
   }, [filters]);
 
-  // Debounced viewport update with sequence number
-  const updateViewport = useCallback((bbox: BBox, zoom: number) => {
-    lastViewportRef.current = { bbox, zoom };
+  // Debounced sidebar update
+  const updateSidebar = useCallback((bbox: BBox, zoom: number) => {
+    lastRequestRef.current = { bbox, zoom };
 
     if (debounceRef.current) {
       clearTimeout(debounceRef.current);
     }
 
     debounceRef.current = setTimeout(() => {
-      const seq = ++viewportSeq;
+      const seq = ++sidebarSeq;
       setState((prev) => ({ ...prev, loading: true }));
-      send({ type: "getViewport", bbox, zoom, seq });
-    }, VIEWPORT_DEBOUNCE);
-  }, []);
-
-  // Get expansion zoom for a cluster
-  const getExpansionZoom = useCallback((clusterId: number): Promise<number> => {
-    return new Promise((resolve) => {
-      const handler = (msg: WorkerResponse) => {
-        if (
-          msg.type === "expansionZoom" &&
-          msg.clusterId === clusterId
-        ) {
-          listeners.delete(handler);
-          resolve(msg.zoom);
-        }
-      };
-      listeners.add(handler);
-      send({ type: "getExpansionZoom", clusterId });
-    });
+      send({ type: "getSidebar", bbox, zoom, seq });
+    }, SIDEBAR_DEBOUNCE);
   }, []);
 
   // Load more sidebar features
@@ -215,8 +184,7 @@ export function useClusterWorker(filters: FilterState) {
 
   return {
     ...state,
-    updateViewport,
-    getExpansionZoom,
+    updateSidebar,
     loadMore,
   };
 }

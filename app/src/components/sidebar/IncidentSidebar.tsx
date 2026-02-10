@@ -1,5 +1,5 @@
 import { categoryColor, type FilterState } from "../../lib/types";
-import { useClusterWorker } from "../../lib/cluster-worker";
+import { useSidebarWorker } from "../../lib/cluster-worker";
 import type { SidebarFeature } from "../../lib/cluster-worker/types";
 
 interface IncidentSidebarProps {
@@ -8,7 +8,7 @@ interface IncidentSidebarProps {
 
 export default function IncidentSidebar({ filters }: IncidentSidebarProps) {
   const { sidebarFeatures, totalCount, loading, loadMore } =
-    useClusterWorker(filters);
+    useSidebarWorker(filters);
 
   const hasMore = sidebarFeatures.length < totalCount;
 

@@ -2,11 +2,13 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
 #![allow(clippy::multiple_crate_versions, clippy::cargo_common_metadata)]
 
-//! CLI tool for generating `PMTiles` and `FlatGeobuf` files from `PostGIS` data.
+//! CLI tool for generating `PMTiles`, cluster tiles, and `FlatGeobuf` files
+//! from `PostGIS` data.
 //!
-//! Exports crime incident data as `GeoJSONSeq`, then runs tippecanoe (`PMTiles`)
-//! and ogr2ogr (`FlatGeobuf`) to produce optimized spatial data files for the
-//! frontend.
+//! Exports crime incident data as `GeoJSONSeq`, then runs tippecanoe
+//! (`PMTiles` for heatmap/points and clustered tiles) and ogr2ogr
+//! (`FlatGeobuf` for sidebar spatial queries) to produce optimized spatial
+//! data files for the frontend.
 //!
 //! Uses keyset pagination and streaming writes to keep memory usage constant
 //! regardless of dataset size.
@@ -64,17 +66,22 @@ struct GenerateArgs {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Generate `PMTiles` from `PostGIS` data
+    /// Generate `PMTiles` from `PostGIS` data (heatmap + individual points)
     Pmtiles {
         #[command(flatten)]
         args: GenerateArgs,
     },
-    /// Generate `FlatGeobuf` files from `PostGIS` data
+    /// Generate clustered `PMTiles` for mid-zoom (zoom 8-11) via tippecanoe
+    Clusters {
+        #[command(flatten)]
+        args: GenerateArgs,
+    },
+    /// Generate `FlatGeobuf` files from `PostGIS` data (sidebar spatial queries)
     Flatgeobuf {
         #[command(flatten)]
         args: GenerateArgs,
     },
-    /// Generate both `PMTiles` and `FlatGeobuf`
+    /// Generate all output files (`PMTiles`, clusters, and `FlatGeobuf`)
     All {
         #[command(flatten)]
         args: GenerateArgs,
@@ -96,6 +103,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             generate_pmtiles(db.as_ref(), &args, &source_ids, &dir).await?;
             cleanup_intermediate(&args, &dir);
         }
+        Commands::Clusters { args } => {
+            let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
+            generate_cluster_tiles(db.as_ref(), &args, &source_ids, &dir).await?;
+            cleanup_intermediate(&args, &dir);
+        }
         Commands::Flatgeobuf { args } => {
             let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
             generate_flatgeobuf(db.as_ref(), &args, &source_ids, &dir).await?;
@@ -104,6 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::All { args } => {
             let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
             generate_pmtiles(db.as_ref(), &args, &source_ids, &dir).await?;
+            generate_cluster_tiles(db.as_ref(), &args, &source_ids, &dir).await?;
             generate_flatgeobuf(db.as_ref(), &args, &source_ids, &dir).await?;
             cleanup_intermediate(&args, &dir);
         }
@@ -223,6 +236,61 @@ async fn generate_pmtiles(
     }
 
     log::info!("PMTiles generated: {}", output_path.display());
+    Ok(())
+}
+
+/// Generates clustered `PMTiles` for mid-zoom levels (8-11) via tippecanoe.
+///
+/// Uses tippecanoe's built-in point clustering (`--cluster-distance=60`) to
+/// aggregate nearby points. Each cluster feature receives automatic
+/// `point_count` and `clustered` properties. The `severity` attribute is
+/// summed across merged points via `--accumulate-attribute`.
+///
+/// The output is a static file suitable for CDN caching.
+///
+/// # Errors
+///
+/// Returns an error if the `GeoJSONSeq` export or tippecanoe fails.
+async fn generate_cluster_tiles(
+    db: &dyn Database,
+    args: &GenerateArgs,
+    source_ids: &[i32],
+    dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let geojsonseq_path = dir.join("incidents.geojsonseq");
+
+    // Ensure GeoJSONSeq exists
+    if !geojsonseq_path.exists() {
+        log::info!("GeoJSONSeq not found, exporting...");
+        export_geojsonseq(db, &geojsonseq_path, args.limit, source_ids).await?;
+    }
+
+    log::info!("Running tippecanoe to generate cluster tiles...");
+
+    let output_path = dir.join("clusters.pmtiles");
+
+    let status = Command::new("tippecanoe")
+        .args([
+            "-o",
+            &output_path.to_string_lossy(),
+            "--force",
+            "--no-feature-limit",
+            "--no-tile-size-limit",
+            "--minimum-zoom=8",
+            "--maximum-zoom=11",
+            "-r1",
+            "--cluster-distance=60",
+            "--accumulate-attribute=severity:sum",
+            "--layer=clusters",
+            &geojsonseq_path.to_string_lossy(),
+        ])
+        .status()?;
+
+    if !status.success() {
+        return Err("tippecanoe cluster generation failed".into());
+    }
+
+    log::info!("Cluster PMTiles generated: {}", output_path.display());
     Ok(())
 }
 
