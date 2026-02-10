@@ -44,6 +44,7 @@
           libtool
           cmake
           openssl
+          duckdb
         ];
 
         geoTools = with pkgs; [

@@ -27,7 +27,7 @@ switchy_database_connection = { workspace = true, features = [
 
 clap = { workspace = true }
 chrono = { workspace = true }
-duckdb = { workspace = true, features = ["bundled"] }
+duckdb = { workspace = true }
 log = { workspace = true }
 pretty_env_logger = { workspace = true }
 serde = { workspace = true }
@@ -37,4 +37,5 @@ tokio = { workspace = true, features = ["full"] }
 
 [features]
 default = []
+duckdb-bundled = ["duckdb/bundled"]
 fail-on-warnings = []
