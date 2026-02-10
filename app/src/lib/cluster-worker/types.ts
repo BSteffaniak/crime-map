@@ -55,6 +55,8 @@ export interface GetViewportRequest {
   type: "getViewport";
   bbox: BBox;
   zoom: number;
+  /** Sequence number for request cancellation. */
+  seq: number;
 }
 
 export interface GetExpansionZoomRequest {
@@ -82,11 +84,28 @@ export interface ReadyResponse {
   featureCount: number;
 }
 
+/** Sent periodically during bulk FlatGeobuf load. */
+export interface ProgressResponse {
+  type: "progress";
+  loaded: number;
+  /** Approximate total if known, null otherwise. */
+  total: number | null;
+  phase: "loading" | "indexing";
+}
+
+/** Sent when the full dataset has been loaded and the initial index is built. */
+export interface LoadCompleteResponse {
+  type: "loadComplete";
+  featureCount: number;
+}
+
 export interface ViewportResponse {
   type: "viewport";
   clusters: GeoJSON.FeatureCollection;
   sidebarFeatures: SidebarFeature[];
   totalCount: number;
+  /** Echoed sequence number for stale response detection. */
+  seq: number;
 }
 
 export interface ExpansionZoomResponse {
@@ -109,6 +128,8 @@ export interface ErrorResponse {
 
 export type WorkerResponse =
   | ReadyResponse
+  | ProgressResponse
+  | LoadCompleteResponse
   | ViewportResponse
   | ExpansionZoomResponse
   | MoreSidebarResponse

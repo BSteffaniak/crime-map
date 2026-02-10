@@ -13,6 +13,13 @@ import { useClusterWorker } from "../../lib/cluster-worker";
 import { buildIncidentFilter } from "../../lib/map-filters/expressions";
 import type { BBox } from "../../lib/cluster-worker/types";
 
+/** Formats a number with K/M suffixes for compact display. */
+function formatCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
+  return n.toLocaleString();
+}
+
 interface CrimeMapProps {
   filters: FilterState;
   onBoundsChange?: (bounds: maplibregl.LngLatBounds, zoom: number) => void;
@@ -27,6 +34,7 @@ export default function CrimeMap({ filters, onBoundsChange }: CrimeMapProps) {
     clusters,
     updateViewport,
     getExpansionZoom,
+    dataProgress,
   } = useClusterWorker(filters);
 
   // -- Layer setup --
@@ -378,11 +386,44 @@ export default function CrimeMap({ filters, onBoundsChange }: CrimeMapProps) {
     map.setFilter("incidents-points", filterExpr);
   }, [filters, loaded]);
 
+  const showDataLoading =
+    loaded && dataProgress.phase !== "complete" && dataProgress.phase !== "idle";
+
   return (
-    <div ref={containerRef} className="h-full w-full">
+    <div ref={containerRef} className="relative h-full w-full">
       {!loaded && (
         <div className="flex h-full items-center justify-center bg-gray-100 text-gray-500">
           Loading map...
+        </div>
+      )}
+
+      {/* Phase 6: Data loading progress overlay */}
+      {showDataLoading && (
+        <div className="absolute bottom-6 left-1/2 z-10 -translate-x-1/2">
+          <div className="rounded-lg bg-white/95 px-5 py-3 shadow-lg backdrop-blur-sm">
+            <div className="flex items-center gap-3">
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
+              <div className="text-sm">
+                <span className="font-medium text-gray-800">
+                  {dataProgress.phase === "indexing"
+                    ? "Building spatial index..."
+                    : `Loading incidents: ${formatCount(dataProgress.loaded)}`}
+                </span>
+              </div>
+            </div>
+            {dataProgress.loaded > 0 && dataProgress.phase === "loading" && (
+              <div className="mt-2 h-1.5 w-48 overflow-hidden rounded-full bg-gray-200">
+                <div
+                  className="h-full rounded-full bg-blue-500 transition-all duration-300"
+                  style={{
+                    width: dataProgress.total
+                      ? `${Math.min(100, (dataProgress.loaded / dataProgress.total) * 100)}%`
+                      : "60%",
+                  }}
+                />
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
