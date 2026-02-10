@@ -397,32 +397,16 @@ export default function CrimeMap({ filters, onBoundsChange }: CrimeMapProps) {
         </div>
       )}
 
-      {/* Phase 6: Data loading progress overlay */}
+      {/* Per-viewport loading indicator (non-blocking) */}
       {showDataLoading && (
-        <div className="absolute bottom-6 left-1/2 z-10 -translate-x-1/2">
-          <div className="rounded-lg bg-white/95 px-5 py-3 shadow-lg backdrop-blur-sm">
-            <div className="flex items-center gap-3">
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
-              <div className="text-sm">
-                <span className="font-medium text-gray-800">
-                  {dataProgress.phase === "indexing"
-                    ? "Building spatial index..."
-                    : `Loading incidents: ${formatCount(dataProgress.loaded)}`}
-                </span>
-              </div>
-            </div>
-            {dataProgress.loaded > 0 && dataProgress.phase === "loading" && (
-              <div className="mt-2 h-1.5 w-48 overflow-hidden rounded-full bg-gray-200">
-                <div
-                  className="h-full rounded-full bg-blue-500 transition-all duration-300"
-                  style={{
-                    width: dataProgress.total
-                      ? `${Math.min(100, (dataProgress.loaded / dataProgress.total) * 100)}%`
-                      : "60%",
-                  }}
-                />
-              </div>
-            )}
+        <div className="absolute bottom-4 right-4 z-10">
+          <div className="flex items-center gap-2 rounded-full bg-white/90 px-3 py-1.5 shadow-md backdrop-blur-sm">
+            <div className="h-3 w-3 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
+            <span className="text-xs font-medium text-gray-600">
+              {dataProgress.phase === "indexing"
+                ? "Indexing..."
+                : `Loading${dataProgress.loaded > 0 ? ` ${formatCount(dataProgress.loaded)}` : "..."}`}
+            </span>
           </div>
         </div>
       )}

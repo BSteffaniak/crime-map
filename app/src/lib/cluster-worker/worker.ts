@@ -1,15 +1,20 @@
 /**
  * Cluster web worker for crime map.
  *
- * Loads the entire crime incident dataset from FlatGeobuf at startup,
- * maintains a Supercluster index for mid-zoom clustering, and an rbush
- * R-tree for fast sidebar bbox queries. Panning/zooming after the
- * initial load is purely in-memory with no network requests.
+ * Loads crime incident data **on demand** from a FlatGeobuf file using HTTP
+ * range requests with spatial filtering. Only features within a padded
+ * viewport bbox are fetched, keeping memory usage proportional to the
+ * visible area rather than the entire dataset.
+ *
+ * A 1.5x padding factor is applied to the viewport bbox so that small pans
+ * are served from the in-memory cache without any network requests. The
+ * cache is invalidated when the viewport moves outside the padded region
+ * or the zoom level changes significantly.
  *
  * Performance characteristics:
- * - Initial load: O(n) streaming from FlatGeobuf (one-time cost)
- * - Pan/zoom viewport query: O(k) where k = clusters in view (~instant)
- * - Filter change: O(n log n) Supercluster rebuild (infrequent user action)
+ * - Viewport load (cache miss): O(k) FlatGeobuf spatial query + O(k log k) Supercluster build
+ * - Pan/zoom within cache: O(k) Supercluster query (~instant)
+ * - Filter change: O(n log n) Supercluster rebuild from cached points (no network)
  * - Sidebar bbox query: O(log n + k) via rbush
  */
 
@@ -26,18 +31,46 @@ import type {
 } from "./types.ts";
 import type { FilterState } from "../types.ts";
 
-// -- State --
+// -- Configuration --
+
+/** Padding factor applied to the viewport bbox for cache locality. */
+const BBOX_PADDING_FACTOR = 1.5;
 
 /**
- * All loaded crime points. Populated once during bulk load, then immutable.
- * Points are stored as flat objects to minimize per-point overhead.
+ * Maximum zoom delta before the cache is invalidated. If the user zooms
+ * more than this many levels from the cached zoom, a reload is triggered
+ * because the spatial density changes significantly.
  */
-const allPoints: CrimePoint[] = [];
+const MAX_ZOOM_DELTA = 1;
 
-/** Whether the bulk load has completed. */
+/** How often to send progress updates during a viewport load. */
+const PROGRESS_INTERVAL = 10_000;
+
+// Supercluster config: clusters visible at zoom 8-11 (CLUSTER_MAX_ZOOM = 12)
+const SUPERCLUSTER_MAX_ZOOM = 11;
+const SUPERCLUSTER_RADIUS = 60;
+
+// -- State --
+
+/** Base URL for the FlatGeobuf file, set by the `init` message. */
+let baseUrl = "";
+
+/** Points loaded for the current padded viewport region. */
+let cachedPoints: CrimePoint[] = [];
+
+/** Pre-built GeoJSON features for cached points. */
+let cachedFeatures: GeoJSON.Feature<GeoJSON.Point, CrimePoint>[] = [];
+
+/** The padded bbox that was loaded (used for cache hit checks). */
+let cachedBbox: BBox | null = null;
+
+/** The zoom level at which the cache was built. */
+let cachedZoom: number | null = null;
+
+/** Whether a spatial load has completed and indexes are ready. */
 let dataReady = false;
 
-/** Filtered subset of allPoints matching current filters. */
+/** Filtered subset of cachedPoints matching current filters. */
 let filteredPoints: CrimePoint[] = [];
 
 /** Current filter state from the main thread. */
@@ -45,13 +78,6 @@ let currentFilters: FilterState | null = null;
 
 /** Supercluster index for mid-zoom clustering (zoom 8-11). */
 let clusterIndex: Supercluster | null = null;
-
-/**
- * Pre-built GeoJSON features for all points. Built once during bulk load.
- * On filter changes, we index into this array to avoid re-creating
- * Feature wrapper objects for every point.
- */
-let allFeatures: GeoJSON.Feature<GeoJSON.Point, CrimePoint>[] = [];
 
 /** rbush R-tree for fast sidebar bbox queries on filtered points. */
 interface RBushItem {
@@ -71,12 +97,15 @@ let viewportSidebarCache: SidebarFeature[] = [];
 /** Latest viewport request sequence number (for cancellation). */
 let latestViewportSeq = -1;
 
-// Supercluster config: clusters visible at zoom 8-11 (CLUSTER_MAX_ZOOM = 12)
-const SUPERCLUSTER_MAX_ZOOM = 11;
-const SUPERCLUSTER_RADIUS = 60;
+/**
+ * Sequence number for spatial data loads. Incremented each time a new
+ * load begins so that stale in-flight loads can be detected and discarded.
+ */
+let loadSeq = 0;
 
-/** How often to send progress updates during bulk load. */
-const PROGRESS_INTERVAL = 10_000;
+/** The last viewport bbox/zoom requested, used for re-querying after filter changes. */
+let lastRequestedBbox: BBox | null = null;
+let lastRequestedZoom: number | null = null;
 
 // -- Helpers --
 
@@ -102,38 +131,73 @@ function respond(msg: WorkerResponse) {
   postMessage(msg);
 }
 
-// -- Bulk FlatGeobuf loading (Phase 1) --
+/** Checks whether `outer` fully contains `inner`. */
+function bboxContains(outer: BBox, inner: BBox): boolean {
+  return (
+    outer[0] <= inner[0] && // west
+    outer[1] <= inner[1] && // south
+    outer[2] >= inner[2] && // east
+    outer[3] >= inner[3] // north
+  );
+}
+
+/** Expands a bbox by the given factor (1.5 = 25% padding on each side). */
+function padBbox(bbox: BBox, factor: number): BBox {
+  const [west, south, east, north] = bbox;
+  const dLng = ((east - west) * (factor - 1)) / 2;
+  const dLat = ((north - south) * (factor - 1)) / 2;
+  return [
+    Math.max(west - dLng, -180),
+    Math.max(south - dLat, -90),
+    Math.min(east + dLng, 180),
+    Math.min(north + dLat, 90),
+  ];
+}
+
+/** Whether the current cache covers the given bbox and zoom. */
+function cacheCovers(bbox: BBox, zoom: number): boolean {
+  if (!cachedBbox || cachedZoom === null || !dataReady) return false;
+  if (Math.abs(zoom - cachedZoom) > MAX_ZOOM_DELTA) return false;
+  return bboxContains(cachedBbox, bbox);
+}
+
+// -- FlatGeobuf spatial loading --
 
 /**
- * Loads the entire FlatGeobuf dataset in one pass. Sends periodic progress
- * updates to the main thread. After loading, pre-builds the GeoJSON features
- * array and the initial Supercluster index.
+ * Loads features from FlatGeobuf for the given padded bbox using HTTP
+ * range requests with the spatial index. Returns false if the load was
+ * cancelled by a newer request (detected via sequence number).
  */
-async function loadAllFeatures(url: string): Promise<void> {
+async function loadFeaturesForBbox(
+  paddedBbox: BBox,
+  zoom: number,
+  seq: number,
+): Promise<boolean> {
+  const [west, south, east, north] = paddedBbox;
+  const url = `${baseUrl}/incidents.fgb`;
+
   respond({ type: "progress", loaded: 0, total: null, phase: "loading" });
 
-  // Fetch the file as a stream and deserialize sequentially. Using a
-  // ReadableStream instead of a URL avoids the FlatGeobuf HTTP range-request
-  // path which traverses the packed R-tree spatial index — that approach
-  // issues thousands of small range requests and does not scale for bulk
-  // loading large datasets. A single sequential download is dramatically
-  // faster when we need all features anyway.
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch ${url}: ${response.status}`);
-  }
-  if (!response.body) {
-    throw new Error(`Response body is null for ${url}`);
-  }
-  const iter = flatgeobuf.deserialize(response.body as ReadableStream);
+  const iter = flatgeobuf.deserialize(url, {
+    minX: west,
+    minY: south,
+    maxX: east,
+    maxY: north,
+  });
+
+  const points: CrimePoint[] = [];
+  const features: GeoJSON.Feature<GeoJSON.Point, CrimePoint>[] = [];
 
   for await (const feature of iter) {
+    // Check for stale load
+    if (seq !== loadSeq) return false;
+
     const f = feature as GeoJSON.Feature<GeoJSON.Point>;
     const props = f.properties;
     if (!props) continue;
 
     const [lng, lat] = f.geometry.coordinates;
-    allPoints.push({
+    const point: CrimePoint = {
       id: props.id as number,
       lng,
       lat,
@@ -147,76 +211,73 @@ async function loadAllFeatures(url: string): Promise<void> {
       date: (props.date as string) ?? "",
       desc: (props.desc as string | null) ?? null,
       addr: (props.addr as string | null) ?? null,
+    };
+
+    points.push(point);
+    features.push({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [lng, lat] },
+      properties: point,
     });
 
-    // Send progress every PROGRESS_INTERVAL points
-    if (allPoints.length % PROGRESS_INTERVAL === 0) {
+    if (points.length % PROGRESS_INTERVAL === 0) {
       respond({
         type: "progress",
-        loaded: allPoints.length,
+        loaded: points.length,
         total: null,
         phase: "loading",
       });
     }
   }
 
-  // Phase 5: Pre-build the GeoJSON features array once
+  // Final stale check before committing to cache
+  if (seq !== loadSeq) return false;
+
+  // Commit to cache
+  cachedPoints = points;
+  cachedFeatures = features;
+  cachedBbox = paddedBbox;
+  cachedZoom = zoom;
+
+  // Build indexes
   respond({
     type: "progress",
-    loaded: allPoints.length,
-    total: allPoints.length,
+    loaded: points.length,
+    total: points.length,
     phase: "indexing",
   });
 
-  allFeatures = new Array(allPoints.length);
-  for (let i = 0; i < allPoints.length; i++) {
-    const p = allPoints[i];
-    allFeatures[i] = {
-      type: "Feature",
-      geometry: { type: "Point", coordinates: [p.lng, p.lat] },
-      properties: p,
-    };
-  }
-
-  // Build initial cluster index with all points (no filters yet)
   rebuildClusterIndex();
-
   dataReady = true;
 
-  respond({ type: "loadComplete", featureCount: allPoints.length });
+  respond({ type: "loadComplete", featureCount: points.length });
+  return true;
 }
 
-// -- Filtering + Supercluster (Phase 2 + Phase 3 + Phase 5) --
+// -- Filtering + Supercluster --
 
 /**
- * Rebuilds the Supercluster index and rbush sidebar tree from scratch.
- * Called only when filters change (not on viewport changes).
- *
- * Phase 2: This is now the ONLY place that rebuilds the index.
- * Phase 3: Also rebuilds the rbush tree for sidebar queries.
- * Phase 5: Reuses pre-built GeoJSON features from allFeatures[] to avoid
- *          re-creating Feature wrapper objects.
+ * Rebuilds the Supercluster index and rbush sidebar tree from cached
+ * points, applying current filters.
  */
 function rebuildClusterIndex() {
   const predicate = currentFilters
     ? buildIncidentPredicate(currentFilters)
     : null;
 
-  // Filter points and collect their pre-built GeoJSON features
   const features: GeoJSON.Feature<GeoJSON.Point, CrimePoint>[] = [];
   filteredPoints = [];
 
   if (predicate) {
-    for (let i = 0; i < allPoints.length; i++) {
-      if (predicate(allPoints[i])) {
-        filteredPoints.push(allPoints[i]);
-        features.push(allFeatures[i]);
+    for (let i = 0; i < cachedPoints.length; i++) {
+      if (predicate(cachedPoints[i])) {
+        filteredPoints.push(cachedPoints[i]);
+        features.push(cachedFeatures[i]);
       }
     }
   } else {
-    // No filters — use everything directly
-    filteredPoints = allPoints;
-    features.push(...allFeatures);
+    filteredPoints = cachedPoints;
+    features.push(...cachedFeatures);
   }
 
   // Build Supercluster index
@@ -235,7 +296,7 @@ function rebuildClusterIndex() {
 
   clusterIndex.load(features);
 
-  // Phase 3: Build rbush R-tree for sidebar bbox queries
+  // Build rbush R-tree for sidebar bbox queries
   const rbushItems: RBushItem[] = new Array(filteredPoints.length);
   for (let i = 0; i < filteredPoints.length; i++) {
     const p = filteredPoints[i];
@@ -252,7 +313,7 @@ function rebuildClusterIndex() {
 }
 
 /**
- * Phase 3: Get filtered points within a bounding box using rbush.
+ * Get filtered points within a bounding box using rbush.
  * O(log n + k) instead of O(n).
  */
 function getFilteredPointsInBbox(bbox: BBox): CrimePoint[] {
@@ -268,10 +329,11 @@ function getFilteredPointsInBbox(bbox: BBox): CrimePoint[] {
 
 // -- Message handlers --
 
-async function handleInit(bUrl: string) {
-  // Start bulk loading the entire dataset immediately
-  const url = `${bUrl}/incidents.fgb`;
-  await loadAllFeatures(url);
+function handleInit(bUrl: string) {
+  baseUrl = bUrl;
+  // No bulk load — data is loaded on demand per viewport.
+  // Send ready immediately so the main thread knows the worker is alive.
+  respond({ type: "ready", featureCount: 0 });
 }
 
 function handleSetFilters(filters: FilterState) {
@@ -282,14 +344,36 @@ function handleSetFilters(filters: FilterState) {
 }
 
 /**
- * Phase 2: Viewport handler no longer loads data or rebuilds the index.
- * It only queries the existing Supercluster and rbush indexes.
- * Phase 4: Checks sequence number for request cancellation.
+ * Handles a viewport request. If the cache covers the bbox, queries
+ * the existing indexes instantly. Otherwise, triggers a spatial load
+ * from FlatGeobuf with a padded bbox, builds indexes, then responds.
  */
-function handleGetViewport(bbox: BBox, zoom: number, seq: number) {
-  // Phase 4: Record this as the latest request
+async function handleGetViewport(bbox: BBox, zoom: number, seq: number) {
   latestViewportSeq = seq;
+  lastRequestedBbox = bbox;
+  lastRequestedZoom = zoom;
 
+  if (cacheCovers(bbox, zoom)) {
+    // Cache hit — query existing indexes instantly
+    respondWithViewport(bbox, zoom, seq);
+    return;
+  }
+
+  // Cache miss — load features for the padded bbox
+  const paddedBbox = padBbox(bbox, BBOX_PADDING_FACTOR);
+  const mySeq = ++loadSeq;
+
+  const loaded = await loadFeaturesForBbox(paddedBbox, zoom, mySeq);
+  if (!loaded) return; // Stale, a newer request superseded this one
+
+  // Check we're still the latest viewport request
+  if (seq < latestViewportSeq) return;
+
+  respondWithViewport(bbox, zoom, seq);
+}
+
+/** Queries existing Supercluster + rbush and sends the viewport response. */
+function respondWithViewport(bbox: BBox, zoom: number, seq: number) {
   if (!dataReady || !clusterIndex) {
     respond({
       type: "viewport",
@@ -301,13 +385,11 @@ function handleGetViewport(bbox: BBox, zoom: number, seq: number) {
     return;
   }
 
-  // Phase 4: Check if a newer request has arrived before doing work
+  // Check for staleness
   if (seq < latestViewportSeq) return;
 
-  // Get clusters — this is O(k) where k = clusters in view, essentially instant
   const clusterFeatures = clusterIndex.getClusters(bbox, zoom);
 
-  // Phase 4: Check again after cluster query (it's fast, but be safe)
   if (seq < latestViewportSeq) return;
 
   const clusters: GeoJSON.FeatureCollection = {
@@ -315,17 +397,15 @@ function handleGetViewport(bbox: BBox, zoom: number, seq: number) {
     features: clusterFeatures,
   };
 
-  // Phase 3: Get sidebar features using rbush (O(log n + k))
+  // Sidebar features via rbush
   const viewportPoints = getFilteredPointsInBbox(bbox);
   viewportPoints.sort(
     (a, b) => (a.date > b.date ? -1 : a.date < b.date ? 1 : 0),
   );
 
   viewportSidebarCache = viewportPoints.map(pointToSidebarFeature);
-
   const sidebarPage = viewportSidebarCache.slice(0, 50);
 
-  // Phase 4: Final staleness check before sending response
   if (seq < latestViewportSeq) return;
 
   respond({
@@ -365,16 +445,20 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   try {
     switch (msg.type) {
       case "init":
-        await handleInit(msg.baseUrl);
-        respond({ type: "ready", featureCount: allPoints.length });
+        handleInit(msg.baseUrl);
         break;
 
       case "setFilters":
         handleSetFilters(msg.filters);
+        // Re-query the current viewport with new filters if we have one
+        if (dataReady && lastRequestedBbox && lastRequestedZoom !== null) {
+          const seq = latestViewportSeq;
+          respondWithViewport(lastRequestedBbox, lastRequestedZoom, seq);
+        }
         break;
 
       case "getViewport":
-        handleGetViewport(msg.bbox, msg.zoom, msg.seq);
+        await handleGetViewport(msg.bbox, msg.zoom, msg.seq);
         break;
 
       case "getExpansionZoom":

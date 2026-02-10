@@ -84,7 +84,7 @@ export interface ReadyResponse {
   featureCount: number;
 }
 
-/** Sent periodically during bulk FlatGeobuf load. */
+/** Sent periodically during a viewport FlatGeobuf load. */
 export interface ProgressResponse {
   type: "progress";
   loaded: number;
@@ -93,7 +93,7 @@ export interface ProgressResponse {
   phase: "loading" | "indexing";
 }
 
-/** Sent when the full dataset has been loaded and the initial index is built. */
+/** Sent when a viewport spatial load completes and indexes are built. */
 export interface LoadCompleteResponse {
   type: "loadComplete";
   featureCount: number;

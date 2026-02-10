@@ -3,7 +3,7 @@
  *
  * Provides a singleton worker instance, debounced viewport updates with
  * sequence-number-based cancellation, filter synchronization, progress
- * tracking for the initial bulk load, and sidebar pagination.
+ * tracking for per-viewport FlatGeobuf loads, and sidebar pagination.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -21,7 +21,7 @@ export interface ClusterWorkerState {
   totalCount: number;
   loading: boolean;
   ready: boolean;
-  /** Progress of the initial bulk data load. */
+  /** Progress of the current viewport data load. */
   dataProgress: {
     /** Number of points loaded so far. */
     loaded: number;
@@ -56,7 +56,7 @@ function getOrCreateWorker(): Worker {
         listener(e.data);
       }
     };
-    // Initialize with base URL — triggers bulk FlatGeobuf load in the worker
+    // Initialize with base URL — worker loads data on demand per viewport
     send({ type: "init", baseUrl: "/tiles" });
   }
   return sharedWorker;
@@ -114,13 +114,6 @@ export function useClusterWorker(filters: FilterState) {
               phase: "complete",
             },
           }));
-          // After data is loaded, request the current viewport if we have one
-          if (lastViewportRef.current) {
-            const { bbox, zoom } = lastViewportRef.current;
-            const seq = ++viewportSeq;
-            setState((prev) => ({ ...prev, loading: true }));
-            send({ type: "getViewport", bbox, zoom, seq });
-          }
           break;
 
         case "viewport":
