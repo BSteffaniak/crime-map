@@ -95,14 +95,20 @@ pub trait LlmProvider: Send + Sync {
 
 /// Creates an LLM provider based on environment variables.
 ///
-/// Checks `AI_PROVIDER` (default: "anthropic") and uses the corresponding
-/// API key env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or AWS credentials).
+/// If `AI_PROVIDER` is explicitly set, uses that provider. Otherwise
+/// auto-detects from available credentials:
+///
+/// 1. `ANTHROPIC_API_KEY` set -> Anthropic Claude
+/// 2. `OPENAI_API_KEY` set -> `OpenAI` GPT-4
+/// 3. AWS credentials available (`AWS_ACCESS_KEY_ID`, `AWS_PROFILE`,
+///    or IAM role on EC2/ECS) -> Bedrock
 ///
 /// # Errors
 ///
-/// Returns [`AiError::Config`] if the required API key is not set.
+/// Returns [`AiError::Config`] if no credentials are found or the
+/// explicitly requested provider is not configured.
 pub async fn create_provider_from_env() -> Result<Box<dyn LlmProvider>, AiError> {
-    let provider = std::env::var("AI_PROVIDER").unwrap_or_else(|_| "anthropic".to_string());
+    let provider = std::env::var("AI_PROVIDER").unwrap_or_else(|_| detect_provider());
 
     match provider.to_lowercase().as_str() {
         "anthropic" | "claude" => {
@@ -138,4 +144,41 @@ pub async fn create_provider_from_env() -> Result<Box<dyn LlmProvider>, AiError>
             ),
         }),
     }
+}
+
+/// Auto-detects which provider to use based on available credentials.
+///
+/// Checks for credentials in priority order: Anthropic, `OpenAI`, AWS.
+/// Returns a provider name string that matches the arms in
+/// [`create_provider_from_env`].
+fn detect_provider() -> String {
+    if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+        log::info!("Auto-detected AI provider: Anthropic (ANTHROPIC_API_KEY found)");
+        return "anthropic".to_string();
+    }
+
+    if std::env::var("OPENAI_API_KEY").is_ok() {
+        log::info!("Auto-detected AI provider: OpenAI (OPENAI_API_KEY found)");
+        return "openai".to_string();
+    }
+
+    // Check for AWS credentials — any of these indicate Bedrock is available
+    let has_aws_keys = std::env::var("AWS_ACCESS_KEY_ID").is_ok();
+    let has_aws_profile = std::env::var("AWS_PROFILE").is_ok();
+    let has_aws_role = std::env::var("AWS_ROLE_ARN").is_ok()
+        || std::env::var("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI").is_ok();
+
+    if has_aws_keys || has_aws_profile || has_aws_role {
+        log::info!("Auto-detected AI provider: Bedrock (AWS credentials found)");
+        return "bedrock".to_string();
+    }
+
+    log::warn!(
+        "No AI credentials detected. Set one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, \
+         or AWS credentials (AWS_ACCESS_KEY_ID/AWS_PROFILE). \
+         You can also set AI_PROVIDER explicitly."
+    );
+
+    // Fall back to anthropic — will produce a clear error about missing key
+    "anthropic".to_string()
 }
