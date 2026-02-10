@@ -383,31 +383,24 @@ fn execute_duckdb_count(
         .prepare(&sql)
         .map_err(|e| format!("DuckDB prepare failed: {e}"))?;
 
-    // Bind all parameters
-    for (i, val) in bind_values.iter().enumerate() {
-        match val {
-            DuckValue::Int(v) => {
-                stmt.raw_bind_parameter(i + 1, *v)
-                    .map_err(|e| format!("DuckDB bind failed at {}: {e}", i + 1))?;
+    // Build a Vec of boxed ToSql values, then collect references for query
+    let boxed_params: Vec<Box<dyn duckdb::ToSql>> = bind_values
+        .into_iter()
+        .map(|v| -> Box<dyn duckdb::ToSql> {
+            match v {
+                DuckValue::Int(i) => Box::new(i),
+                DuckValue::Str(s) => Box::new(s),
             }
-            DuckValue::Str(v) => {
-                stmt.raw_bind_parameter(i + 1, v.as_str())
-                    .map_err(|e| format!("DuckDB bind failed at {}: {e}", i + 1))?;
-            }
-        }
-    }
+        })
+        .collect();
+    let param_refs: Vec<&dyn duckdb::ToSql> = boxed_params.iter().map(AsRef::as_ref).collect();
 
-    let mut rows = stmt.raw_query();
-
-    let total: u64 = if let Some(row) = rows
-        .next()
-        .map_err(|e| format!("DuckDB query failed: {e}"))?
-    {
-        let val: Option<i64> = row.get(0).map_err(|e| format!("DuckDB get failed: {e}"))?;
-        val.unwrap_or(0).try_into().unwrap_or(0)
-    } else {
-        0
-    };
+    let total: u64 = stmt
+        .query_row(param_refs.as_slice(), |row| {
+            let val: Option<i64> = row.get(0)?;
+            Ok(val.unwrap_or(0).try_into().unwrap_or(0))
+        })
+        .map_err(|e| format!("DuckDB query failed: {e}"))?;
 
     Ok(total)
 }
