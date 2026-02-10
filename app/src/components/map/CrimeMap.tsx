@@ -88,13 +88,7 @@ export default function CrimeMap({ filters, onBoundsChange }: CrimeMapProps) {
           0, 2,
           HEATMAP_MAX_ZOOM, 20,
         ],
-        "heatmap-opacity": [
-          "interpolate",
-          ["linear"],
-          ["zoom"],
-          HEATMAP_MAX_ZOOM - 2, 0.8,
-          HEATMAP_MAX_ZOOM, 0,
-        ],
+        "heatmap-opacity": 0.8,
       },
     });
 
@@ -128,15 +122,7 @@ export default function CrimeMap({ filters, onBoundsChange }: CrimeMapProps) {
         ],
         "circle-stroke-width": 2,
         "circle-stroke-color": "#ffffff",
-        "circle-opacity": [
-          "interpolate",
-          ["linear"],
-          ["zoom"],
-          HEATMAP_MAX_ZOOM, 0,
-          HEATMAP_MAX_ZOOM + 0.5, 0.85,
-          CLUSTER_MAX_ZOOM - 0.5, 0.85,
-          CLUSTER_MAX_ZOOM, 0,
-        ],
+        "circle-opacity": 0.85,
       },
     });
 
@@ -165,15 +151,7 @@ export default function CrimeMap({ filters, onBoundsChange }: CrimeMapProps) {
       },
       paint: {
         "text-color": "#333",
-        "text-opacity": [
-          "interpolate",
-          ["linear"],
-          ["zoom"],
-          HEATMAP_MAX_ZOOM, 0,
-          HEATMAP_MAX_ZOOM + 0.5, 1,
-          CLUSTER_MAX_ZOOM - 0.5, 1,
-          CLUSTER_MAX_ZOOM, 0,
-        ],
+        "text-opacity": 1,
       },
     });
 
@@ -199,15 +177,7 @@ export default function CrimeMap({ filters, onBoundsChange }: CrimeMapProps) {
         ],
         "circle-stroke-width": 0.5,
         "circle-stroke-color": "#ffffff",
-        "circle-opacity": [
-          "interpolate",
-          ["linear"],
-          ["zoom"],
-          HEATMAP_MAX_ZOOM, 0,
-          HEATMAP_MAX_ZOOM + 0.5, 0.7,
-          CLUSTER_MAX_ZOOM - 0.5, 0.7,
-          CLUSTER_MAX_ZOOM, 0,
-        ],
+        "circle-opacity": 0.7,
       },
     });
 
@@ -237,13 +207,7 @@ export default function CrimeMap({ filters, onBoundsChange }: CrimeMapProps) {
         ],
         "circle-stroke-width": 0.5,
         "circle-stroke-color": "#ffffff",
-        "circle-opacity": [
-          "interpolate",
-          ["linear"],
-          ["zoom"],
-          CLUSTER_MAX_ZOOM, 0,
-          CLUSTER_MAX_ZOOM + 0.5, 0.85,
-        ],
+        "circle-opacity": 0.85,
       },
     });
 
