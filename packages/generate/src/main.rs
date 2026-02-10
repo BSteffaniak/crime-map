@@ -992,8 +992,8 @@ async fn generate_count_db(
     duck.execute_batch(
         "CREATE TABLE count_summary AS
          SELECT
-             CAST(FLOOR(longitude * 10) AS INTEGER) AS cell_lng,
-             CAST(FLOOR(latitude * 10) AS INTEGER) AS cell_lat,
+             CAST(FLOOR(longitude * 100) AS INTEGER) AS cell_lng,
+             CAST(FLOOR(latitude * 100) AS INTEGER) AS cell_lat,
              subcategory,
              category,
              severity,

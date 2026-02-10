@@ -413,15 +413,15 @@ fn build_count_conditions(
     bind_values: &mut Vec<DuckValue>,
 ) {
     if let Some(b) = bbox {
-        // Convert bbox to cell coordinates: floor(coord * 10)
+        // Convert bbox to cell coordinates: floor(coord * 100)
         #[allow(clippy::cast_possible_truncation)]
-        let cell_west = (b.west * 10.0).floor() as i32;
+        let cell_west = (b.west * 100.0).floor() as i32;
         #[allow(clippy::cast_possible_truncation)]
-        let cell_east = (b.east * 10.0).floor() as i32;
+        let cell_east = (b.east * 100.0).floor() as i32;
         #[allow(clippy::cast_possible_truncation)]
-        let cell_south = (b.south * 10.0).floor() as i32;
+        let cell_south = (b.south * 100.0).floor() as i32;
         #[allow(clippy::cast_possible_truncation)]
-        let cell_north = (b.north * 10.0).floor() as i32;
+        let cell_north = (b.north * 100.0).floor() as i32;
 
         conditions.push("cell_lng >= ? AND cell_lng <= ?".to_string());
         bind_values.push(DuckValue::Int(cell_west));
