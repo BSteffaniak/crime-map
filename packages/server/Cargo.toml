@@ -46,6 +46,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 
 [features]
-default = []
+default = ["bedrock"]
+bedrock = ["crime_map_ai/bedrock"]
 duckdb-bundled = ["duckdb/bundled"]
 fail-on-warnings = []

@@ -117,3 +117,8 @@ hex = { version = "0.4.3", default-features = false }
 csv = { version = "1.4.0", default-features = false }
 duckdb = { version = "1.4.4", default-features = false }
 indicatif = { version = "0.17.11", default-features = false }
+
+# AWS SDK (optional, for Bedrock provider)
+aws-sdk-bedrockruntime = { version = "1.124.0", default-features = false }
+aws-config = { version = "1.8.13", default-features = false }
+aws-smithy-types = { version = "1.4.3", default-features = false }

@@ -554,7 +554,7 @@ pub async fn ai_ask(state: web::Data<AppState>, params: web::Query<AiQueryParams
     }
 
     // Check if AI is configured
-    let provider = match crime_map_ai::providers::create_provider_from_env() {
+    let provider = match crime_map_ai::providers::create_provider_from_env().await {
         Ok(p) => p,
         Err(e) => {
             log::error!("AI provider not configured: {e}");

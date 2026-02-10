@@ -4,10 +4,11 @@
 
 //! AI agent with LLM provider abstraction and tool-use agentic loop.
 //!
-//! Supports both Anthropic Claude and `OpenAI` GPT-4 via a provider-agnostic
-//! trait. The agent loop orchestrates multi-step tool calling: the LLM
-//! decides which analytics tools to invoke, the backend executes them,
-//! and results are fed back until the LLM produces a final answer.
+//! Supports Anthropic Claude, `OpenAI` GPT-4, and AWS Bedrock (feature-gated)
+//! via a provider-agnostic trait. The agent loop orchestrates multi-step tool
+//! calling: the LLM decides which analytics tools to invoke, the backend
+//! executes them, and results are fed back until the LLM produces a final
+//! answer.
 
 pub mod agent;
 pub mod providers;
