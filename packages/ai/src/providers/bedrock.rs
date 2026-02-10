@@ -33,53 +33,32 @@ impl BedrockProvider {
     /// directly against the Bedrock Runtime API. Otherwise falls back to
     /// the standard AWS credential chain.
     ///
+    /// In both cases, the full SDK defaults (HTTP client, sleep impl,
+    /// retry config, etc.) are loaded from `aws_config`.
+    ///
     /// The `model_id` should be a Bedrock model ID such as
     /// `us.anthropic.claude-sonnet-4-20250514-v1:0`.
     pub async fn new(model_id: String, region: Option<String>) -> Self {
-        let client = if let Ok(token) = std::env::var("AWS_BEARER_TOKEN_BEDROCK") {
-            log::info!("Using AWS_BEARER_TOKEN_BEDROCK for Bedrock authentication");
-            Self::build_bearer_token_client(token, region)
-        } else {
-            Self::build_credential_chain_client(region).await
-        };
-
-        Self { client, model_id }
-    }
-
-    /// Builds a Bedrock client using a bearer token for authentication.
-    ///
-    /// This configures the client to prefer HTTP bearer auth over `SigV4`,
-    /// which is what the Amazon Bedrock console's temporary tokens require.
-    fn build_bearer_token_client(
-        token: String,
-        region: Option<String>,
-    ) -> aws_sdk_bedrockruntime::Client {
-        let bearer_token = aws_sdk_bedrockruntime::config::Token::new(token, None);
-
-        let mut builder = aws_sdk_bedrockruntime::config::Config::builder()
-            .behavior_version(aws_sdk_bedrockruntime::config::BehaviorVersion::latest())
-            .bearer_token(bearer_token)
-            .auth_scheme_preference([HTTP_BEARER_AUTH_SCHEME_ID]);
-
-        if let Some(region) = region {
-            builder = builder.region(aws_sdk_bedrockruntime::config::Region::new(region));
-        }
-
-        aws_sdk_bedrockruntime::Client::from_conf(builder.build())
-    }
-
-    /// Builds a Bedrock client using the standard AWS credential chain.
-    async fn build_credential_chain_client(
-        region: Option<String>,
-    ) -> aws_sdk_bedrockruntime::Client {
+        // Load full SDK defaults (http client, sleep impl, retry, timeouts, etc.)
         let mut config_loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
-
         if let Some(region) = region {
             config_loader = config_loader.region(aws_config::Region::new(region));
         }
+        let sdk_config = config_loader.load().await;
 
-        let config = config_loader.load().await;
-        aws_sdk_bedrockruntime::Client::new(&config)
+        // Start from SdkConfig defaults, then optionally overlay bearer token auth
+        let mut builder = aws_sdk_bedrockruntime::config::Builder::from(&sdk_config);
+
+        if let Ok(token) = std::env::var("AWS_BEARER_TOKEN_BEDROCK") {
+            log::info!("Using AWS_BEARER_TOKEN_BEDROCK for Bedrock authentication");
+            let bearer_token = aws_sdk_bedrockruntime::config::Token::new(token, None);
+            builder = builder
+                .bearer_token(bearer_token)
+                .auth_scheme_preference([HTTP_BEARER_AUTH_SCHEME_ID]);
+        }
+
+        let client = aws_sdk_bedrockruntime::Client::from_conf(builder.build());
+        Self { client, model_id }
     }
 }
 

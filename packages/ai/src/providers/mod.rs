@@ -131,7 +131,21 @@ pub async fn create_provider_from_env() -> Result<Box<dyn LlmProvider>, AiError>
         "bedrock" | "aws" => {
             let model = std::env::var("AI_MODEL")
                 .unwrap_or_else(|_| "us.anthropic.claude-sonnet-4-20250514-v1:0".to_string());
-            let region = std::env::var("AWS_REGION").ok();
+            let region = std::env::var("AWS_REGION")
+                .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+                .ok()
+                .or_else(|| {
+                    // Bearer token auth requires a region for endpoint resolution.
+                    // Default to us-east-1 when no region is configured.
+                    if std::env::var("AWS_BEARER_TOKEN_BEDROCK").is_ok() {
+                        log::info!(
+                            "No AWS_REGION set; defaulting to us-east-1 for Bedrock bearer token auth"
+                        );
+                        Some("us-east-1".to_string())
+                    } else {
+                        None
+                    }
+                });
             let provider = bedrock::BedrockProvider::new(model, region).await;
             Ok(Box::new(provider))
         }
