@@ -39,7 +39,7 @@ fn build_system_prompt(context: &AgentContext) -> String {
 - Date range: {date_range}
 - Crime categories: VIOLENT (Homicide, Sexual Assault, Robbery, Aggravated Assault, Simple Assault), PROPERTY (Burglary, Larceny/Theft, Motor Vehicle Theft, Arson, Vandalism), DRUG_NARCOTICS (Drug Possession, Drug Sales/Manufacturing, Drug Equipment), PUBLIC_ORDER (Weapons Violation, DUI, Disorderly Conduct, Trespassing, Prostitution), FRAUD_FINANCIAL (Fraud, Forgery, Embezzlement, Identity Theft), OTHER (Missing Person, Non-Criminal, Unknown)
 - Severity levels: 1 (Minimal) through 5 (Critical)
-- Geographic resolution: Census tracts (neighborhoods)
+- Geographic resolution: Neighborhoods (real boundary data for many cities) or census tracts as fallback. The rank_areas tool aggregates all tracts within a neighborhood and returns the neighborhood name when available.
 
 ## Instructions
 1. Use the tools provided to query the crime database. Do NOT make up statistics.

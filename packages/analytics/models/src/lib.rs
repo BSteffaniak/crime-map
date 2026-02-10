@@ -284,7 +284,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "rank_areas",
-            "description": "Rank census tracts within a city by crime count (total or per-capita). Use this to find the safest or most dangerous neighborhoods/areas.",
+            "description": "Rank neighborhoods or areas within a city by crime rate (per-capita when population data is available, otherwise total count). Results use real neighborhood names when boundary data is loaded, otherwise census tract names. Use this to find the safest or most dangerous neighborhoods.",
             "parameters": {
                 "type": "object",
                 "properties": {

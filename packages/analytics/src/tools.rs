@@ -210,7 +210,6 @@ pub async fn rank_areas(
 ) -> Result<RankAreaResult, AnalyticsError> {
     let limit = params.limit.unwrap_or(10);
     let safest_first = params.safest_first.unwrap_or(true);
-    let order = if safest_first { "ASC" } else { "DESC" };
 
     let mut frags = Vec::new();
     let mut db_params: Vec<DatabaseValue> = Vec::new();
@@ -251,9 +250,10 @@ pub async fn rank_areas(
     let wc = where_clause(&frags);
 
     let sql = format!(
-        "SELECT ct.geoid, COALESCE(n.name, ct.name) as tract_name,
+        "SELECT ct.geoid,
+                COALESCE(n.name, ct.geoid) as area_id,
+                COALESCE(n.name, ct.name) as area_name,
                 ct.population, ct.land_area_sq_mi,
-                COUNT(*) as incident_count,
                 pc.name as category, COUNT(*) as cat_cnt
          FROM crime_incidents i
          JOIN crime_categories c ON i.category_id = c.id
@@ -262,33 +262,49 @@ pub async fn rank_areas(
          LEFT JOIN tract_neighborhoods tn ON ct.geoid = tn.geoid
          LEFT JOIN neighborhoods n ON tn.neighborhood_id = n.id
          {wc}
-         GROUP BY ct.geoid, COALESCE(n.name, ct.name), ct.population, ct.land_area_sq_mi, pc.name
-         ORDER BY incident_count {order}"
+         GROUP BY ct.geoid, COALESCE(n.name, ct.geoid), COALESCE(n.name, ct.name),
+                  ct.population, ct.land_area_sq_mi, pc.name"
     );
 
     let rows = db.query_raw_params(&sql, &db_params).await?;
 
-    // Aggregate rows by tract (multiple rows per tract due to category grouping)
-    let mut tract_map: std::collections::BTreeMap<String, AreaStats> =
+    // Intermediate struct for aggregation: tracks per-area totals while
+    // accumulating results from multiple tracts and category rows.
+    #[allow(clippy::items_after_statements)]
+    struct AreaAccum {
+        area_name: String,
+        total_incidents: u64,
+        total_population: i64,
+        total_land_area: f64,
+        by_category: std::collections::BTreeMap<String, u64>,
+        seen_geoids: std::collections::BTreeSet<String>,
+    }
+
+    // Aggregate rows by area (neighborhood name or geoid). Multiple rows
+    // exist per area due to category grouping AND because one neighborhood
+    // may span multiple census tracts.
+    let mut area_map: std::collections::BTreeMap<String, AreaAccum> =
         std::collections::BTreeMap::new();
 
     for row in &rows {
         let geoid: String = row.to_value("geoid").unwrap_or_default();
-        let tract_name: String = row.to_value("tract_name").unwrap_or_default();
+        let area_id: String = row.to_value("area_id").unwrap_or_default();
+        let area_name: String = row.to_value("area_name").unwrap_or_default();
         let population: Option<i32> = row.to_value("population").unwrap_or(None);
         let land_area: Option<f64> = row.to_value("land_area_sq_mi").unwrap_or(None);
         let cat: String = row.to_value("category").unwrap_or_default();
         let cat_cnt: i64 = row.to_value("cat_cnt").unwrap_or(0);
 
-        let entry = tract_map.entry(geoid.clone()).or_insert_with(|| AreaStats {
-            area_id: geoid,
-            area_name: tract_name,
-            total_incidents: 0,
-            incidents_per_1k: None,
-            land_area_sq_mi: land_area,
-            incidents_per_sq_mi: None,
-            by_category: Vec::new(),
-        });
+        let entry = area_map
+            .entry(area_id.clone())
+            .or_insert_with(|| AreaAccum {
+                area_name,
+                total_incidents: 0,
+                total_population: 0,
+                total_land_area: 0.0,
+                by_category: std::collections::BTreeMap::new(),
+                seen_geoids: std::collections::BTreeSet::new(),
+            });
 
         #[allow(clippy::cast_sign_loss)]
         {
@@ -296,31 +312,61 @@ pub async fn rank_areas(
         }
 
         #[allow(clippy::cast_sign_loss)]
-        entry.by_category.push(CategoryCount {
-            category: cat,
-            count: cat_cnt as u64,
-        });
-
-        // Compute per-capita rate if population is available
-        if let Some(pop) = population
-            && pop > 0
         {
-            #[allow(clippy::cast_precision_loss)]
-            let rate = (entry.total_incidents as f64 / f64::from(pop)) * 1000.0;
-            entry.incidents_per_1k = Some(rate);
+            *entry.by_category.entry(cat).or_insert(0) += cat_cnt as u64;
         }
 
-        // Compute crime density if land area is available
-        if let Some(area) = land_area
-            && area > 0.0
-        {
-            #[allow(clippy::cast_precision_loss)]
-            let density = entry.total_incidents as f64 / area;
-            entry.incidents_per_sq_mi = Some(density);
+        // Only count population and land area once per tract, even if
+        // the tract appears in multiple category rows.
+        if entry.seen_geoids.insert(geoid) {
+            if let Some(pop) = population {
+                entry.total_population += i64::from(pop);
+            }
+            if let Some(area) = land_area {
+                entry.total_land_area += area;
+            }
         }
     }
 
-    let mut areas: Vec<AreaStats> = tract_map.into_values().collect();
+    // Convert accumulated data into AreaStats with computed rates
+    let mut areas: Vec<AreaStats> = area_map
+        .into_iter()
+        .map(|(area_id, acc)| {
+            let incidents_per_1k = if acc.total_population > 0 {
+                #[allow(clippy::cast_precision_loss)]
+                Some((acc.total_incidents as f64 / acc.total_population as f64) * 1000.0)
+            } else {
+                None
+            };
+
+            let incidents_per_sq_mi = if acc.total_land_area > 0.0 {
+                #[allow(clippy::cast_precision_loss)]
+                Some(acc.total_incidents as f64 / acc.total_land_area)
+            } else {
+                None
+            };
+
+            let land_area_sq_mi = if acc.total_land_area > 0.0 {
+                Some(acc.total_land_area)
+            } else {
+                None
+            };
+
+            AreaStats {
+                area_id,
+                area_name: acc.area_name,
+                total_incidents: acc.total_incidents,
+                incidents_per_1k,
+                land_area_sq_mi,
+                incidents_per_sq_mi,
+                by_category: acc
+                    .by_category
+                    .into_iter()
+                    .map(|(category, count)| CategoryCount { category, count })
+                    .collect(),
+            }
+        })
+        .collect();
 
     // Sort by per-capita rate when available, falling back to absolute count
     areas.sort_by(|a, b| {
@@ -344,11 +390,7 @@ pub async fn rank_areas(
     };
 
     Ok(RankAreaResult {
-        description: format!(
-            "Top {} {label} census tracts in {}",
-            areas.len(),
-            params.city,
-        ),
+        description: format!("Top {} {label} areas in {}", areas.len(), params.city,),
         areas,
     })
 }
