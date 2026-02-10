@@ -63,6 +63,7 @@ pub async fn fetch_ckan(
 }
 
 /// Standard CKAN `datastore_search` fetch (no date filtering).
+#[allow(clippy::too_many_lines)]
 async fn fetch_ckan_standard(
     config: &CkanConfig<'_>,
     options: &FetchOptions,
@@ -92,7 +93,14 @@ async fn fetch_ckan_standard(
         total_available += count;
     }
 
-    if fetch_limit >= total_available {
+    if options.resume_offset > 0 {
+        log::info!(
+            "{}: {total_available} records available across {num_resources} resource(s) (resuming from offset {}, page size {})",
+            config.label,
+            options.resume_offset,
+            config.page_size
+        );
+    } else if fetch_limit >= total_available {
         log::info!(
             "{}: {total_available} records available across {num_resources} resource(s) (fetching all, page size {})",
             config.label,
@@ -107,6 +115,7 @@ async fn fetch_ckan_standard(
     }
 
     let mut grand_total: u64 = 0;
+    let mut skipped: u64 = 0;
 
     for (idx, resource_id) in config.resource_ids.iter().enumerate() {
         let remaining_global = fetch_limit.saturating_sub(grand_total);
@@ -115,13 +124,32 @@ async fn fetch_ckan_standard(
         }
 
         let resource_count = resource_counts[idx];
+
+        // Resume: skip entire resources that were already ingested
+        if options.resume_offset > 0
+            && skipped < options.resume_offset
+            && skipped + resource_count <= options.resume_offset
+        {
+            skipped += resource_count;
+            log::info!(
+                "{}: skipping resource {}/{num_resources} ({resource_count} records already ingested)",
+                config.label,
+                idx + 1,
+            );
+            continue;
+        }
+
+        // For the first non-skipped resource, apply the remaining resume offset
+        let resource_resume = options.resume_offset.saturating_sub(skipped);
+        skipped = options.resume_offset;
+
         log::info!(
             "{}: resource {}/{num_resources} — {resource_count} records",
             config.label,
             idx + 1,
         );
 
-        let mut offset: u64 = 0;
+        let mut offset: u64 = resource_resume;
 
         loop {
             let remaining = remaining_global.saturating_sub(offset);
@@ -230,7 +258,14 @@ async fn fetch_ckan_sql(
         total_available += count;
     }
 
-    if fetch_limit >= total_available {
+    if options.resume_offset > 0 {
+        log::info!(
+            "{}: {total_available} records available across {num_resources} resource(s) since {since_str} (resuming from offset {}, page size {})",
+            config.label,
+            options.resume_offset,
+            config.page_size
+        );
+    } else if fetch_limit >= total_available {
         log::info!(
             "{}: {total_available} records available across {num_resources} resource(s) since {since_str} (fetching all, page size {})",
             config.label,
@@ -245,6 +280,7 @@ async fn fetch_ckan_sql(
     }
 
     let mut grand_total: u64 = 0;
+    let mut skipped: u64 = 0;
 
     for (idx, resource_id) in config.resource_ids.iter().enumerate() {
         let remaining_global = fetch_limit.saturating_sub(grand_total);
@@ -253,13 +289,32 @@ async fn fetch_ckan_sql(
         }
 
         let resource_count = resource_counts[idx];
+
+        // Resume: skip entire resources that were already ingested
+        if options.resume_offset > 0
+            && skipped < options.resume_offset
+            && skipped + resource_count <= options.resume_offset
+        {
+            skipped += resource_count;
+            log::info!(
+                "{}: skipping resource {}/{num_resources} ({resource_count} records already ingested)",
+                config.label,
+                idx + 1,
+            );
+            continue;
+        }
+
+        // For the first non-skipped resource, apply the remaining resume offset
+        let resource_resume = options.resume_offset.saturating_sub(skipped);
+        skipped = options.resume_offset;
+
         log::info!(
             "{}: resource {}/{num_resources} — {resource_count} records (since {since_str})",
             config.label,
             idx + 1,
         );
 
-        let mut offset: u64 = 0;
+        let mut offset: u64 = resource_resume;
 
         loop {
             let remaining = remaining_global.saturating_sub(offset);

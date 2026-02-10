@@ -112,7 +112,14 @@ pub async fn fetch_arcgis(
         } else {
             String::new()
         };
-        if fetch_limit >= total {
+        if options.resume_offset > 0 {
+            log::info!(
+                "{}: {total} records available{layers_str} (resuming from offset {}, page size {})",
+                config.label,
+                options.resume_offset,
+                config.page_size
+            );
+        } else if fetch_limit >= total {
             log::info!(
                 "{}: {total} records available{layers_str} (fetching all, page size {})",
                 config.label,
@@ -127,14 +134,54 @@ pub async fn fetch_arcgis(
         }
     }
 
+    // ── Compute per-layer counts for resume skipping ──────────────────
+    // When resuming, we skip entire layers whose records have already been
+    // ingested, then apply the remaining offset within the current layer.
+    let mut layer_counts: Vec<u64> = Vec::new();
+    if options.resume_offset > 0 && num_layers > 1 {
+        for query_url in config.query_urls {
+            let url = format!("{query_url}?where={where_clause}&returnCountOnly=true&f=json");
+            let count = async {
+                let resp = client.get(&url).send().await.ok()?;
+                let body: serde_json::Value = resp.json().await.ok()?;
+                body.get("count")?.as_u64()
+            }
+            .await
+            .unwrap_or(0);
+            layer_counts.push(count);
+        }
+    }
+
     // ── Paginated fetch ──────────────────────────────────────────────
     let will_fetch = total_available.map(|t| fetch_limit.min(t));
+    let mut skipped: u64 = 0;
 
     for (layer_idx, query_url) in config.query_urls.iter().enumerate() {
-        let mut offset: u64 = 0;
         if total_fetched >= fetch_limit {
             break;
         }
+
+        // Resume: skip entire layers that were already ingested
+        if options.resume_offset > 0
+            && skipped < options.resume_offset
+            && let Some(&layer_count) = layer_counts.get(layer_idx)
+            && skipped + layer_count <= options.resume_offset
+        {
+            skipped += layer_count;
+            log::info!(
+                "{}: skipping layer {}/{num_layers} ({layer_count} records already ingested)",
+                config.label,
+                layer_idx + 1,
+            );
+            continue;
+        }
+
+        // For the first non-skipped layer, apply the remaining resume offset
+        let layer_resume = options.resume_offset.saturating_sub(skipped);
+        // Mark all remaining offset as consumed
+        skipped = options.resume_offset;
+
+        let mut offset: u64 = layer_resume;
 
         loop {
             let remaining = fetch_limit.saturating_sub(total_fetched);

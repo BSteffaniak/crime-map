@@ -51,4 +51,9 @@ pub struct FetchOptions {
     pub since: Option<chrono::DateTime<chrono::Utc>>,
     /// Maximum number of records to fetch.
     pub limit: Option<u64>,
+    /// Starting offset for resume after an interrupted sync. When non-zero,
+    /// fetchers skip this many records (via API pagination offset) to avoid
+    /// re-downloading pages that were already ingested. The database's
+    /// `ON CONFLICT DO NOTHING` handles any small overlap at the boundary.
+    pub resume_offset: u64,
 }

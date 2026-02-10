@@ -59,14 +59,20 @@ pub async fn fetch_socrata(
     tx: &mpsc::Sender<Vec<serde_json::Value>>,
 ) -> Result<u64, SourceError> {
     let client = reqwest::Client::new();
-    let mut offset: u64 = 0;
+    let mut offset: u64 = options.resume_offset;
     let fetch_limit = options.limit.unwrap_or(u64::MAX);
 
     // ── Pre-fetch count ──────────────────────────────────────────────
     let total_available = query_socrata_count(&client, config, options).await;
 
     if let Some(total) = total_available {
-        if fetch_limit >= total {
+        if offset > 0 {
+            log::info!(
+                "{}: {total} records available (resuming from offset {offset}, page size {})",
+                config.label,
+                config.page_size
+            );
+        } else if fetch_limit >= total {
             log::info!(
                 "{}: {total} records available (fetching all, page size {})",
                 config.label,

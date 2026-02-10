@@ -190,16 +190,17 @@ async fn sync_source(
     //   3. Records exist in the database for this source
     //
     // A source that was only partially synced (via --limit or a cancelled run)
-    // will have fully_synced = false and will do a full fetch.
-    let since = if force {
+    // will have fully_synced = false and will do a full fetch, but with a
+    // resume_offset to skip already-ingested pages.
+    let (since, resume_offset) = if force {
         log::info!("{}: full sync (--force)", source.name());
-        None
+        (None, 0)
     } else {
         let fully_synced = queries::get_source_fully_synced(db, source_id).await?;
         let max_occurred = queries::get_source_max_occurred_at(db, source_id).await?;
 
         if fully_synced {
-            max_occurred.map_or_else(
+            let since = max_occurred.map_or_else(
                 || {
                     log::info!("{}: full sync (no records found)", source.name());
                     None
@@ -215,14 +216,22 @@ async fn sync_source(
                     );
                     Some(since)
                 },
-            )
-        } else {
-            if max_occurred.is_some() {
-                log::info!("{}: full sync (not yet fully synced)", source.name());
+            );
+            (since, 0)
+        } else if max_occurred.is_some() {
+            let record_count = queries::get_source_record_count(db, source_id).await?;
+            if record_count > 0 {
+                log::info!(
+                    "{}: resuming full sync from offset {record_count} ({record_count} records already in DB)",
+                    source.name(),
+                );
             } else {
                 log::info!("{}: full sync (first run)", source.name());
             }
-            None
+            (None, record_count)
+        } else {
+            log::info!("{}: full sync (first run)", source.name());
+            (None, 0)
         }
     };
 
@@ -230,7 +239,11 @@ async fn sync_source(
     let category_ids = queries::get_all_category_ids(db).await?;
 
     // Start streaming pages from the fetcher
-    let options = FetchOptions { since, limit };
+    let options = FetchOptions {
+        since,
+        limit,
+        resume_offset,
+    };
 
     let (mut rx, fetch_handle) = source.fetch_pages(&options);
 

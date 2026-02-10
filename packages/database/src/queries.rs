@@ -167,6 +167,32 @@ pub async fn insert_incidents(
     Ok(inserted)
 }
 
+/// Returns the number of incidents already stored for a given source.
+///
+/// Used for resume offset calculation — when a sync was interrupted, we can
+/// skip API pages that were already ingested by starting at this offset.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if the database operation fails.
+pub async fn get_source_record_count(db: &dyn Database, source_id: i32) -> Result<u64, DbError> {
+    let rows = db
+        .query_raw_params(
+            "SELECT COUNT(*) as count FROM crime_incidents WHERE source_id = $1",
+            &[DatabaseValue::Int32(source_id)],
+        )
+        .await?;
+
+    let Some(row) = rows.first() else {
+        return Ok(0);
+    };
+
+    let count: i64 = row.to_value("count").unwrap_or(0);
+
+    #[allow(clippy::cast_sign_loss)]
+    Ok(count as u64)
+}
+
 /// Returns the maximum `occurred_at` timestamp for a given source, or `None`
 /// if the source has no incidents yet.
 ///
