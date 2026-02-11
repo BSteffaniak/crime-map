@@ -69,6 +69,13 @@ enum Commands {
         #[arg(long)]
         sources: Option<String>,
     },
+    /// Ingest Census place boundaries (incorporated cities and CDPs) from `TIGERweb`
+    Places {
+        /// Comma-separated list of state FIPS codes (e.g., "24" for MD, "11" for DC).
+        /// If not specified, ingests places for all 50 states + DC.
+        #[arg(long)]
+        states: Option<String>,
+    },
 }
 
 #[allow(clippy::too_many_lines)]
@@ -196,6 +203,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let elapsed = start.elapsed();
             log::info!(
                 "Neighborhood ingestion complete: {total} neighborhoods in {:.1}s",
+                elapsed.as_secs_f64()
+            );
+        }
+        Commands::Places { states } => {
+            let db = db::connect_from_env().await?;
+            run_migrations(db.as_ref()).await?;
+
+            let start = Instant::now();
+            let total = if let Some(states_str) = states {
+                let fips_codes: Vec<&str> = states_str.split(',').map(str::trim).collect();
+                log::info!("Ingesting Census places for states: {states_str}");
+                crime_map_geography::ingest::ingest_places_for_states(db.as_ref(), &fips_codes)
+                    .await?
+            } else {
+                log::info!("Ingesting Census places for all states...");
+                crime_map_geography::ingest::ingest_all_places(db.as_ref()).await?
+            };
+
+            let elapsed = start.elapsed();
+            log::info!(
+                "Census place ingestion complete: {total} places in {:.1}s",
                 elapsed.as_secs_f64()
             );
         }

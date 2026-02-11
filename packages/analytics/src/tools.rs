@@ -6,9 +6,9 @@
 
 use crime_map_analytics_models::{
     CityInfo, ComparePeriodParams, ComparePeriodResult, CountIncidentsParams, CountIncidentsResult,
-    ListCitiesParams, ListCitiesResult, RankAreaParams, RankAreaResult, SearchLocationsParams,
-    SearchLocationsResult, TimeGranularity, TopCrimeTypesParams, TopCrimeTypesResult, TrendParams,
-    TrendResult,
+    ListCitiesParams, ListCitiesResult, PlaceInfo, RankAreaParams, RankAreaResult,
+    SearchLocationsParams, SearchLocationsResult, TimeGranularity, TopCrimeTypesParams,
+    TopCrimeTypesResult, TrendParams, TrendResult,
 };
 use crime_map_geography_models::{AreaStats, CategoryCount, PeriodComparison, TimeSeriesPoint};
 use moosicbox_json_utils::database::ToValue as _;
@@ -25,6 +25,7 @@ fn build_common_filters(
     city: Option<&str>,
     state: Option<&str>,
     geoid: Option<&str>,
+    place_geoid: Option<&str>,
     date_from: Option<&str>,
     date_to: Option<&str>,
     category: Option<&str>,
@@ -53,6 +54,14 @@ fn build_common_filters(
             "ST_Covers((SELECT boundary FROM census_tracts WHERE geoid = ${idx}), i.location)"
         ));
         params.push(DatabaseValue::String(geoid.to_string()));
+        idx += 1;
+    }
+
+    if let Some(place_geoid) = place_geoid {
+        frags.push(format!(
+            "ST_Covers((SELECT boundary FROM census_places WHERE geoid = ${idx}), i.location)"
+        ));
+        params.push(DatabaseValue::String(place_geoid.to_string()));
         idx += 1;
     }
 
@@ -102,8 +111,15 @@ fn where_clause(frags: &[String]) -> String {
 }
 
 #[allow(clippy::option_if_let_else)]
-fn describe_area(city: Option<&str>, state: Option<&str>, geoid: Option<&str>) -> String {
-    if let Some(geoid) = geoid {
+fn describe_area(
+    city: Option<&str>,
+    state: Option<&str>,
+    geoid: Option<&str>,
+    place_geoid: Option<&str>,
+) -> String {
+    if let Some(place_geoid) = place_geoid {
+        format!("Census place {place_geoid}")
+    } else if let Some(geoid) = geoid {
         format!("census tract {geoid}")
     } else if let Some(city) = city {
         if let Some(state) = state {
@@ -140,6 +156,7 @@ pub async fn count_incidents(
         params.city.as_deref(),
         params.state.as_deref(),
         params.geoid.as_deref(),
+        params.place_geoid.as_deref(),
         params.date_from.as_deref(),
         params.date_to.as_deref(),
         params.category.as_deref(),
@@ -194,6 +211,7 @@ pub async fn count_incidents(
             params.city.as_deref(),
             params.state.as_deref(),
             params.geoid.as_deref(),
+            params.place_geoid.as_deref(),
         ),
         date_range: describe_date_range(params.date_from.as_deref(), params.date_to.as_deref()),
     })
@@ -216,10 +234,22 @@ pub async fn rank_areas(
     let mut db_params: Vec<DatabaseValue> = Vec::new();
     let mut idx = 1u32;
 
-    // City filter
-    frags.push(format!("i.city ILIKE ${idx}"));
-    db_params.push(DatabaseValue::String(params.city.clone()));
-    idx += 1;
+    // Either city or placeGeoid is required to scope the ranking
+    if let Some(ref place_geoid) = params.place_geoid {
+        frags.push(format!(
+            "ST_Covers((SELECT boundary FROM census_places WHERE geoid = ${idx}), i.location)"
+        ));
+        db_params.push(DatabaseValue::String(place_geoid.clone()));
+        idx += 1;
+    } else if let Some(ref city) = params.city {
+        frags.push(format!("i.city ILIKE ${idx}"));
+        db_params.push(DatabaseValue::String(city.clone()));
+        idx += 1;
+    } else {
+        return Err(AnalyticsError::Query {
+            message: "Either 'city' or 'placeGeoid' is required for rank_areas".to_string(),
+        });
+    }
 
     if let Some(ref state) = params.state {
         frags.push(format!("i.state = ${idx}"));
@@ -390,8 +420,14 @@ pub async fn rank_areas(
         "most dangerous"
     };
 
+    let area_name = params
+        .city
+        .as_deref()
+        .or(params.place_geoid.as_deref())
+        .unwrap_or("unknown area");
+
     Ok(RankAreaResult {
-        description: format!("Top {} {label} areas in {}", areas.len(), params.city,),
+        description: format!("Top {} {label} areas in {area_name}", areas.len()),
         areas,
     })
 }
@@ -412,6 +448,7 @@ pub async fn compare_periods(
             city: params.city.clone(),
             state: params.state.clone(),
             geoid: params.geoid.clone(),
+            place_geoid: params.place_geoid.clone(),
             date_from: Some(params.period_a_from.clone()),
             date_to: Some(params.period_a_to.clone()),
             category: params.category.clone(),
@@ -428,6 +465,7 @@ pub async fn compare_periods(
             city: params.city.clone(),
             state: params.state.clone(),
             geoid: params.geoid.clone(),
+            place_geoid: params.place_geoid.clone(),
             date_from: Some(params.period_b_from.clone()),
             date_to: Some(params.period_b_to.clone()),
             category: params.category.clone(),
@@ -441,6 +479,7 @@ pub async fn compare_periods(
         params.city.as_deref(),
         params.state.as_deref(),
         params.geoid.as_deref(),
+        params.place_geoid.as_deref(),
     );
 
     #[allow(clippy::cast_precision_loss)]
@@ -517,6 +556,7 @@ pub async fn get_trend(
         params.city.as_deref(),
         params.state.as_deref(),
         params.geoid.as_deref(),
+        params.place_geoid.as_deref(),
         params.date_from.as_deref(),
         params.date_to.as_deref(),
         params.category.as_deref(),
@@ -555,6 +595,7 @@ pub async fn get_trend(
         params.city.as_deref(),
         params.state.as_deref(),
         params.geoid.as_deref(),
+        params.place_geoid.as_deref(),
     );
 
     Ok(TrendResult {
@@ -578,6 +619,7 @@ pub async fn top_crime_types(
         params.city.as_deref(),
         params.state.as_deref(),
         params.geoid.as_deref(),
+        params.place_geoid.as_deref(),
         params.date_from.as_deref(),
         params.date_to.as_deref(),
         None,
@@ -656,6 +698,7 @@ pub async fn top_crime_types(
         params.city.as_deref(),
         params.state.as_deref(),
         params.geoid.as_deref(),
+        params.place_geoid.as_deref(),
     );
 
     #[allow(clippy::cast_sign_loss)]
@@ -729,6 +772,7 @@ pub async fn list_cities(
 /// # Errors
 ///
 /// Returns [`AnalyticsError`] if the database query fails.
+#[allow(clippy::too_many_lines)]
 pub async fn search_locations(
     db: &dyn Database,
     params: &SearchLocationsParams,
@@ -738,6 +782,7 @@ pub async fn search_locations(
     if query.is_empty() {
         return Ok(SearchLocationsResult {
             matches: Vec::new(),
+            places: Vec::new(),
             description: "Empty search query".to_string(),
         });
     }
@@ -812,8 +857,63 @@ pub async fn search_locations(
         format!("Found {} location(s) matching \"{query}\"", matches.len())
     };
 
+    // Also search census_places for matching incorporated cities, towns, CDPs
+    let mut place_params: Vec<DatabaseValue> = Vec::new();
+    let place_like = format!("%{query}%");
+    place_params.push(DatabaseValue::String(place_like));
+
+    #[allow(clippy::option_if_let_else)]
+    let place_state_filter = if let Some(ref state) = params.state {
+        place_params.push(DatabaseValue::String(state.to_uppercase()));
+        "AND state_abbr = $2"
+    } else {
+        ""
+    };
+
+    let place_sql = format!(
+        "SELECT geoid, name, full_name, state_abbr, place_type, population, land_area_sq_mi
+         FROM census_places
+         WHERE name ILIKE $1 {place_state_filter}
+         ORDER BY population DESC NULLS LAST
+         LIMIT 10"
+    );
+
+    let place_rows = db.query_raw_params(&place_sql, &place_params).await?;
+
+    let places: Vec<PlaceInfo> = place_rows
+        .iter()
+        .map(|row| {
+            let geoid: String = row.to_value("geoid").unwrap_or_default();
+            let name: String = row.to_value("name").unwrap_or_default();
+            let full_name: String = row.to_value("full_name").unwrap_or_default();
+            let state: String = row.to_value("state_abbr").unwrap_or_default();
+            let place_type: String = row.to_value("place_type").unwrap_or_default();
+            let population: Option<i32> = row.to_value("population").unwrap_or(None);
+            let land_area_sq_mi: Option<f64> = row.to_value("land_area_sq_mi").unwrap_or(None);
+            PlaceInfo {
+                geoid,
+                name,
+                full_name,
+                state,
+                place_type,
+                population: population.map(i64::from),
+                land_area_sq_mi,
+            }
+        })
+        .collect();
+
+    let full_description = if places.is_empty() {
+        description
+    } else {
+        format!(
+            "{description}. Also found {} Census place(s) with boundaries",
+            places.len()
+        )
+    };
+
     Ok(SearchLocationsResult {
         matches,
-        description,
+        places,
+        description: full_description,
     })
 }

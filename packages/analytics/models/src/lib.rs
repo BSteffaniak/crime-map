@@ -46,6 +46,8 @@ pub struct CountIncidentsParams {
     pub state: Option<String>,
     /// Census tract GEOID to filter by.
     pub geoid: Option<String>,
+    /// Census place GEOID to filter to a specific city/town boundary.
+    pub place_geoid: Option<String>,
     /// Start date (ISO 8601).
     pub date_from: Option<String>,
     /// End date (ISO 8601).
@@ -76,10 +78,12 @@ pub struct CountIncidentsResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RankAreaParams {
-    /// City to analyze (required — limits tract scope).
-    pub city: String,
+    /// City to analyze (required unless placeGeoid is provided).
+    pub city: Option<String>,
     /// State abbreviation.
     pub state: Option<String>,
+    /// Census place GEOID to scope ranking to a specific city/town boundary.
+    pub place_geoid: Option<String>,
     /// Start date (ISO 8601).
     pub date_from: Option<String>,
     /// End date (ISO 8601).
@@ -112,6 +116,8 @@ pub struct ComparePeriodParams {
     pub state: Option<String>,
     /// Census tract GEOID.
     pub geoid: Option<String>,
+    /// Census place GEOID to filter to a specific city/town boundary.
+    pub place_geoid: Option<String>,
     /// Period A start date (ISO 8601).
     pub period_a_from: String,
     /// Period A end date (ISO 8601).
@@ -146,6 +152,8 @@ pub struct TrendParams {
     pub state: Option<String>,
     /// Census tract GEOID.
     pub geoid: Option<String>,
+    /// Census place GEOID to filter to a specific city/town boundary.
+    pub place_geoid: Option<String>,
     /// Time granularity.
     pub granularity: TimeGranularity,
     /// Start date (ISO 8601).
@@ -176,6 +184,8 @@ pub struct TopCrimeTypesParams {
     pub state: Option<String>,
     /// Census tract GEOID.
     pub geoid: Option<String>,
+    /// Census place GEOID to filter to a specific city/town boundary.
+    pub place_geoid: Option<String>,
     /// Start date (ISO 8601).
     pub date_from: Option<String>,
     /// End date (ISO 8601).
@@ -240,10 +250,32 @@ pub struct SearchLocationsParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchLocationsResult {
-    /// Matching locations with incident counts.
+    /// Matching crime data locations (cities/counties with incident data).
     pub matches: Vec<CityInfo>,
+    /// Matching Census places (incorporated cities, towns, CDPs with boundaries).
+    pub places: Vec<PlaceInfo>,
     /// Human-readable description of the search.
     pub description: String,
+}
+
+/// Information about a Census place (incorporated city, town, or CDP).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceInfo {
+    /// Census place GEOID (state FIPS + place FIPS, e.g., "2413000").
+    pub geoid: String,
+    /// Place name (e.g., "Capitol Heights").
+    pub name: String,
+    /// Full name with suffix (e.g., "Capitol Heights town").
+    pub full_name: String,
+    /// State abbreviation.
+    pub state: String,
+    /// Place type: "incorporated" or "cdp".
+    pub place_type: String,
+    /// Population from ACS estimates.
+    pub population: Option<i64>,
+    /// Land area in square miles.
+    pub land_area_sq_mi: Option<f64>,
 }
 
 /// Enumeration of all tool names the AI agent can invoke.
@@ -290,13 +322,14 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
             "name": "count_incidents",
-            "description": "Count crime incidents in a geographic area with optional filters. Use this to answer questions about total crime counts, crime in a city, or filtered queries.",
+            "description": "Count crime incidents in a geographic area with optional filters. Use this to answer questions about total crime counts, crime in a city, or filtered queries. Use placeGeoid for precise sub-county filtering (e.g., a specific town within a county).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "city": { "type": "string", "description": "City name (e.g., 'Chicago', 'Washington')" },
                     "state": { "type": "string", "description": "Two-letter state abbreviation (e.g., 'IL', 'DC')" },
                     "geoid": { "type": "string", "description": "Census tract GEOID for tract-level queries" },
+                    "placeGeoid": { "type": "string", "description": "Census place GEOID to filter to a specific city/town boundary (get from search_locations)" },
                     "dateFrom": { "type": "string", "description": "Start date in ISO 8601 format (e.g., '2025-01-01')" },
                     "dateTo": { "type": "string", "description": "End date in ISO 8601 format (e.g., '2025-12-31')" },
                     "category": { "type": "string", "description": "Crime category filter: VIOLENT, PROPERTY, DRUG_NARCOTICS, PUBLIC_ORDER, FRAUD_FINANCIAL, OTHER" },
@@ -308,12 +341,13 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "rank_areas",
-            "description": "Rank neighborhoods or areas within a city by crime rate (per-capita when population data is available, otherwise total count). Results use real neighborhood names when boundary data is loaded, otherwise census tract names. Use this to find the safest or most dangerous neighborhoods.",
+            "description": "Rank neighborhoods or areas within a city or Census place by crime rate (per-capita when population data is available, otherwise total count). Use placeGeoid for precise sub-county ranking (e.g., rank areas within Capitol Heights specifically). Either city or placeGeoid is required.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "city": { "type": "string", "description": "City to analyze (required)" },
+                    "city": { "type": "string", "description": "City to analyze (from crime_incidents.city)" },
                     "state": { "type": "string", "description": "Two-letter state abbreviation" },
+                    "placeGeoid": { "type": "string", "description": "Census place GEOID to scope ranking to a specific city/town boundary (get from search_locations)" },
                     "dateFrom": { "type": "string", "description": "Start date in ISO 8601 format" },
                     "dateTo": { "type": "string", "description": "End date in ISO 8601 format" },
                     "category": { "type": "string", "description": "Crime category filter" },
@@ -332,6 +366,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
                     "city": { "type": "string", "description": "City name" },
                     "state": { "type": "string", "description": "Two-letter state abbreviation" },
                     "geoid": { "type": "string", "description": "Census tract GEOID" },
+                    "placeGeoid": { "type": "string", "description": "Census place GEOID for sub-county filtering" },
                     "periodAFrom": { "type": "string", "description": "Period A start date (ISO 8601)" },
                     "periodATo": { "type": "string", "description": "Period A end date (ISO 8601)" },
                     "periodBFrom": { "type": "string", "description": "Period B start date (ISO 8601)" },
@@ -350,6 +385,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
                     "city": { "type": "string", "description": "City name" },
                     "state": { "type": "string", "description": "Two-letter state abbreviation" },
                     "geoid": { "type": "string", "description": "Census tract GEOID" },
+                    "placeGeoid": { "type": "string", "description": "Census place GEOID for sub-county filtering" },
                     "granularity": { "type": "string", "enum": ["daily", "weekly", "monthly", "yearly"], "description": "Time granularity" },
                     "dateFrom": { "type": "string", "description": "Start date (ISO 8601)" },
                     "dateTo": { "type": "string", "description": "End date (ISO 8601)" },
@@ -367,6 +403,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
                     "city": { "type": "string", "description": "City name" },
                     "state": { "type": "string", "description": "Two-letter state abbreviation" },
                     "geoid": { "type": "string", "description": "Census tract GEOID" },
+                    "placeGeoid": { "type": "string", "description": "Census place GEOID for sub-county filtering" },
                     "dateFrom": { "type": "string", "description": "Start date (ISO 8601)" },
                     "dateTo": { "type": "string", "description": "End date (ISO 8601)" },
                     "limit": { "type": "integer", "description": "Number of results (default 10)" }
@@ -387,7 +424,7 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "search_locations",
-            "description": "Search for available locations in the dataset by name. Use this when a user asks about a specific city, town, or area to find matching or related jurisdictions. Returns cities and counties whose names match the query. If no exact match is found, use your geographic knowledge to search for parent jurisdictions (e.g., search for the county name if a small town isn't found).",
+            "description": "Search for available locations by name. Returns both crime data jurisdictions and Census places (incorporated cities, towns, CDPs) with their GEOID. Use the placeGeoid from results in subsequent tool calls (count_incidents, rank_areas, etc.) for precise sub-county geographic filtering.",
             "parameters": {
                 "type": "object",
                 "properties": {

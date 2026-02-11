@@ -396,3 +396,258 @@ async fn populate_county_names(
 
     Ok(())
 }
+
+/// Downloads and inserts Census places (incorporated cities and CDPs) for a
+/// single state from a specific `TIGERweb` layer.
+///
+/// Layer 28 = Incorporated Places, Layer 30 = Census Designated Places.
+async fn ingest_places_layer(
+    db: &dyn Database,
+    client: &reqwest::Client,
+    state_fips: &str,
+    layer: u32,
+    place_type: &str,
+) -> Result<u64, GeoError> {
+    let url = format!(
+        "https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/tigerWMS_ACS2023/MapServer/{layer}/query\
+         ?where=STATE%3D'{state_fips}'\
+         &outFields=GEOID,BASENAME,NAME,STATE,PLACE,AREALAND,CENTLAT,CENTLON\
+         &outSR=4326\
+         &f=geojson\
+         &returnGeometry=true"
+    );
+
+    let resp = client.get(&url).send().await?;
+    if !resp.status().is_success() {
+        return Err(GeoError::Conversion {
+            message: format!(
+                "TIGERweb layer {layer} request failed with status {} for state {state_fips}",
+                resp.status()
+            ),
+        });
+    }
+    let body = resp.text().await?;
+
+    let geojson: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| GeoError::Conversion {
+            message: format!("Failed to parse GeoJSON for layer {layer}, state {state_fips}: {e}"),
+        })?;
+
+    let features = geojson["features"]
+        .as_array()
+        .ok_or_else(|| GeoError::Conversion {
+            message: format!("No features array for layer {layer}, state {state_fips}"),
+        })?;
+
+    let abbr = state_abbr(state_fips);
+    let mut inserted = 0u64;
+
+    for feature in features {
+        let props = &feature["properties"];
+        let geoid = props["GEOID"].as_str().unwrap_or_default().to_string();
+
+        if geoid.is_empty() {
+            continue;
+        }
+
+        let basename = props["BASENAME"]
+            .as_str()
+            .unwrap_or("Unknown Place")
+            .to_string();
+
+        let full_name = props["NAME"].as_str().unwrap_or(&basename).to_string();
+
+        let aland = props["AREALAND"].as_f64();
+        let land_area_sq_mi = aland.map(|a| a / 2_589_988.11);
+
+        let centlat = props["CENTLAT"]
+            .as_str()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .or_else(|| props["CENTLAT"].as_f64());
+
+        let centlon = props["CENTLON"]
+            .as_str()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .or_else(|| props["CENTLON"].as_f64());
+
+        let geometry = &feature["geometry"];
+        let geom_str = serde_json::to_string(geometry).unwrap_or_default();
+
+        if geom_str.is_empty() || geom_str == "null" {
+            continue;
+        }
+
+        let result = db
+            .exec_raw_params(
+                "INSERT INTO census_places (geoid, name, full_name, state_fips, state_abbr, place_type, boundary, land_area_sq_mi, centroid_lon, centroid_lat)
+                 VALUES ($1, $2, $3, $4, $5, $6, ST_Multi(ST_GeomFromGeoJSON($7))::geography, $8, $9, $10)
+                 ON CONFLICT (geoid) DO UPDATE SET
+                     name = EXCLUDED.name,
+                     full_name = EXCLUDED.full_name,
+                     boundary = EXCLUDED.boundary,
+                     land_area_sq_mi = EXCLUDED.land_area_sq_mi,
+                     centroid_lon = EXCLUDED.centroid_lon,
+                     centroid_lat = EXCLUDED.centroid_lat",
+                &[
+                    DatabaseValue::String(geoid),
+                    DatabaseValue::String(basename),
+                    DatabaseValue::String(full_name),
+                    DatabaseValue::String(state_fips.to_string()),
+                    DatabaseValue::String(abbr.to_string()),
+                    DatabaseValue::String(place_type.to_string()),
+                    DatabaseValue::String(geom_str),
+                    land_area_sq_mi.map_or(DatabaseValue::Null, DatabaseValue::Real64),
+                    centlon.map_or(DatabaseValue::Null, DatabaseValue::Real64),
+                    centlat.map_or(DatabaseValue::Null, DatabaseValue::Real64),
+                ],
+            )
+            .await?;
+
+        inserted += result;
+    }
+
+    log::info!(
+        "State {state_fips} ({abbr}): inserted/updated {inserted} {place_type} places from {} features",
+        features.len()
+    );
+    Ok(inserted)
+}
+
+/// Downloads and inserts Census places for a single state.
+///
+/// Fetches both Incorporated Places (layer 28) and Census Designated
+/// Places (layer 30), then populates population data from the ACS.
+async fn ingest_state_places(
+    db: &dyn Database,
+    client: &reqwest::Client,
+    state_fips: &str,
+) -> Result<u64, GeoError> {
+    let mut total = 0u64;
+
+    // Layer 28: Incorporated Places
+    match ingest_places_layer(db, client, state_fips, 28, "incorporated").await {
+        Ok(count) => total += count,
+        Err(e) => log::error!("Failed to ingest incorporated places for state {state_fips}: {e}"),
+    }
+
+    // Layer 30: Census Designated Places
+    match ingest_places_layer(db, client, state_fips, 30, "cdp").await {
+        Ok(count) => total += count,
+        Err(e) => log::error!("Failed to ingest CDPs for state {state_fips}: {e}"),
+    }
+
+    // Populate population data
+    if let Err(e) = populate_place_population(db, client, state_fips).await {
+        log::error!("Failed to populate place population for state {state_fips}: {e}");
+    }
+
+    Ok(total)
+}
+
+/// Fetches ACS 5-year population estimates for Census places and updates
+/// the `census_places` table.
+///
+/// # Errors
+///
+/// Returns [`GeoError`] if the HTTP request or database update fails.
+async fn populate_place_population(
+    db: &dyn Database,
+    client: &reqwest::Client,
+    state_fips: &str,
+) -> Result<(), GeoError> {
+    let url = format!(
+        "https://api.census.gov/data/2023/acs/acs5\
+         ?get=B01001_001E\
+         &for=place:*\
+         &in=state:{state_fips}"
+    );
+
+    log::info!("Fetching ACS place population data for state FIPS {state_fips}...");
+
+    let resp = client.get(&url).send().await?;
+    let body = resp.text().await?;
+
+    // Response: [["B01001_001E","state","place"], ["4337","24","01600"], ...]
+    let rows: Vec<Vec<String>> = serde_json::from_str(&body).map_err(|e| GeoError::Conversion {
+        message: format!("Failed to parse ACS place response for state {state_fips}: {e}"),
+    })?;
+
+    let mut updated = 0u64;
+
+    for row in rows.iter().skip(1) {
+        if row.len() < 3 {
+            continue;
+        }
+
+        let population: Option<i32> = row[0].parse().ok();
+        let state = &row[1];
+        let place = &row[2];
+        let geoid = format!("{state}{place}");
+
+        if let Some(pop) = population {
+            let result = db
+                .exec_raw_params(
+                    "UPDATE census_places SET population = $1 WHERE geoid = $2",
+                    &[DatabaseValue::Int32(pop), DatabaseValue::String(geoid)],
+                )
+                .await?;
+            updated += result;
+        }
+    }
+
+    let abbr = state_abbr(state_fips);
+    log::info!("State {state_fips} ({abbr}): updated population for {updated} places");
+
+    Ok(())
+}
+
+/// Ingests Census place boundaries for all US states.
+///
+/// Downloads Incorporated Places and CDPs from `TIGERweb`, loads into
+/// `PostGIS`, then fetches ACS population data.
+///
+/// # Errors
+///
+/// Returns [`GeoError`] if any state fails to ingest.
+pub async fn ingest_all_places(db: &dyn Database) -> Result<u64, GeoError> {
+    let client = reqwest::Client::builder()
+        .user_agent("crime-map/1.0")
+        .build()?;
+
+    let mut total = 0u64;
+
+    for fips in STATE_FIPS {
+        match ingest_state_places(db, &client, fips).await {
+            Ok(count) => total += count,
+            Err(e) => log::error!("Failed to ingest places for state {fips}: {e}"),
+        }
+    }
+
+    log::info!("Census place ingestion complete: {total} total places");
+    Ok(total)
+}
+
+/// Ingests Census place boundaries for specific states only.
+///
+/// # Errors
+///
+/// Returns [`GeoError`] if any state fails to ingest.
+pub async fn ingest_places_for_states(
+    db: &dyn Database,
+    state_fips_codes: &[&str],
+) -> Result<u64, GeoError> {
+    let client = reqwest::Client::builder()
+        .user_agent("crime-map/1.0")
+        .build()?;
+
+    let mut total = 0u64;
+
+    for fips in state_fips_codes {
+        match ingest_state_places(db, &client, fips).await {
+            Ok(count) => total += count,
+            Err(e) => log::error!("Failed to ingest places for state {fips}: {e}"),
+        }
+    }
+
+    Ok(total)
+}

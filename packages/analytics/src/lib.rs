@@ -25,4 +25,11 @@ pub enum AnalyticsError {
         /// Description of what went wrong.
         message: String,
     },
+
+    /// Invalid query parameters.
+    #[error("Query error: {message}")]
+    Query {
+        /// Description of what was invalid.
+        message: String,
+    },
 }

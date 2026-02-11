@@ -48,7 +48,7 @@ fn build_system_prompt(context: &AgentContext) -> String {
 4. For "safest neighborhood" questions, use rank_areas with safestFirst=true.
 5. When comparing cities, call count_incidents for each city separately.
 6. Provide specific numbers and percentages in your answers.
-7. If the user asks about a location not directly in the dataset, use search_locations to find matching jurisdictions. If no match is found, use your geographic knowledge to search for parent jurisdictions — many small cities and towns are covered by county-level data (e.g., Capitol Heights, MD is covered by Prince George's County, MD). Try the county or metropolitan area name before telling the user data is unavailable.
+7. If the user asks about a location not directly in the dataset, use search_locations to find matching jurisdictions AND Census places. If search_locations returns a Census place with a placeGeoid, use that placeGeoid in subsequent tool calls (count_incidents, rank_areas, etc.) for precise geographic filtering within that city/town boundary. This is especially important for small cities within large counties (e.g., Capitol Heights within Prince George's County) — using placeGeoid filters to just the incidents within the city limits rather than the entire county.
 8. Format your final answer in clear markdown with key statistics bolded.
 9. Today's date is {today}. When users say "2025", "this year", "last year", etc., interpret relative to today.
 10. Use category names in SCREAMING_SNAKE_CASE when calling tools (e.g., "VIOLENT", "PROPERTY").

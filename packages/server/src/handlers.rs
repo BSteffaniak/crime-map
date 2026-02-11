@@ -545,10 +545,7 @@ pub struct AiAskRequest {
 /// Supports multi-turn conversations: pass the `conversationId` from a
 /// prior response to continue the same conversation with full context.
 #[allow(clippy::too_many_lines)]
-pub async fn ai_ask(
-    state: web::Data<AppState>,
-    body: web::Json<AiAskRequest>,
-) -> HttpResponse {
+pub async fn ai_ask(state: web::Data<AppState>, body: web::Json<AiAskRequest>) -> HttpResponse {
     let question = body.question.trim().to_string();
 
     if question.is_empty() {
@@ -587,11 +584,13 @@ pub async fn ai_ask(
             .unwrap_or_default()
             .as_secs();
 
-        let mut sessions = state.sessions.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sessions = state
+            .sessions
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         // Lazy cleanup: remove expired sessions
-        sessions
-            .retain(|_, s| now.saturating_sub(s.last_accessed) < super::SESSION_EXPIRY_SECS);
+        sessions.retain(|_, s| now.saturating_sub(s.last_accessed) < super::SESSION_EXPIRY_SECS);
 
         // Load messages from existing session, or None for new conversation
         sessions.get_mut(&conversation_id).map(|session| {
