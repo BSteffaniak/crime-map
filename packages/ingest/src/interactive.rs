@@ -7,8 +7,7 @@
 
 use std::time::Instant;
 
-use crime_map_source::source_def::SourceDefinition;
-use dialoguer::{Confirm, Input, Select};
+use dialoguer::{Confirm, Input, MultiSelect, Select};
 
 /// Runs the interactive menu loop, prompting the user to select and
 /// configure ingest operations.
@@ -23,8 +22,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     crime_map_database::run_migrations(db.as_ref()).await?;
 
     let choices = &[
-        "Sync a specific source",
-        "Sync all sources",
+        "Sync sources",
         "List sources",
         "Geocode missing coordinates",
         "Attribute census data",
@@ -41,15 +39,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .interact()?;
 
     match selection {
-        0 => sync_specific_source(db.as_ref()).await?,
-        1 => sync_all_sources(db.as_ref()).await?,
-        2 => list_sources(),
-        3 => geocode_missing_interactive(db.as_ref()).await?,
-        4 => attribute_census_data(db.as_ref()).await?,
-        5 => ingest_census_tracts(db.as_ref()).await?,
-        6 => ingest_census_places(db.as_ref()).await?,
-        7 => ingest_neighborhoods(db.as_ref()).await?,
-        8 => {
+        0 => sync_sources(db.as_ref()).await?,
+        1 => list_sources(),
+        2 => geocode_missing_interactive(db.as_ref()).await?,
+        3 => attribute_census_data(db.as_ref()).await?,
+        4 => ingest_census_tracts(db.as_ref()).await?,
+        5 => ingest_census_places(db.as_ref()).await?,
+        6 => ingest_neighborhoods(db.as_ref()).await?,
+        7 => {
             log::info!("Running database migrations...");
             crime_map_database::run_migrations(db.as_ref()).await?;
             log::info!("Migrations complete.");
@@ -60,8 +57,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Prompts the user to select a source, then syncs it.
-async fn sync_specific_source(
+/// Prompts the user to select one or more sources via checkboxes, then
+/// syncs each selected source.
+async fn sync_sources(
     db: &dyn switchy_database::Database,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let sources = crate::all_sources();
@@ -75,36 +73,16 @@ async fn sync_specific_source(
         .map(|s| format!("{} \u{2014} {}", s.id(), s.name()))
         .collect();
 
-    let idx = Select::new()
-        .with_prompt("Select a source")
+    let selected = MultiSelect::new()
+        .with_prompt("Select sources to sync (space=toggle, a=all, enter=confirm)")
         .items(&labels)
-        .default(0)
+        .max_length(20)
         .interact()?;
 
-    let limit = prompt_optional_u64("Record limit (empty for no limit)")?;
-    let force = Confirm::new()
-        .with_prompt("Force full sync?")
-        .default(false)
-        .interact()?;
-
-    crate::sync_source(db, &sources[idx], limit, force).await?;
-    Ok(())
-}
-
-/// Prompts for optional filters and syncs all matching sources.
-async fn sync_all_sources(
-    db: &dyn switchy_database::Database,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let filter_str: String = Input::new()
-        .with_prompt("Comma-separated source IDs to filter (empty for all)")
-        .allow_empty(true)
-        .interact_text()?;
-
-    let filter = if filter_str.trim().is_empty() {
-        None
-    } else {
-        Some(filter_str)
-    };
+    if selected.is_empty() {
+        println!("No sources selected.");
+        return Ok(());
+    }
 
     let limit = prompt_optional_u64("Record limit per source (empty for no limit)")?;
     let force = Confirm::new()
@@ -112,20 +90,19 @@ async fn sync_all_sources(
         .default(false)
         .interact()?;
 
-    let sources = crate::enabled_sources(filter);
     log::info!(
         "Syncing {} source(s): {}",
-        sources.len(),
-        sources
+        selected.len(),
+        selected
             .iter()
-            .map(SourceDefinition::id)
+            .map(|&i| sources[i].id())
             .collect::<Vec<_>>()
             .join(", ")
     );
 
-    for src in &sources {
-        if let Err(e) = crate::sync_source(db, src, limit, force).await {
-            log::error!("Failed to sync {}: {e}", src.id());
+    for &idx in &selected {
+        if let Err(e) = crate::sync_source(db, &sources[idx], limit, force).await {
+            log::error!("Failed to sync {}: {e}", sources[idx].id());
         }
     }
 
@@ -160,64 +137,95 @@ async fn geocode_missing_interactive(
         .default(false)
         .interact()?;
 
-    // Source filter
+    // Source filter — multi-select from all configured sources
     let all_sources = crate::all_sources();
-    let mut source_labels: Vec<String> = vec!["All sources".to_string()];
-    source_labels.extend(
-        all_sources
-            .iter()
-            .map(|s| format!("{} \u{2014} {}", s.id(), s.name())),
-    );
+    let source_labels: Vec<String> = all_sources
+        .iter()
+        .map(|s| format!("{} \u{2014} {}", s.id(), s.name()))
+        .collect();
 
-    let source_idx = Select::new()
-        .with_prompt("Filter to source")
+    let selected = MultiSelect::new()
+        .with_prompt("Sources to geocode (space=toggle, a=all, enter=confirm)")
         .items(&source_labels)
-        .default(0)
+        .max_length(20)
         .interact()?;
 
-    let source_id = if source_idx == 0 {
-        None
-    } else {
-        let src = &all_sources[source_idx - 1];
-        let sid = crime_map_database::queries::get_source_id_by_name(db, src.name()).await?;
-        log::info!("Filtering to source '{}' (db id={sid})", src.id());
-        Some(sid)
-    };
+    // Resolve DB IDs and TOML IDs for selected sources
+    let all_selected = selected.len() == all_sources.len();
+    let mut source_db_ids: Vec<i32> = Vec::new();
+    let mut source_toml_ids: Vec<String> = Vec::new();
 
-    let source_toml_id = if source_idx == 0 {
-        None
-    } else {
-        Some(all_sources[source_idx - 1].id().to_string())
-    };
+    if !all_selected {
+        for &idx in &selected {
+            let src = &all_sources[idx];
+            let sid = crime_map_database::queries::get_source_id_by_name(db, src.name()).await?;
+            source_db_ids.push(sid);
+            source_toml_ids.push(src.id().to_string());
+        }
+        log::info!(
+            "Filtering to {} source(s): {}",
+            selected.len(),
+            source_toml_ids.join(", ")
+        );
+    }
 
     let start = Instant::now();
 
     // Phase 1: Geocode incidents that have no coordinates
-    let missing_count =
-        crate::geocode_missing(db, batch_size, limit, nominatim_only, source_id).await?;
+    let missing_count = if all_selected {
+        crate::geocode_missing(db, batch_size, limit, nominatim_only, None).await?
+    } else {
+        let mut count = 0u64;
+        for &sid in &source_db_ids {
+            count +=
+                crate::geocode_missing(db, batch_size, limit, nominatim_only, Some(sid)).await?;
+        }
+        count
+    };
 
     // Phase 2: Re-geocode sources with imprecise coords
-    let re_geocode_ids =
-        crate::resolve_re_geocode_source_ids(db, source_toml_id.as_deref()).await?;
-
     let mut re_geocode_count = 0u64;
-    if !re_geocode_ids.is_empty() {
-        let remaining_limit = limit.map(|l| l.saturating_sub(missing_count));
-        if remaining_limit.is_none_or(|l| l > 0) {
-            log::info!(
-                "Re-geocoding {} source(s) with imprecise coordinates...",
-                re_geocode_ids.len()
-            );
-            for sid in &re_geocode_ids {
-                let count = crate::re_geocode_source(
-                    db,
-                    batch_size,
-                    remaining_limit,
-                    nominatim_only,
-                    Some(*sid),
-                )
-                .await?;
-                re_geocode_count += count;
+    if all_selected {
+        let re_geocode_ids = crate::resolve_re_geocode_source_ids(db, None).await?;
+        if !re_geocode_ids.is_empty() {
+            let remaining_limit = limit.map(|l| l.saturating_sub(missing_count));
+            if remaining_limit.is_none_or(|l| l > 0) {
+                log::info!(
+                    "Re-geocoding {} source(s) with imprecise coordinates...",
+                    re_geocode_ids.len()
+                );
+                for sid in &re_geocode_ids {
+                    let count = crate::re_geocode_source(
+                        db,
+                        batch_size,
+                        remaining_limit,
+                        nominatim_only,
+                        Some(*sid),
+                    )
+                    .await?;
+                    re_geocode_count += count;
+                }
+            }
+        }
+    } else {
+        for toml_id in &source_toml_ids {
+            let re_geocode_ids =
+                crate::resolve_re_geocode_source_ids(db, Some(toml_id.as_str())).await?;
+            if !re_geocode_ids.is_empty() {
+                let remaining_limit = limit.map(|l| l.saturating_sub(missing_count));
+                if remaining_limit.is_none_or(|l| l > 0) {
+                    for sid in &re_geocode_ids {
+                        let count = crate::re_geocode_source(
+                            db,
+                            batch_size,
+                            remaining_limit,
+                            nominatim_only,
+                            Some(*sid),
+                        )
+                        .await?;
+                        re_geocode_count += count;
+                    }
+                }
             }
         }
     }
@@ -344,21 +352,29 @@ async fn ingest_census_places(
 async fn ingest_neighborhoods(
     db: &dyn switchy_database::Database,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let filter_str: String = Input::new()
-        .with_prompt("Comma-separated source IDs (empty for all)")
-        .allow_empty(true)
-        .interact_text()?;
-
     let all_sources = crime_map_neighborhood::registry::all_sources();
-    let sources_to_ingest = if filter_str.trim().is_empty() {
-        all_sources
-    } else {
-        let ids: Vec<&str> = filter_str.split(',').map(str::trim).collect();
-        all_sources
-            .into_iter()
-            .filter(|s| ids.contains(&s.id()))
-            .collect::<Vec<_>>()
-    };
+    if all_sources.is_empty() {
+        println!("No neighborhood sources configured.");
+        return Ok(());
+    }
+
+    let labels: Vec<String> = all_sources
+        .iter()
+        .map(|s| format!("{} \u{2014} {}", s.id(), s.name()))
+        .collect();
+
+    let selected = MultiSelect::new()
+        .with_prompt("Select neighborhood sources (space=toggle, a=all, enter=confirm)")
+        .items(&labels)
+        .max_length(20)
+        .interact()?;
+
+    if selected.is_empty() {
+        println!("No sources selected.");
+        return Ok(());
+    }
+
+    let sources_to_ingest: Vec<_> = selected.iter().map(|&i| &all_sources[i]).collect();
 
     log::info!(
         "Ingesting neighborhoods from {} source(s)",

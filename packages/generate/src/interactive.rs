@@ -4,7 +4,7 @@
 //! which outputs to generate and configure parameters without memorizing
 //! CLI flags.
 
-use dialoguer::{Confirm, Input, Select};
+use dialoguer::{Confirm, Input, MultiSelect};
 
 use crate::{
     GenerateArgs, OUTPUT_CLUSTERS_PMTILES, OUTPUT_COUNT_DB, OUTPUT_INCIDENTS_DB,
@@ -12,10 +12,19 @@ use crate::{
 };
 use crime_map_database::db;
 
+/// All available output types, paired with their internal constant name.
+const OUTPUT_CHOICES: &[(&str, &str)] = &[
+    ("PMTiles (heatmap + points)", OUTPUT_INCIDENTS_PMTILES),
+    ("Cluster tiles", OUTPUT_CLUSTERS_PMTILES),
+    ("Sidebar SQLite", OUTPUT_INCIDENTS_DB),
+    ("Count DuckDB", OUTPUT_COUNT_DB),
+];
+
 /// Runs the interactive generation menu.
 ///
-/// Connects to the database, presents a selection menu for output types,
-/// prompts for generation parameters, and executes the chosen pipeline.
+/// Connects to the database, presents a multi-select for output types and
+/// source filtering, prompts for generation parameters, and executes the
+/// chosen pipeline.
 ///
 /// # Errors
 ///
@@ -26,34 +35,24 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let dir = output_dir();
     std::fs::create_dir_all(&dir)?;
 
-    let choices = &[
-        "Generate all outputs",
-        "Generate PMTiles (heatmap + points)",
-        "Generate cluster tiles",
-        "Generate sidebar SQLite",
-        "Generate count DuckDB",
-    ];
-
-    let selection = Select::new()
-        .with_prompt("What would you like to generate?")
-        .items(choices)
-        .default(0)
+    // --- Output type selection (multi-select, all checked by default) ---
+    let output_labels: Vec<&str> = OUTPUT_CHOICES.iter().map(|(label, _)| *label).collect();
+    let selected_outputs = MultiSelect::new()
+        .with_prompt("Outputs to generate (space=toggle, a=all, enter=confirm)")
+        .items(&output_labels)
         .interact()?;
 
-    let requested_outputs: &[&str] = match selection {
-        0 => &[
-            OUTPUT_INCIDENTS_PMTILES,
-            OUTPUT_CLUSTERS_PMTILES,
-            OUTPUT_INCIDENTS_DB,
-            OUTPUT_COUNT_DB,
-        ],
-        1 => &[OUTPUT_INCIDENTS_PMTILES],
-        2 => &[OUTPUT_CLUSTERS_PMTILES],
-        3 => &[OUTPUT_INCIDENTS_DB],
-        4 => &[OUTPUT_COUNT_DB],
-        _ => unreachable!(),
-    };
+    if selected_outputs.is_empty() {
+        println!("No outputs selected.");
+        return Ok(());
+    }
 
+    let requested_outputs: Vec<&str> = selected_outputs
+        .iter()
+        .map(|&i| OUTPUT_CHOICES[i].1)
+        .collect();
+
+    // --- Record limit ---
     let limit_str: String = Input::new()
         .with_prompt("Record limit (leave empty for unlimited)")
         .allow_empty(true)
@@ -70,17 +69,35 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         )
     };
 
-    let sources_str: String = Input::new()
-        .with_prompt("Source IDs to include (comma-separated, leave empty for all)")
-        .allow_empty(true)
-        .interact_text()?;
+    // --- Source filter (multi-select from all configured sources) ---
+    let all_sources = crime_map_source::registry::all_sources();
+    let source_labels: Vec<String> = all_sources
+        .iter()
+        .map(|s| format!("{} \u{2014} {}", s.id(), s.name()))
+        .collect();
 
-    let sources: Option<String> = if sources_str.trim().is_empty() {
-        None
+    let selected_sources = MultiSelect::new()
+        .with_prompt("Sources to include (space=toggle, a=all, enter=confirm)")
+        .items(&source_labels)
+        .max_length(20)
+        .interact()?;
+
+    let sources: Option<String> = if selected_sources.len() == all_sources.len() {
+        None // all selected = no filter
+    } else if selected_sources.is_empty() {
+        println!("No sources selected.");
+        return Ok(());
     } else {
-        Some(sources_str.trim().to_string())
+        Some(
+            selected_sources
+                .iter()
+                .map(|&i| all_sources[i].id().to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+        )
     };
 
+    // --- Other options ---
     let keep_intermediate = Confirm::new()
         .with_prompt("Keep intermediate files?")
         .default(false)
@@ -99,7 +116,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
-    run_with_cache(db.as_ref(), &args, &source_ids, &dir, requested_outputs).await?;
+    run_with_cache(db.as_ref(), &args, &source_ids, &dir, &requested_outputs).await?;
 
     Ok(())
 }
