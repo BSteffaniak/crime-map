@@ -88,7 +88,7 @@ Replace `date_field` with the actual date column name from the sample record.
 **Recording the search:**
 
 ```
-cargo discover search-log add --type socrata_portal --query "{domain}" --scope "{city/state}" --results-found {count}
+cargo discover search-log add --search-type socrata_portal --query "{domain}" --geographic-scope "{city/state}" --results-summary "{description of findings}"
 ```
 
 ### B. ArcGIS Hub/Server Discovery
@@ -154,7 +154,7 @@ Check that features have geometry (usually point geometry with x/y coordinates i
 **Recording the search:**
 
 ```
-cargo discover search-log add --type arcgis --query "{search terms}" --scope "{city/state}" --results-found {count}
+cargo discover search-log add --search-type arcgis --query "{search terms}" --geographic-scope "{city/state}" --results-summary "{description of findings}"
 ```
 
 ### C. CKAN Portal Discovery
@@ -190,7 +190,7 @@ Each package has resources. Look for resources with format `CSV`, `JSON`, `GeoJS
 **Recording the search:**
 
 ```
-cargo discover search-log add --type ckan --query "{domain} crime" --scope "{region}" --results-found {count}
+cargo discover search-log add --search-type ckan --query "{domain} crime" --geographic-scope "{region}" --results-summary "{description of findings}"
 ```
 
 ### D. Web Scraping Evaluation
@@ -216,7 +216,7 @@ Some police departments publish crime data on their websites without a formal AP
 **Recording scrape targets:**
 
 ```
-cargo discover scrape add --url "{url}" --city "{city}" --state "{state}" --method "{html_table|csv_download|api_hidden}" --difficulty "{easy|medium|hard}"
+cargo discover scrape add --lead-id {id} --url "{url}" --strategy "{html_table|json_paginated|csv_download}" --estimated-effort "{easy|medium|hard}"
 ```
 
 ### E. Geocoding Assessment
@@ -278,13 +278,12 @@ When you find a promising dataset, perform a thorough evaluation before recordin
 
    ```
    cargo discover leads add \
-     --city "{city}" \
-     --state "{state}" \
-     --source-type "{socrata|arcgis|ckan|scrape|other}" \
+     --jurisdiction "{City, ST}" \
+     --name "{Human-readable source name}" \
+     --api-type "{socrata|arcgis|ckan|carto|odata|scrape|unknown}" \
      --url "{api_url}" \
-     --has-coordinates {true|false} \
-     --record-count {count} \
-     --freshness "{daily|weekly|monthly|stale|unknown}" \
+     --priority "{high|medium|low}" \
+     --likelihood {0.0-1.0} \
      --notes "{evaluation notes}"
    ```
 
@@ -292,10 +291,16 @@ When you find a promising dataset, perform a thorough evaluation before recordin
 
    ```
    cargo discover leads update <id> \
-     --status {investigated|viable|not_viable|integrated} \
+     --status {verified_good|needs_geocoding|verified_no_coords|verified_no_data|rejected} \
      --has-coordinates {true|false} \
      --record-count {count} \
      --notes "{updated notes}"
+   ```
+
+   To view full details about a lead:
+
+   ```
+   cargo discover leads investigate <id>
    ```
 
 ## Legal Evaluation
@@ -328,10 +333,179 @@ Before marking a source as viable, assess its legal status:
 **Recording legal assessment:**
 
 ```
-cargo discover legal add <lead_id> \
-  --license-type "{open_data|cc_by|cc0|public_domain|custom|unknown}" \
+cargo discover legal add \
+  --lead-id {lead_id} \
+  --license-type "{open_data|cc_by|cc_by_sa|cc_zero|public_domain|proprietary|tos_restricted|unknown}" \
   --tos-url "{url}" \
+  --allows-api-access true \
+  --allows-bulk-download true \
+  --allows-redistribution true \
   --notes "{assessment notes}"
+```
+
+## Integrating a Viable Source
+
+After a lead reaches `verified_good` status and passes legal review, integrate it into the ingest pipeline.
+
+### Step 1: Generate a skeleton TOML config
+
+```
+cargo discover integrate <lead_id>
+```
+
+This command:
+- Reads the lead's metadata (jurisdiction, API type, URL)
+- Generates a skeleton TOML config file at `packages/source/sources/{name}.toml`
+- Adds the `include_str!` entry to `packages/source/src/registry.rs`
+- Increments the `EXPECTED_SOURCE_COUNT` in the registry test
+- Marks the lead status as `integrated`
+
+The generated TOML will have `TODO` placeholders for field mappings that must be filled in by examining sample records from the API.
+
+### Step 2: Fill in the field mappings
+
+The skeleton TOML needs its `[fields]` section completed. Fetch a sample record from the API and map fields:
+
+**Required fields:**
+- `incident_id` -- List of field names for the incident/case ID (tried in order as fallback chain)
+- `crime_type` -- List of field names for crime type/category (first non-empty wins)
+- `occurred_at` -- Date extractor configuration (see options below)
+- `lat` / `lng` -- Coordinate fields with their types
+- `description` -- How to build the description string
+
+**Date extractor types:**
+| Type | Use when | TOML example |
+|------|----------|--------------|
+| `simple` | Single ISO-8601 datetime field | `type = "simple"` / `field = "date"` |
+| `date_plus_hhmm` | Separate date + 4-digit time (e.g., "1430") | `type = "date_plus_hhmm"` / `date_field = "date_occ"` / `time_field = "time_occ"` |
+| `date_plus_hhmmss` | Separate date + "HH:MM:SS" time | `type = "date_plus_hhmmss"` / `date_field = "date"` / `time_field = "time"` |
+| `epoch_ms` | Epoch milliseconds (float) | `type = "epoch_ms"` / `field = "report_dat"` |
+| `mdy_date` | "MM/DD/YYYY" text date (no time) | `type = "mdy_date"` / `field = "date"` |
+
+**Coordinate types:**
+| Type | Use when | TOML example |
+|------|----------|--------------|
+| `string` | Coordinate is a JSON string (e.g., `"47.6"`) | `field = "latitude"` / `type = "string"` |
+| `f64` | Coordinate is a JSON number | `field = "geo_lat"` / `type = "f64"` |
+| `point_lat` | Latitude from a GeoJSON Point or Socrata location object | `field = "location"` / `type = "point_lat"` |
+| `point_lng` | Longitude from a GeoJSON Point or Socrata location object | `field = "location"` / `type = "point_lng"` |
+
+**Description extractor types:**
+| Type | Use when | TOML example |
+|------|----------|--------------|
+| `single` | One field contains the full description | `type = "single"` / `field = "offense_desc"` |
+| `combine` | Combine multiple fields with a separator | `type = "combine"` / `fields = ["type", "detail"]` / `separator = ": "` |
+| `fallback_chain` | Try fields in order, use first non-empty | `type = "fallback_chain"` / `fields = ["pd_desc", "ofns_desc"]` |
+
+**Arrest extractor types:**
+| Type | Use when | TOML example |
+|------|----------|--------------|
+| `none` | No arrest information available | `type = "none"` |
+| `direct_bool` | Boolean field | `type = "direct_bool"` / `field = "arrest"` |
+| `string_contains` | String checked for "arrest" substring | `type = "string_contains"` / `field = "resolution"` |
+
+**Optional fields:**
+- `reported_at` -- String field name for report date (parsed as Socrata datetime)
+- `block_address` -- String field name for block/street address
+- `location_type` -- String field name for location description
+- `domestic` -- String field name for domestic violence boolean flag
+
+### Step 3: Test the configuration
+
+```bash
+# Verify the TOML parses correctly
+cargo test -p crime_map_source
+
+# Run a small test ingest
+cargo ingest sync --source {source_id} --limit 100
+```
+
+### Step 4: Record the source
+
+After successful testing:
+
+```
+cargo discover sources add \
+  --source-id "{source_id}" \
+  --jurisdiction "{City, ST}" \
+  --api-type "{socrata|arcgis|ckan|carto|odata}" \
+  --url "{api_url}"
+```
+
+### Source TOML Template
+
+Here is the complete template with all options documented:
+
+```toml
+id = "{city_state}_pd"           # Unique ID, must match registry entry
+name = "{City} Police Department" # Human-readable name
+city = "{City}"                   # City name
+state = "{ST}"                    # Two-letter state abbreviation
+output_filename = "{city}_crimes.json"
+
+[fetcher]
+# Choose ONE fetcher type:
+
+# Socrata SODA API
+type = "socrata"
+api_url = "https://data.{city}.gov/resource/{4x4-id}.json"
+date_column = "date_field_name"
+page_size = 50000
+
+# ArcGIS REST API
+# type = "arcgis"
+# query_urls = ["https://{host}/arcgis/rest/services/{path}/FeatureServer/{layer}/query"]
+# page_size = 2000
+# date_column = "DateField"        # optional, for incremental sync
+# where_clause = "is_crime = 1"    # optional
+
+# CKAN Datastore API
+# type = "ckan"
+# api_url = "https://{domain}"
+# resource_ids = ["{resource-uuid}"]
+# page_size = 32000
+# date_column = "OCCURRED_ON_DATE"  # optional
+
+# Carto SQL API
+# type = "carto"
+# api_url = "https://{domain}/api/v2/sql"
+# table_name = "{table_name}"
+# date_column = "date_field"
+# page_size = 10000
+
+# OData REST API
+# type = "odata"
+# api_url = "https://{host}/api/data"
+# date_column = "DateField"
+# page_size = 5000
+
+[fields]
+incident_id = ["case_number", "incident_id"]  # Fallback chain
+crime_type = ["offense_type", "category"]      # First non-empty wins
+# reported_at = "report_date"                  # Optional
+# block_address = "block"                      # Optional
+# location_type = "location_description"       # Optional
+# domestic = "domestic"                        # Optional boolean field
+
+[fields.occurred_at]
+type = "simple"               # simple | date_plus_hhmm | date_plus_hhmmss | epoch_ms | mdy_date
+field = "occurred_date"
+
+[fields.lat]
+field = "latitude"
+type = "string"               # string | f64 | point_lat | point_lng
+
+[fields.lng]
+field = "longitude"
+type = "string"               # string | f64 | point_lat | point_lng
+
+[fields.description]
+type = "single"               # single | combine | fallback_chain
+field = "offense_description"
+
+[fields.arrest]
+type = "none"                 # none | direct_bool | string_contains
+# field = "arrest"            # Required for direct_bool / string_contains
 ```
 
 ## Recording Findings
@@ -344,6 +518,35 @@ Every action during a discovery session must be persisted:
 - **Every legal assessment** is recorded via `cargo discover legal add`
 
 Do not rely on memory or conversation history. The discovery database is the single source of truth. If it is not recorded in the database, it did not happen.
+
+## Lead Status Lifecycle
+
+Leads progress through these statuses:
+
+```
+new -> investigating -> verified_good -> integrated
+                     -> needs_geocoding
+                     -> needs_scraper
+                     -> verified_no_coords
+                     -> verified_no_data
+                     -> verified_aggregate_only
+                     -> verified_proprietary
+                     -> rejected
+```
+
+| Status | Meaning |
+|--------|---------|
+| `new` | Just discovered, needs evaluation |
+| `investigating` | Currently being evaluated |
+| `verified_good` | Has coordinates, dates, incident-level data -- ready for integration |
+| `needs_geocoding` | Good data but no coordinates -- requires geocoding pipeline |
+| `needs_scraper` | Data exists but requires web scraping to access |
+| `verified_no_coords` | Evaluated, confirmed no coordinate data available |
+| `verified_no_data` | Portal exists but no usable crime incident data |
+| `verified_aggregate_only` | Only aggregate/summary stats, not incident-level |
+| `verified_proprietary` | Behind proprietary platform (CrimeReports, LexisNexis, etc.) |
+| `integrated` | TOML config created and registered in the ingest pipeline |
+| `rejected` | Evaluated and determined unsuitable (PII, arrests-only, etc.) |
 
 ## Session Workflow
 
@@ -360,8 +563,69 @@ A standard discovery session follows this pattern:
    - For each search: perform the query, examine results, record the search
    - For each promising result: evaluate the dataset, add as lead
    - For each existing lead: investigate, update status
-5. **Summarize the session:**
+5. **Integrate viable leads:**
+   - For leads at `verified_good`: run `cargo discover integrate <id>` to generate TOML
+   - Fill in field mappings by examining sample records
+   - Run `cargo test -p crime_map_source` to verify
+6. **Summarize the session:**
    - What searches were performed
    - What new leads were found
    - What leads were evaluated and their outcomes
+   - What sources were integrated
    - Suggested next steps for the following session
+
+## CLI Reference
+
+### Status
+```
+cargo discover status                    # Dashboard of leads, sources, searches
+```
+
+### Leads
+```
+cargo discover leads list                # List all leads
+cargo discover leads list --status new   # Filter by status
+cargo discover leads list --api-type socrata  # Filter by API type
+cargo discover leads add --jurisdiction "City, ST" --name "Name" --api-type socrata --url "..." --priority high --likelihood 0.9 --notes "..."
+cargo discover leads update <id> --status verified_good --record-count 50000 --has-coordinates true --notes "..."
+cargo discover leads investigate <id>    # Show full details + legal info
+```
+
+### Search Log
+```
+cargo discover search-log list           # Show recent searches (default 20)
+cargo discover search-log list --limit 50
+cargo discover search-log add --search-type socrata_portal --query "data.example.gov" --geographic-scope "city:Example,ST" --results-summary "Found dataset xyz with 100K records"
+```
+
+### Sources
+```
+cargo discover sources list              # List all integrated sources
+cargo discover sources list --status active
+cargo discover sources add --source-id "example_pd" --jurisdiction "Example, ST" --api-type socrata --url "..."
+```
+
+### Legal
+```
+cargo discover legal list                # List all legal records
+cargo discover legal add --lead-id 5 --license-type open_data --allows-api-access true --allows-bulk-download true --notes "..."
+cargo discover legal show <id>           # Detailed view
+```
+
+### Scrape Targets
+```
+cargo discover scrape list               # List all scrape targets
+cargo discover scrape add --lead-id 5 --url "https://..." --strategy html_table --estimated-effort medium
+```
+
+### Integration
+```
+cargo discover integrate <lead_id>       # Generate TOML + register in pipeline
+cargo discover integrate <lead_id> --source-id custom_id  # Override the generated source ID
+cargo discover integrate <lead_id> --dry-run              # Preview without writing files
+```
+
+### Other
+```
+cargo discover seed                      # Populate DB with existing knowledge
+```

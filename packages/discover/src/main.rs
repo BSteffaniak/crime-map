@@ -9,6 +9,7 @@
 //! scrape targets, seeding the database with existing knowledge,
 //! health-checking sources, and suggesting next discovery actions.
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
@@ -84,6 +85,20 @@ enum Commands {
 
     /// Populate DB with existing knowledge.
     Seed,
+
+    /// Generate a source TOML config from a verified lead and register it.
+    Integrate {
+        /// Lead ID to integrate.
+        id: i64,
+
+        /// Override the auto-generated source ID.
+        #[arg(long)]
+        source_id: Option<String>,
+
+        /// Preview the generated TOML without writing any files.
+        #[arg(long)]
+        dry_run: bool,
+    },
 
     /// Health-check existing sources.
     Verify {
@@ -420,6 +435,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Legal { action } => cmd_legal(database.as_ref(), action).await,
         Commands::Scrape { action } => cmd_scrape(database.as_ref(), action).await,
         Commands::Seed => cmd_seed(database.as_ref()).await,
+        Commands::Integrate {
+            id,
+            source_id,
+            dry_run,
+        } => cmd_integrate(database.as_ref(), id, source_id, dry_run).await,
         Commands::Verify { source_id } => cmd_verify(database.as_ref(), source_id).await,
         Commands::Suggest { region } => cmd_suggest(database.as_ref(), region).await,
     }
@@ -456,64 +476,183 @@ async fn cmd_status(database: &dyn Database) -> Result<(), Box<dyn std::error::E
 // ---------------------------------------------------------------------------
 
 /// Dispatches `leads` subcommand actions.
+#[allow(clippy::too_many_lines)]
 async fn cmd_leads(
     database: &dyn Database,
     action: LeadAction,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         LeadAction::List { status, api_type } => {
-            // The existing db::get_leads only filters by status; if the user
-            // also specified --api-type we do client-side filtering.
-            let leads = db::get_leads(database, status.as_deref()).await?;
-
-            let leads: Vec<_> = if let Some(ref at) = api_type {
-                leads
-                    .into_iter()
-                    .filter(|l| {
-                        l.api_type
-                            .as_ref()
-                            .is_some_and(|t| t.as_str() == at.as_str())
-                    })
-                    .collect()
-            } else {
-                leads
-            };
-
-            if leads.is_empty() {
-                println!("No leads found.");
+            cmd_leads_list(database, status, api_type).await?;
+        }
+        LeadAction::Add {
+            jurisdiction,
+            name,
+            api_type,
+            url,
+            priority,
+            likelihood,
+            notes,
+        } => {
+            let id = db::insert_lead(
+                database,
+                &jurisdiction,
+                &name,
+                api_type.as_deref(),
+                url.as_deref(),
+                &priority,
+                likelihood,
+                notes.as_deref(),
+            )
+            .await?;
+            println!("Lead added (id={id}): {name}");
+        }
+        LeadAction::Update {
+            id,
+            status,
+            record_count,
+            has_coordinates,
+            notes,
+        } => {
+            let lead = db::get_lead(database, id).await?;
+            if lead.is_none() {
+                println!("No lead found with id={id}");
                 return Ok(());
             }
 
-            println!(
-                "{:<5} {:<20} {:<30} {:<12} {:<10} {:<8}",
-                "ID", "JURISDICTION", "SOURCE NAME", "STATUS", "PRIORITY", "API TYPE"
-            );
-            println!("{}", "-".repeat(90));
+            db::update_lead(
+                database,
+                id,
+                status.as_deref(),
+                record_count,
+                has_coordinates,
+                notes.as_deref(),
+            )
+            .await?;
+            println!("Lead {id} updated.");
 
-            for lead in &leads {
-                let api_type_str = lead.api_type.as_ref().map_or("-", |t| t.as_str());
+            if let Some(lead) = db::get_lead(database, id).await? {
                 println!(
-                    "{:<5} {:<20} {:<30} {:<12} {:<10} {:<8}",
-                    lead.id,
-                    truncate(&lead.jurisdiction, 19),
-                    truncate(&lead.source_name, 29),
+                    "  Status: {}  Records: {}  Coords: {}",
                     lead.status.as_str(),
-                    lead.priority.as_str(),
-                    api_type_str,
+                    opt_display(lead.record_count),
+                    opt_display(lead.has_coordinates),
                 );
             }
+        }
+        LeadAction::Investigate { id } => {
+            cmd_leads_investigate(database, id).await?;
+        }
+    }
 
-            println!();
-            println!("{} lead(s)", leads.len());
-        }
-        LeadAction::Add { .. } => {
-            println!("leads add: Not yet implemented");
-        }
-        LeadAction::Update { .. } => {
-            println!("leads update: Not yet implemented");
-        }
-        LeadAction::Investigate { .. } => {
-            println!("leads investigate: Not yet implemented");
+    Ok(())
+}
+
+/// Lists leads, with optional status and API type filters.
+async fn cmd_leads_list(
+    database: &dyn Database,
+    status: Option<String>,
+    api_type: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let leads = db::get_leads(database, status.as_deref()).await?;
+
+    let leads: Vec<_> = if let Some(ref at) = api_type {
+        leads
+            .into_iter()
+            .filter(|l| {
+                l.api_type
+                    .as_ref()
+                    .is_some_and(|t| t.as_str() == at.as_str())
+            })
+            .collect()
+    } else {
+        leads
+    };
+
+    if leads.is_empty() {
+        println!("No leads found.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<5} {:<20} {:<30} {:<12} {:<10} {:<8}",
+        "ID", "JURISDICTION", "SOURCE NAME", "STATUS", "PRIORITY", "API TYPE"
+    );
+    println!("{}", "-".repeat(90));
+
+    for lead in &leads {
+        let api_type_str = lead.api_type.as_ref().map_or("-", |t| t.as_str());
+        println!(
+            "{:<5} {:<20} {:<30} {:<12} {:<10} {:<8}",
+            lead.id,
+            truncate(&lead.jurisdiction, 19),
+            truncate(&lead.source_name, 29),
+            lead.status.as_str(),
+            lead.priority.as_str(),
+            api_type_str,
+        );
+    }
+
+    println!();
+    println!("{} lead(s)", leads.len());
+    Ok(())
+}
+
+/// Shows detailed information about a specific lead.
+async fn cmd_leads_investigate(
+    database: &dyn Database,
+    id: i64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(lead) = db::get_lead(database, id).await? else {
+        println!("No lead found with id={id}");
+        return Ok(());
+    };
+
+    println!("=== Lead #{} ===", lead.id);
+    println!("Jurisdiction: {}", lead.jurisdiction);
+    println!("Source Name:  {}", lead.source_name);
+    println!(
+        "API Type:     {}",
+        lead.api_type.as_ref().map_or("-", |t| t.as_str())
+    );
+    println!("URL:          {}", lead.url.as_deref().unwrap_or("-"));
+    println!("Status:       {}", lead.status.as_str());
+    println!("Priority:     {}", lead.priority.as_str());
+    println!("Likelihood:   {}", opt_display_f64(lead.likelihood));
+    println!("Record Count: {}", opt_display(lead.record_count));
+    println!("Has Coords:   {}", opt_display(lead.has_coordinates));
+    println!("Has Dates:    {}", opt_display(lead.has_dates));
+    println!(
+        "Coord Type:   {}",
+        lead.coordinate_type.as_ref().map_or("-", |t| t.as_str())
+    );
+    println!("Discovered:   {}", lead.discovered_at);
+    println!("Updated:      {}", lead.updated_at);
+    println!(
+        "Investigated: {}",
+        lead.investigated_at.as_deref().unwrap_or("-")
+    );
+    if let Some(ref notes) = lead.notes {
+        println!();
+        println!("Notes:");
+        println!("  {notes}");
+    }
+
+    let legal = db::get_legal_for_lead(database, id).await?;
+    if !legal.is_empty() {
+        println!();
+        println!("Legal Info:");
+        for l in &legal {
+            println!(
+                "  License: {}  API: {}  Bulk: {}  Redistribute: {}",
+                l.license_type.as_ref().map_or("-", |t| t.as_str()),
+                bool_char(l.allows_api_access),
+                bool_char(l.allows_bulk_download),
+                bool_char(l.allows_redistribution),
+            );
+            if let Some(ref notes) = l.notes {
+                println!("  Notes: {notes}");
+            }
         }
     }
 
@@ -525,17 +664,63 @@ async fn cmd_leads(
 // ---------------------------------------------------------------------------
 
 /// Dispatches `sources` subcommand actions.
-#[allow(clippy::unused_async)]
 async fn cmd_sources(
-    _database: &dyn Database,
+    database: &dyn Database,
     action: SourceAction,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
-        SourceAction::List { .. } => {
-            println!("sources list: Not yet implemented");
+        SourceAction::List { status } => {
+            let sources = db::get_sources(database, status.as_deref()).await?;
+
+            if sources.is_empty() {
+                println!("No sources found.");
+                return Ok(());
+            }
+
+            println!(
+                "{:<4} {:<22} {:<22} {:<8} {:<8} {:<8}",
+                "ID", "SOURCE ID", "JURISDICTION", "TYPE", "STATUS", "RECORDS"
+            );
+            println!("{}", "-".repeat(90));
+
+            for source in &sources {
+                let records = opt_display(source.record_count);
+                println!(
+                    "{:<4} {:<22} {:<22} {:<8} {:<8} {:<8}",
+                    source.id,
+                    truncate(&source.source_id, 21),
+                    truncate(&source.jurisdiction, 21),
+                    source.api_type.as_str(),
+                    source.status.as_str(),
+                    records,
+                );
+            }
+
+            println!();
+            println!("{} source(s)", sources.len());
         }
-        SourceAction::Add { .. } => {
-            println!("sources add: Not yet implemented");
+        SourceAction::Add {
+            source_id,
+            jurisdiction,
+            api_type,
+            url,
+            toml_filename,
+            notes,
+        } => {
+            let id = db::insert_source(
+                database,
+                &source_id,
+                &jurisdiction,
+                &api_type,
+                &url,
+                None, // record_count
+                None, // date_range_start
+                None, // date_range_end
+                toml_filename.as_deref(),
+                notes.as_deref(),
+            )
+            .await?;
+            println!("Source added (id={id}): {source_id}");
         }
         SourceAction::Update { .. } => {
             println!("sources update: Not yet implemented");
@@ -550,17 +735,68 @@ async fn cmd_sources(
 // ---------------------------------------------------------------------------
 
 /// Dispatches `search-log` subcommand actions.
-#[allow(clippy::unused_async)]
 async fn cmd_search_log(
-    _database: &dyn Database,
+    database: &dyn Database,
     action: SearchLogAction,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
-        SearchLogAction::List { .. } => {
-            println!("search-log list: Not yet implemented");
+        SearchLogAction::List { limit } => {
+            let searches = db::get_searches(database, None).await?;
+            let searches: Vec<_> = searches.into_iter().take(limit as usize).collect();
+
+            if searches.is_empty() {
+                println!("No search history entries found.");
+                return Ok(());
+            }
+
+            println!(
+                "{:<4} {:<18} {:<40} {:<20} {:<10}",
+                "ID", "TYPE", "QUERY", "SCOPE", "DATE"
+            );
+            println!("{}", "-".repeat(100));
+
+            for entry in &searches {
+                let scope = entry.geographic_scope.as_deref().unwrap_or("-");
+                let date = entry.searched_at.get(..10).unwrap_or(&entry.searched_at);
+                println!(
+                    "{:<4} {:<18} {:<40} {:<20} {}",
+                    entry.id,
+                    truncate(&entry.search_type, 17),
+                    truncate(&entry.query, 39),
+                    truncate(scope, 19),
+                    date,
+                );
+            }
+
+            println!();
+            println!("{} entries shown", searches.len());
+
+            // Show summaries for the most recent entries
+            for entry in searches.iter().take(5) {
+                if let Some(ref summary) = entry.results_summary {
+                    println!();
+                    println!("  [{}] {}", entry.id, truncate(&entry.query, 60));
+                    println!("    {summary}");
+                }
+            }
         }
-        SearchLogAction::Add { .. } => {
-            println!("search-log add: Not yet implemented");
+        SearchLogAction::Add {
+            search_type,
+            query,
+            geographic_scope,
+            results_summary,
+            session_id,
+        } => {
+            let id = db::insert_search(
+                database,
+                &search_type,
+                &query,
+                geographic_scope.as_deref(),
+                results_summary.as_deref(),
+                session_id.as_deref(),
+            )
+            .await?;
+            println!("Search recorded (id={id})");
         }
     }
 
@@ -572,42 +808,201 @@ async fn cmd_search_log(
 // ---------------------------------------------------------------------------
 
 /// Dispatches `legal` subcommand actions.
-#[allow(clippy::unused_async)]
 async fn cmd_legal(
-    _database: &dyn Database,
+    database: &dyn Database,
     action: LegalAction,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         LegalAction::List => {
-            println!("legal list: Not yet implemented");
+            cmd_legal_list(database).await?;
         }
-        LegalAction::Add { .. } => {
-            println!("legal add: Not yet implemented");
+        LegalAction::Add {
+            lead_id,
+            source_id,
+            license_type,
+            tos_url,
+            allows_bulk_download,
+            allows_api_access,
+            allows_redistribution,
+            allows_scraping,
+            attribution_required,
+            attribution_text,
+            notes,
+        } => {
+            let id = db::insert_legal(
+                database,
+                lead_id,
+                source_id,
+                license_type.as_deref(),
+                tos_url.as_deref(),
+                allows_bulk_download,
+                allows_api_access,
+                allows_redistribution,
+                allows_scraping,
+                attribution_required,
+                attribution_text.as_deref(),
+                None, // rate_limits
+                notes.as_deref(),
+            )
+            .await?;
+            println!("Legal record added (id={id})");
         }
-        LegalAction::Show { .. } => {
-            println!("legal show: Not yet implemented");
+        LegalAction::Show { id } => {
+            cmd_legal_show(database, id).await?;
         }
     }
 
     Ok(())
 }
 
+/// Lists all legal/licensing records.
+async fn cmd_legal_list(database: &dyn Database) -> Result<(), Box<dyn std::error::Error>> {
+    let records = db::get_all_legal(database).await?;
+
+    if records.is_empty() {
+        println!("No legal records found.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<4} {:<8} {:<8} {:<14} {:<5} {:<5} {:<5} {:<30}",
+        "ID", "LEAD", "SOURCE", "LICENSE", "API", "BULK", "REDIS", "NOTES"
+    );
+    println!("{}", "-".repeat(80));
+
+    for l in &records {
+        let lead = opt_display(l.lead_id);
+        let source = opt_display(l.source_id);
+        let license = l.license_type.as_ref().map_or("-", |t| t.as_str());
+        let api = bool_char(l.allows_api_access);
+        let bulk = bool_char(l.allows_bulk_download);
+        let redis = bool_char(l.allows_redistribution);
+        let notes = l.notes.as_deref().unwrap_or("-");
+        println!(
+            "{:<4} {:<8} {:<8} {:<14} {:<5} {:<5} {:<5} {:<30}",
+            l.id,
+            lead,
+            source,
+            truncate(license, 13),
+            api,
+            bulk,
+            redis,
+            truncate(notes, 30),
+        );
+    }
+
+    println!();
+    println!("{} record(s)", records.len());
+    Ok(())
+}
+
+/// Shows detailed legal information for a specific record.
+async fn cmd_legal_show(
+    database: &dyn Database,
+    id: i64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(l) = db::get_legal(database, id).await? else {
+        println!("No legal record found with id={id}");
+        return Ok(());
+    };
+
+    println!("=== Legal Record #{} ===", l.id);
+    println!("Lead ID:           {}", opt_display(l.lead_id));
+    println!("Source ID:         {}", opt_display(l.source_id));
+    println!(
+        "License Type:      {}",
+        l.license_type.as_ref().map_or("-", |t| t.as_str())
+    );
+    println!("TOS URL:           {}", l.tos_url.as_deref().unwrap_or("-"));
+    println!("Allows API:        {}", bool_str(l.allows_api_access));
+    println!("Allows Bulk DL:    {}", bool_str(l.allows_bulk_download));
+    println!("Allows Redistrib:  {}", bool_str(l.allows_redistribution));
+    println!("Allows Scraping:   {}", bool_str(l.allows_scraping));
+    println!("Attribution Req:   {}", bool_str(l.attribution_required));
+    println!(
+        "Attribution Text:  {}",
+        l.attribution_text.as_deref().unwrap_or("-")
+    );
+    println!(
+        "Rate Limits:       {}",
+        l.rate_limits.as_deref().unwrap_or("-")
+    );
+    println!(
+        "Reviewed At:       {}",
+        l.reviewed_at.as_deref().unwrap_or("-")
+    );
+    if let Some(ref notes) = l.notes {
+        println!();
+        println!("Notes:");
+        println!("  {notes}");
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
-// Scrape command (stub)
+// Scrape command
 // ---------------------------------------------------------------------------
 
 /// Dispatches `scrape` subcommand actions.
-#[allow(clippy::unused_async)]
 async fn cmd_scrape(
-    _database: &dyn Database,
+    database: &dyn Database,
     action: ScrapeAction,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         ScrapeAction::List => {
-            println!("scrape list: Not yet implemented");
+            let targets = db::get_scrape_targets(database).await?;
+
+            if targets.is_empty() {
+                println!("No scrape targets found.");
+                return Ok(());
+            }
+
+            println!(
+                "{:<4} {:<6} {:<40} {:<16} {:<10} {:<10}",
+                "ID", "LEAD", "URL", "STRATEGY", "EFFORT", "ANTI-BOT"
+            );
+            println!("{}", "-".repeat(90));
+
+            for t in &targets {
+                let strategy = t.scrape_strategy.as_ref().map_or("-", |s| s.as_str());
+                let effort = t.estimated_effort.as_deref().unwrap_or("-");
+                let anti_bot = t.anti_bot.as_ref().map_or("-", |a| a.as_str());
+                println!(
+                    "{:<4} {:<6} {:<40} {:<16} {:<10} {}",
+                    t.id,
+                    t.lead_id,
+                    truncate(&t.url, 39),
+                    strategy,
+                    effort,
+                    anti_bot,
+                );
+            }
+
+            println!();
+            println!("{} target(s)", targets.len());
         }
-        ScrapeAction::Add { .. } => {
-            println!("scrape add: Not yet implemented");
+        ScrapeAction::Add {
+            lead_id,
+            url,
+            strategy,
+            auth_required,
+            anti_bot,
+            estimated_effort,
+            notes,
+        } => {
+            let id = db::insert_scrape_target(
+                database,
+                lead_id,
+                &url,
+                strategy.as_deref(),
+                None, // pagination_method
+                auth_required.unwrap_or(false),
+                anti_bot.as_deref(),
+                estimated_effort.as_deref(),
+                notes.as_deref(),
+            )
+            .await?;
+            println!("Scrape target added (id={id})");
         }
         ScrapeAction::Update { .. } => {
             println!("scrape update: Not yet implemented");
@@ -1030,6 +1425,401 @@ fn extract_source_info(fetcher: &crime_map_source::source_def::FetcherConfig) ->
 }
 
 // ---------------------------------------------------------------------------
+// Integrate command
+// ---------------------------------------------------------------------------
+
+/// Generates a source TOML config from a verified lead and registers it in
+/// the ingest pipeline.
+async fn cmd_integrate(
+    database: &dyn Database,
+    id: i64,
+    source_id_override: Option<String>,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(lead) = db::get_lead(database, id).await? else {
+        println!("No lead found with id={id}");
+        return Ok(());
+    };
+
+    // Validate the lead is in a suitable state
+    let status = lead.status.as_str();
+    if status != "verified_good" && status != "new" && status != "investigating" {
+        println!("Lead {id} has status '{status}' -- expected 'verified_good' for integration.",);
+        println!("Use `cargo discover leads update {id} --status verified_good` first.");
+        return Ok(());
+    }
+
+    let api_type = lead.api_type.as_ref().map_or("unknown", |t| t.as_str());
+
+    // Generate a source ID from the jurisdiction if not overridden
+    let source_id = source_id_override.unwrap_or_else(|| derive_source_id(&lead.jurisdiction));
+
+    // Derive the TOML filename (without _pd suffix for the filename)
+    let toml_filename = format!(
+        "{}.toml",
+        source_id.strip_suffix("_pd").unwrap_or(&source_id)
+    );
+    let toml_path = format!("packages/source/sources/{toml_filename}");
+
+    // Generate the skeleton TOML content
+    let toml_content = generate_toml_skeleton(&lead, &source_id, api_type);
+
+    if dry_run {
+        println!("=== Dry Run: Integration Preview ===");
+        println!();
+        println!("Lead:      #{} - {}", lead.id, lead.source_name);
+        println!("Source ID: {source_id}");
+        println!("TOML file: {toml_path}");
+        println!();
+        println!("--- Generated TOML ---");
+        println!("{toml_content}");
+        println!("--- End TOML ---");
+        println!();
+        println!("Registry: Would add include_str! entry to packages/source/src/registry.rs");
+        println!("Lead:     Would update status to 'integrated'");
+        return Ok(());
+    }
+
+    // Check if the TOML file already exists
+    let full_toml_path = PathBuf::from(&toml_path);
+    if full_toml_path.exists() {
+        println!("TOML file already exists: {toml_path}");
+        println!("Aborting to avoid overwriting. Use --source-id to pick a different name.");
+        return Ok(());
+    }
+
+    // Write the TOML file
+    std::fs::write(&full_toml_path, &toml_content)?;
+    println!("Created {toml_path}");
+
+    // Update registry.rs
+    let registry_path = PathBuf::from("packages/source/src/registry.rs");
+    let registry_content = std::fs::read_to_string(&registry_path)?;
+
+    let registry_name = source_id.strip_suffix("_pd").unwrap_or(&source_id);
+
+    // Determine which section to insert into based on API type
+    let section_marker = match api_type {
+        "socrata" => "Socrata sources",
+        "arcgis" => "ArcGIS sources",
+        "carto" => "Carto sources",
+        "ckan" => "CKAN sources",
+        // Default to OData section (last before closing bracket)
+        _ => "OData sources",
+    };
+
+    // Find the right place to insert. We insert just before the next section
+    // marker or at the end of the SOURCE_TOMLS array.
+    let include_line =
+        format!("    (\"{registry_name}\", include_str!(\"../sources/{toml_filename}\")),",);
+
+    // Simple approach: find the section marker line, then find the next
+    // section marker after it, and insert before that next section.
+    let updated_registry = insert_registry_entry(&registry_content, &include_line, section_marker);
+
+    if let Some(updated) = updated_registry {
+        // Also increment EXPECTED_SOURCE_COUNT
+        let updated = increment_source_count(&updated);
+        std::fs::write(&registry_path, updated)?;
+        println!("Updated packages/source/src/registry.rs");
+    } else {
+        println!("Warning: Could not find section '{section_marker}' in registry.rs.");
+        println!("Please add manually:");
+        println!("  {include_line}");
+    }
+
+    // Mark the lead as integrated
+    db::update_lead_status(database, id, "integrated").await?;
+    println!("Lead {id} status updated to 'integrated'");
+
+    println!();
+    println!("Next steps:");
+    println!("  1. Edit {toml_path} -- fill in TODO field mappings from sample API records");
+    println!("  2. Run: cargo test -p crime_map_source");
+    println!("  3. Run: cargo ingest sync --source {source_id} --limit 100");
+
+    Ok(())
+}
+
+/// Derives a source ID from a jurisdiction string like "Philadelphia, PA".
+///
+/// Examples:
+/// - "Philadelphia, PA" -> `"philadelphia_pd"`
+/// - "San Francisco, CA" -> `"san_francisco_pd"`
+/// - "Denver, CO" -> `"denver_pd"`
+/// - "Montgomery County, MD" -> `"montgomery_county_pd"`
+fn derive_source_id(jurisdiction: &str) -> String {
+    let city_part = jurisdiction
+        .split(',')
+        .next()
+        .unwrap_or(jurisdiction)
+        .trim()
+        .to_lowercase();
+
+    let sanitized: String = city_part
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+
+    // Collapse multiple underscores
+    let mut result = String::new();
+    let mut prev_underscore = false;
+    for c in sanitized.chars() {
+        if c == '_' {
+            if !prev_underscore {
+                result.push('_');
+            }
+            prev_underscore = true;
+        } else {
+            result.push(c);
+            prev_underscore = false;
+        }
+    }
+
+    // Trim trailing underscores
+    let trimmed = result.trim_end_matches('_');
+    format!("{trimmed}_pd")
+}
+
+/// Generates a skeleton TOML config for a source.
+#[allow(clippy::too_many_lines)]
+fn generate_toml_skeleton(
+    lead: &crime_map_discover_models::Lead,
+    source_id: &str,
+    api_type: &str,
+) -> String {
+    let jurisdiction = &lead.jurisdiction;
+    let city = jurisdiction
+        .split(',')
+        .next()
+        .unwrap_or(jurisdiction)
+        .trim();
+    let state = jurisdiction.split(',').nth(1).map_or("XX", str::trim);
+    let url = lead.url.as_deref().unwrap_or("https://TODO");
+
+    let city_lower = city.to_lowercase().replace(' ', "_");
+
+    let mut toml = String::new();
+
+    // Header
+    writeln!(toml, "id = \"{source_id}\"").unwrap();
+    writeln!(toml, "name = \"{city} Police Department\"").unwrap();
+    writeln!(toml, "city = \"{city}\"").unwrap();
+    writeln!(toml, "state = \"{state}\"").unwrap();
+    writeln!(toml, "output_filename = \"{city_lower}_crimes.json\"").unwrap();
+    writeln!(toml).unwrap();
+
+    // Fetcher section based on API type
+    match api_type {
+        "socrata" => {
+            writeln!(toml, "[fetcher]").unwrap();
+            writeln!(toml, "type = \"socrata\"").unwrap();
+            writeln!(toml, "api_url = \"{url}\"").unwrap();
+            writeln!(toml, "date_column = \"TODO\"  # date field name").unwrap();
+            writeln!(toml, "page_size = 50000").unwrap();
+        }
+        "arcgis" => {
+            writeln!(toml, "[fetcher]").unwrap();
+            writeln!(toml, "type = \"arcgis\"").unwrap();
+            writeln!(toml, "query_urls = [\"{url}\"]").unwrap();
+            writeln!(toml, "page_size = 2000").unwrap();
+            writeln!(
+                toml,
+                "# date_column = \"TODO\"  # optional, for incremental sync"
+            )
+            .unwrap();
+        }
+        "carto" => {
+            // Parse table name from URL if possible
+            let table_name = extract_carto_table(url);
+            let api_base = extract_carto_base(url);
+            writeln!(toml, "[fetcher]").unwrap();
+            writeln!(toml, "type = \"carto\"").unwrap();
+            writeln!(toml, "api_url = \"{api_base}\"").unwrap();
+            writeln!(toml, "table_name = \"{table_name}\"").unwrap();
+            writeln!(toml, "date_column = \"TODO\"  # date field name").unwrap();
+            writeln!(toml, "page_size = 10000").unwrap();
+        }
+        "ckan" => {
+            writeln!(toml, "[fetcher]").unwrap();
+            writeln!(toml, "type = \"ckan\"").unwrap();
+            writeln!(toml, "api_url = \"{url}\"").unwrap();
+            writeln!(toml, "resource_ids = [\"TODO\"]").unwrap();
+            writeln!(toml, "page_size = 32000").unwrap();
+            writeln!(toml, "# date_column = \"TODO\"  # optional").unwrap();
+        }
+        "odata" => {
+            writeln!(toml, "[fetcher]").unwrap();
+            writeln!(toml, "type = \"odata\"").unwrap();
+            writeln!(toml, "api_url = \"{url}\"").unwrap();
+            writeln!(toml, "date_column = \"TODO\"  # date field name").unwrap();
+            writeln!(toml, "page_size = 5000").unwrap();
+        }
+        _ => {
+            writeln!(toml, "[fetcher]").unwrap();
+            writeln!(
+                toml,
+                "# TODO: Choose fetcher type (socrata, arcgis, carto, ckan, odata)"
+            )
+            .unwrap();
+            writeln!(toml, "type = \"socrata\"").unwrap();
+            writeln!(toml, "api_url = \"{url}\"").unwrap();
+            writeln!(toml, "date_column = \"TODO\"").unwrap();
+            writeln!(toml, "page_size = 50000").unwrap();
+        }
+    }
+
+    // Fields section (always TODO placeholders)
+    writeln!(toml).unwrap();
+    writeln!(toml, "[fields]").unwrap();
+    writeln!(
+        toml,
+        "incident_id = [\"TODO\"]  # field(s) for unique incident/case ID"
+    )
+    .unwrap();
+    writeln!(
+        toml,
+        "crime_type = [\"TODO\"]   # field(s) for crime type/category"
+    )
+    .unwrap();
+    writeln!(
+        toml,
+        "# reported_at = \"TODO\"  # optional: report date field"
+    )
+    .unwrap();
+    writeln!(
+        toml,
+        "# block_address = \"TODO\"  # optional: street/block address"
+    )
+    .unwrap();
+    writeln!(
+        toml,
+        "# location_type = \"TODO\"  # optional: location description"
+    )
+    .unwrap();
+    writeln!(toml).unwrap();
+    writeln!(toml, "[fields.occurred_at]").unwrap();
+    writeln!(
+        toml,
+        "type = \"simple\"  # simple | date_plus_hhmm | epoch_ms | mdy_date"
+    )
+    .unwrap();
+    writeln!(toml, "field = \"TODO\"").unwrap();
+    writeln!(toml).unwrap();
+    writeln!(toml, "[fields.lat]").unwrap();
+    writeln!(toml, "field = \"TODO\"").unwrap();
+    writeln!(toml, "type = \"string\"  # string | f64 | point_lat").unwrap();
+    writeln!(toml).unwrap();
+    writeln!(toml, "[fields.lng]").unwrap();
+    writeln!(toml, "field = \"TODO\"").unwrap();
+    writeln!(toml, "type = \"string\"  # string | f64 | point_lng").unwrap();
+    writeln!(toml).unwrap();
+    writeln!(toml, "[fields.description]").unwrap();
+    writeln!(
+        toml,
+        "type = \"single\"  # single | combine | fallback_chain"
+    )
+    .unwrap();
+    writeln!(toml, "field = \"TODO\"").unwrap();
+    writeln!(toml).unwrap();
+    writeln!(toml, "[fields.arrest]").unwrap();
+    writeln!(
+        toml,
+        "type = \"none\"  # none | direct_bool | string_contains"
+    )
+    .unwrap();
+
+    toml
+}
+
+/// Extracts a Carto table name from a URL, if present.
+fn extract_carto_table(url: &str) -> String {
+    // Normalize URL-encoded spaces for matching
+    let normalized = url.replace('+', " ");
+    let lower = normalized.to_lowercase();
+    // Try to extract from ?q=SELECT * FROM {table}
+    if let Some(idx) = lower.find("from ") {
+        let rest = &normalized[idx + 5..];
+        let end = rest
+            .find(|c: char| c.is_whitespace() || c == '&')
+            .unwrap_or(rest.len());
+        return rest[..end].to_string();
+    }
+    "TODO".to_string()
+}
+
+/// Extracts the base Carto API URL (without query parameters).
+fn extract_carto_base(url: &str) -> String {
+    url.find('?')
+        .map_or_else(|| url.to_string(), |idx| url[..idx].to_string())
+}
+
+/// Inserts a new `include_str!` entry into `registry.rs` content.
+///
+/// Finds the given section marker text and inserts the entry at the end of
+/// that section (before the next section comment or the closing `];`).
+fn insert_registry_entry(
+    content: &str,
+    include_line: &str,
+    section_marker: &str,
+) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+
+    // Find the section marker line (matches substring)
+    let section_idx = lines
+        .iter()
+        .position(|line| line.contains(section_marker))?;
+
+    // Find the end of this section: either the next section header comment
+    // (lines starting with whitespace + //) or the closing `];`
+    let mut insert_idx = None;
+    for (i, line) in lines.iter().enumerate().skip(section_idx + 1) {
+        let trimmed = line.trim();
+        // Section headers are comment lines containing a unicode box char or `--`
+        let is_section_header =
+            trimmed.starts_with("//") && (trimmed.contains('─') || trimmed.contains("--"));
+        if is_section_header || trimmed == "];" {
+            insert_idx = Some(i);
+            break;
+        }
+    }
+
+    let insert_idx = insert_idx?;
+
+    let mut result = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i == insert_idx {
+            writeln!(result, "{include_line}").unwrap();
+        }
+        writeln!(result, "{line}").unwrap();
+    }
+
+    Some(result)
+}
+
+/// Increments the `EXPECTED_SOURCE_COUNT` constant in registry.rs content.
+fn increment_source_count(content: &str) -> String {
+    let re_pattern = "const EXPECTED_SOURCE_COUNT: usize = ";
+    if let Some(idx) = content.find(re_pattern) {
+        let after = &content[idx + re_pattern.len()..];
+        if let Some(end) = after.find(';') {
+            let num_str = &after[..end];
+            if let Ok(count) = num_str.trim().parse::<usize>() {
+                let new_count = count + 1;
+                return format!(
+                    "{}{}{}{}",
+                    &content[..idx],
+                    re_pattern,
+                    new_count,
+                    &content[idx + re_pattern.len() + end..]
+                );
+            }
+        }
+    }
+    content.to_string()
+}
+
+// ---------------------------------------------------------------------------
 // Verify command (stub)
 // ---------------------------------------------------------------------------
 
@@ -1072,4 +1862,34 @@ fn truncate(s: &str, max_len: usize) -> String {
         result.push('…');
         result
     }
+}
+
+/// Formats an `Option<bool>` as a short character for table display.
+#[must_use]
+const fn bool_char(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "Y",
+        Some(false) => "N",
+        None => "-",
+    }
+}
+
+/// Formats an `Option<bool>` as a human-readable string for detail display.
+#[must_use]
+const fn bool_str(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "Yes",
+        Some(false) => "No",
+        None => "-",
+    }
+}
+
+/// Formats an `Option<T: Display>` as a string, using "-" for `None`.
+fn opt_display<T: std::fmt::Display>(value: Option<T>) -> String {
+    value.map_or_else(|| "-".to_string(), |v| v.to_string())
+}
+
+/// Formats an `Option<f64>` with 2 decimal places, using "-" for `None`.
+fn opt_display_f64(value: Option<f64>) -> String {
+    value.map_or_else(|| "-".to_string(), |v| format!("{v:.2}"))
 }

@@ -442,6 +442,89 @@ fn row_to_lead(row: &switchy_database::Row) -> Lead {
     }
 }
 
+/// Updates multiple fields on an existing lead by ID.
+///
+/// Only fields that are `Some` are updated; `None` fields are left unchanged.
+/// Always bumps `updated_at` to the current UTC time.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if the update fails.
+#[allow(clippy::too_many_arguments)]
+pub async fn update_lead(
+    db: &dyn Database,
+    id: i64,
+    status: Option<&str>,
+    record_count: Option<i64>,
+    has_coordinates: Option<bool>,
+    notes: Option<&str>,
+) -> Result<(), DbError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut set_clauses = vec!["updated_at = ?".to_string()];
+    let mut params: Vec<DatabaseValue> = vec![DatabaseValue::String(now.clone())];
+
+    if let Some(s) = status {
+        set_clauses.push("status = ?".to_string());
+        params.push(DatabaseValue::String(s.to_string()));
+        if s == "investigating" {
+            set_clauses.push("investigated_at = ?".to_string());
+            params.push(DatabaseValue::String(now));
+        }
+    }
+    if let Some(count) = record_count {
+        set_clauses.push("record_count = ?".to_string());
+        params.push(DatabaseValue::Int64(count));
+    }
+    if let Some(coords) = has_coordinates {
+        set_clauses.push("has_coordinates = ?".to_string());
+        params.push(DatabaseValue::Int64(i64::from(coords)));
+    }
+    if let Some(n) = notes {
+        set_clauses.push("notes = ?".to_string());
+        params.push(DatabaseValue::String(n.to_string()));
+    }
+
+    params.push(DatabaseValue::Int64(id));
+    let sql = format!("UPDATE leads SET {} WHERE id = ?", set_clauses.join(", "));
+
+    db.exec_raw_params(&sql, &params)
+        .await
+        .map_err(|e| DbError::Database(e.to_string()))?;
+
+    Ok(())
+}
+
+/// Retrieves all legal information records, ordered by review date descending.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if the query fails.
+pub async fn get_all_legal(db: &dyn Database) -> Result<Vec<LegalInfo>, DbError> {
+    let rows = db
+        .query_raw_params("SELECT * FROM legal_info ORDER BY reviewed_at DESC", &[])
+        .await
+        .map_err(|e| DbError::Database(e.to_string()))?;
+
+    Ok(rows.iter().map(row_to_legal).collect())
+}
+
+/// Retrieves a single legal information record by ID.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if the query fails.
+pub async fn get_legal(db: &dyn Database, id: i64) -> Result<Option<LegalInfo>, DbError> {
+    let rows = db
+        .query_raw_params(
+            "SELECT * FROM legal_info WHERE id = ?",
+            &[DatabaseValue::Int64(id)],
+        )
+        .await
+        .map_err(|e| DbError::Database(e.to_string()))?;
+
+    Ok(rows.first().map(row_to_legal))
+}
+
 // ---------------------------------------------------------------------------
 // Sources CRUD
 // ---------------------------------------------------------------------------
