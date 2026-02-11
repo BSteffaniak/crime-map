@@ -118,6 +118,7 @@ fn build_system_prompt(context: &AgentContext) -> String {
 10. Use category names in SCREAMING_SNAKE_CASE when calling tools (e.g., "VIOLENT", "PROPERTY").
 11. State abbreviations should be uppercase 2-letter codes (e.g., "IL", "DC", "CA").
 12. Tool performance: rank_areas is the most expensive tool — it joins incidents to census tracts and aggregates by neighborhood. For large cities, always include date filters or a category filter. If rank_areas times out, fall back to count_incidents or top_crime_types which are much faster. compare_periods runs two count queries internally, so it can also be slow without filters.
+13. If a tool result contains a DATA TRUNCATED warning, the data is INCOMPLETE. Do NOT estimate, extrapolate, or fabricate totals from partial results. Instead, call the tool again with narrower filters (shorter date range, specific category, etc.) to get complete results. Never present numbers you did not directly receive from a tool.
 
 Be concise but thorough. Always cite the actual numbers from tool results."#,
         cities = cities,
@@ -371,7 +372,16 @@ pub async fn run_agent(
                             // Truncate large results to avoid overwhelming the LLM
                             let truncated = if raw.len() > MAX_TOOL_RESULT_BYTES {
                                 let cut = &raw[..MAX_TOOL_RESULT_BYTES];
-                                format!("{cut}... (truncated, {summary})")
+                                format!(
+                                    "{cut}\n\n[DATA TRUNCATED — only the first \
+                                     {MAX_TOOL_RESULT_BYTES} bytes of {total} bytes \
+                                     are shown. This data is INCOMPLETE. Do NOT \
+                                     estimate, extrapolate, or infer totals from \
+                                     partial results. Call the tool again with \
+                                     narrower filters (e.g. date range, category) \
+                                     to get complete results.]",
+                                    total = raw.len(),
+                                )
                             } else {
                                 raw
                             };

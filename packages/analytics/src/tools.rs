@@ -16,10 +16,32 @@ use switchy_database::{Database, DatabaseValue};
 
 use crate::AnalyticsError;
 
+/// Parses a date string like `"2024-01-01"` into a `NaiveDateTime` at midnight.
+///
+/// `switchy_database` sends parameters in binary format, so date strings
+/// must be converted to `DatabaseValue::DateTime` rather than passed as
+/// `DatabaseValue::String` — Postgres cannot decode raw UTF-8 bytes as
+/// a binary `timestamptz`.
+fn parse_date(s: &str) -> Result<chrono::NaiveDateTime, AnalyticsError> {
+    // Try full datetime first, then date-only
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+        return Ok(dt);
+    }
+    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .map(|d| d.and_hms_opt(0, 0, 0).unwrap_or_default())
+        .map_err(|e| AnalyticsError::Query {
+            message: format!("Invalid date '{s}': {e}. Expected format: YYYY-MM-DD"),
+        })
+}
+
 /// Builds a WHERE clause fragment and parameter list for the common
 /// city/state/geoid/date/category/severity filters.
 ///
 /// Returns `(where_fragments, params, next_param_index)`.
+///
+/// # Errors
+///
+/// Returns [`AnalyticsError`] if a date string cannot be parsed.
 #[allow(clippy::too_many_arguments)]
 fn build_common_filters(
     city: Option<&str>,
@@ -32,7 +54,7 @@ fn build_common_filters(
     subcategory: Option<&str>,
     severity_min: Option<u8>,
     start_idx: u32,
-) -> (Vec<String>, Vec<DatabaseValue>, u32) {
+) -> Result<(Vec<String>, Vec<DatabaseValue>, u32), AnalyticsError> {
     let mut frags = Vec::new();
     let mut params: Vec<DatabaseValue> = Vec::new();
     let mut idx = start_idx;
@@ -64,14 +86,16 @@ fn build_common_filters(
     }
 
     if let Some(from) = date_from {
-        frags.push(format!("i.occurred_at >= CAST(${idx} AS timestamptz)"));
-        params.push(DatabaseValue::String(from.to_string()));
+        let dt = parse_date(from)?;
+        frags.push(format!("i.occurred_at >= ${idx}"));
+        params.push(DatabaseValue::DateTime(dt));
         idx += 1;
     }
 
     if let Some(to) = date_to {
-        frags.push(format!("i.occurred_at <= CAST(${idx} AS timestamptz)"));
-        params.push(DatabaseValue::String(to.to_string()));
+        let dt = parse_date(to)?;
+        frags.push(format!("i.occurred_at <= ${idx}"));
+        params.push(DatabaseValue::DateTime(dt));
         idx += 1;
     }
 
@@ -97,7 +121,17 @@ fn build_common_filters(
         idx += 1;
     }
 
-    (frags, params, idx)
+    Ok((frags, params, idx))
+}
+
+/// Returns `true` if any category-related filter is active, meaning
+/// queries need to JOIN `crime_categories`.
+fn needs_category_join(
+    category: Option<&str>,
+    subcategory: Option<&str>,
+    severity_min: Option<u8>,
+) -> bool {
+    category.is_some() || subcategory.is_some() || severity_min.is_some_and(|s| s > 1)
 }
 
 fn where_clause(frags: &[String]) -> String {
@@ -161,17 +195,31 @@ pub async fn count_incidents(
         params.subcategory.as_deref(),
         params.severity_min,
         1,
-    );
+    )?;
 
     let wc = where_clause(&frags);
-
-    // Total count
-    let count_sql = format!(
-        "SELECT COUNT(*) as total
-         FROM crime_incidents i
-         JOIN crime_categories c ON i.category_id = c.id
-         {wc}"
+    let has_cat_filter = needs_category_join(
+        params.category.as_deref(),
+        params.subcategory.as_deref(),
+        params.severity_min,
     );
+
+    // Total count — skip the category join when no category filters are
+    // active, which lets Postgres use a much faster index-only scan.
+    let count_sql = if has_cat_filter {
+        format!(
+            "SELECT COUNT(*) as total
+             FROM crime_incidents i
+             JOIN crime_categories c ON i.category_id = c.id
+             {wc}"
+        )
+    } else {
+        format!(
+            "SELECT COUNT(*) as total
+             FROM crime_incidents i
+             {wc}"
+        )
+    };
 
     let rows = db.query_raw_params(&count_sql, &db_params).await?;
     let total: i64 = rows.first().map_or(0, |r| r.to_value("total").unwrap_or(0));
@@ -254,14 +302,16 @@ pub async fn rank_areas(
     }
 
     if let Some(ref from) = params.date_from {
-        frags.push(format!("i.occurred_at >= CAST(${idx} AS timestamptz)"));
-        db_params.push(DatabaseValue::String(from.clone()));
+        let dt = parse_date(from)?;
+        frags.push(format!("i.occurred_at >= ${idx}"));
+        db_params.push(DatabaseValue::DateTime(dt));
         idx += 1;
     }
 
     if let Some(ref to) = params.date_to {
-        frags.push(format!("i.occurred_at <= CAST(${idx} AS timestamptz)"));
-        db_params.push(DatabaseValue::String(to.clone()));
+        let dt = parse_date(to)?;
+        frags.push(format!("i.occurred_at <= ${idx}"));
+        db_params.push(DatabaseValue::DateTime(dt));
         idx += 1;
     }
 
@@ -560,14 +610,19 @@ pub async fn get_trend(
         None,
         None,
         1,
-    );
+    )?;
 
     let wc = where_clause(&frags);
+    let cat_join = if needs_category_join(params.category.as_deref(), None, None) {
+        "JOIN crime_categories c ON i.category_id = c.id"
+    } else {
+        ""
+    };
 
     let sql = format!(
         "SELECT date_trunc('{trunc}', i.occurred_at)::date::text as period, COUNT(*) as cnt
          FROM crime_incidents i
-         JOIN crime_categories c ON i.category_id = c.id
+         {cat_join}
          {wc}
          GROUP BY period
          ORDER BY period"
@@ -623,7 +678,7 @@ pub async fn top_crime_types(
         None,
         None,
         1,
-    );
+    )?;
 
     let wc = where_clause(&frags);
 
@@ -680,10 +735,9 @@ pub async fn top_crime_types(
         })
         .collect();
 
-    // Total
+    // Total — no category filter in the WHERE clause, so skip the join
     let total_sql = format!(
         "SELECT COUNT(*) as total FROM crime_incidents i
-         JOIN crime_categories c ON i.category_id = c.id
          {wc}"
     );
     let total_rows = db.query_raw_params(&total_sql, &db_params).await?;
