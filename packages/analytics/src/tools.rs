@@ -38,7 +38,7 @@ fn build_common_filters(
     let mut idx = start_idx;
 
     if let Some(city) = city {
-        frags.push(format!("lower(i.city) = lower(${idx})"));
+        frags.push(format!("i.city ILIKE ${idx}"));
         params.push(DatabaseValue::String(city.to_string()));
         idx += 1;
     }
@@ -238,7 +238,7 @@ pub async fn rank_areas(
         db_params.push(DatabaseValue::String(place_geoid.clone()));
         idx += 1;
     } else if let Some(ref city) = params.city {
-        frags.push(format!("lower(i.city) = lower(${idx})"));
+        frags.push(format!("i.city ILIKE ${idx}"));
         db_params.push(DatabaseValue::String(city.clone()));
         idx += 1;
     } else {

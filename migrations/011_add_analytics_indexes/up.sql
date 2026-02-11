@@ -1,11 +1,14 @@
--- Indexes to speed up analytics queries that filter by city/state.
--- The AI agent frequently queries by city+state, and without these the
--- planner falls back to sequential scans on the full incidents table.
+-- Enable trigram extension for ILIKE-backed index scans.
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
--- Composite index on (state, city) covers the most common filter pattern.
--- Using lower(city) so we can do exact-match comparisons instead of ILIKE.
-CREATE INDEX idx_incidents_state_city ON crime_incidents (state, lower(city));
+-- GIN trigram indexes allow the planner to use index scans for ILIKE
+-- patterns (both exact like 'Washington' and substring like '%capitol%').
+-- This replaces sequential scans on the full incidents table for the
+-- city filter used by every analytics tool.
+CREATE INDEX idx_incidents_city_trgm ON crime_incidents USING gin (city gin_trgm_ops);
 
--- Composite covering index for the category join + city/state filter.
--- This lets Postgres do an index-only scan for count queries.
-CREATE INDEX idx_incidents_city_state_category ON crime_incidents (state, lower(city), category_id);
+-- Plain btree on state for exact-match equality filters.
+CREATE INDEX idx_incidents_state ON crime_incidents (state);
+
+-- Trigram index on census place names for search_locations queries.
+CREATE INDEX idx_places_name_trgm ON census_places USING gin (name gin_trgm_ops);
