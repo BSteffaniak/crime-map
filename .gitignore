@@ -9,6 +9,7 @@ Cargo.lock
 # Data files (generated, large)
 data/generated/
 data/downloads/
+*.db
 
 # Node/Frontend
 app/node_modules/
