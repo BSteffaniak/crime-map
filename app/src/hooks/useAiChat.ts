@@ -1,6 +1,11 @@
 import { useCallback, useRef, useState } from "react";
 
 /** Types for AI agent events streamed via SSE. */
+export interface AiConversationIdEvent {
+  type: "conversationId";
+  id: string;
+}
+
 export interface AiThinkingEvent {
   type: "thinking";
   message: string;
@@ -33,6 +38,7 @@ export interface AiDoneEvent {
 }
 
 export type AiEvent =
+  | AiConversationIdEvent
   | AiThinkingEvent
   | AiToolCallEvent
   | AiToolResultEvent
@@ -64,6 +70,7 @@ export function useAiChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const conversationIdRef = useRef<string | null>(null);
 
   const ask = useCallback(async (question: string) => {
     // Cancel any in-flight request
@@ -91,10 +98,15 @@ export function useAiChat() {
     abortRef.current = controller;
 
     try {
-      const resp = await fetch(
-        `/api/ai/ask?q=${encodeURIComponent(question)}`,
-        { signal: controller.signal },
-      );
+      const resp = await fetch("/api/ai/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question,
+          conversationId: conversationIdRef.current,
+        }),
+        signal: controller.signal,
+      });
 
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({ error: "Request failed" }));
@@ -142,6 +154,13 @@ export function useAiChat() {
 
           try {
             const event: AiEvent = JSON.parse(json);
+
+            // Store conversation ID from the server
+            if (event.type === "conversationId") {
+              conversationIdRef.current = event.id;
+              continue;
+            }
+
             setMessages((prev) =>
               prev.map((m) => {
                 if (m.id !== assistantId) return m;
@@ -184,6 +203,7 @@ export function useAiChat() {
 
   const clear = useCallback(() => {
     abortRef.current?.abort();
+    conversationIdRef.current = null;
     setMessages([]);
     setLoading(false);
   }, []);

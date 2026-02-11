@@ -58,6 +58,13 @@ pub enum AiError {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum AgentEvent {
+    /// The conversation ID for this session.
+    ///
+    /// Sent as the first event so the frontend can store it for follow-ups.
+    ConversationId {
+        /// The unique conversation identifier.
+        id: String,
+    },
     /// Agent is thinking / planning.
     Thinking {
         /// Brief description of what the agent is considering.

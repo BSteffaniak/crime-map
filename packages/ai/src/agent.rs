@@ -73,8 +73,14 @@ pub struct AgentContext {
 
 /// Runs the AI agent loop for a user question.
 ///
+/// If `prior_messages` is provided, the conversation continues from that
+/// history. Otherwise a fresh conversation is started.
+///
 /// Sends [`AgentEvent`]s through the provided channel as the agent works.
 /// The final event will be either `AgentEvent::Answer` or `AgentEvent::Error`.
+///
+/// Returns the full conversation `messages` vec on success, so the caller
+/// can store it for session continuity.
 ///
 /// # Errors
 ///
@@ -84,15 +90,17 @@ pub async fn run_agent(
     db: &dyn Database,
     context: &AgentContext,
     question: &str,
+    prior_messages: Option<Vec<Message>>,
     tx: mpsc::Sender<AgentEvent>,
-) -> Result<(), AiError> {
+) -> Result<Vec<Message>, AiError> {
     let system_prompt = build_system_prompt(context);
     let tools = tool_definitions();
 
-    let mut messages = vec![Message {
+    let mut messages = prior_messages.unwrap_or_default();
+    messages.push(Message {
         role: "user".to_string(),
         content: MessageContent::Text(question.to_string()),
-    }];
+    });
 
     for iteration in 0..MAX_ITERATIONS {
         log::info!("Agent iteration {iteration}");
@@ -120,7 +128,7 @@ pub async fn run_agent(
                 // No actual tool calls despite stop_reason — treat as final answer
                 let text = extract_text(&response.content);
                 let _ = tx.send(AgentEvent::Answer { text }).await;
-                return Ok(());
+                return Ok(messages);
             }
 
             // Add assistant message with all content blocks
@@ -184,8 +192,13 @@ pub async fn run_agent(
         } else {
             // Model is done — extract final answer
             let text = extract_text(&response.content);
+            // Add assistant's final answer to the history
+            messages.push(Message {
+                role: "assistant".to_string(),
+                content: MessageContent::Blocks(response.content),
+            });
             let _ = tx.send(AgentEvent::Answer { text }).await;
-            return Ok(());
+            return Ok(messages);
         }
     }
 

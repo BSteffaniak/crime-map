@@ -526,24 +526,34 @@ fn parse_bbox(s: &str) -> Option<BoundingBox> {
     }
 }
 
-/// Query parameters for the AI ask endpoint.
+/// JSON body for the AI ask endpoint.
 #[derive(Debug, serde::Deserialize)]
-pub struct AiQueryParams {
+#[serde(rename_all = "camelCase")]
+pub struct AiAskRequest {
     /// The user's natural-language question.
-    pub q: String,
+    pub question: String,
+    /// Conversation ID to continue a prior session. Omit or `null` for new conversations.
+    pub conversation_id: Option<String>,
 }
 
-/// `GET /api/ai/ask?q=...`
+/// `POST /api/ai/ask`
 ///
 /// Server-Sent Events endpoint that streams AI agent progress and final
 /// answer. The agent interprets the user's question, calls analytical
 /// tools against the crime database, and produces a markdown answer.
-pub async fn ai_ask(state: web::Data<AppState>, params: web::Query<AiQueryParams>) -> HttpResponse {
-    let question = params.q.trim().to_string();
+///
+/// Supports multi-turn conversations: pass the `conversationId` from a
+/// prior response to continue the same conversation with full context.
+#[allow(clippy::too_many_lines)]
+pub async fn ai_ask(
+    state: web::Data<AppState>,
+    body: web::Json<AiAskRequest>,
+) -> HttpResponse {
+    let question = body.question.trim().to_string();
 
     if question.is_empty() {
         return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Query parameter 'q' is required"
+            "error": "Field 'question' is required"
         }));
     }
 
@@ -564,8 +574,36 @@ pub async fn ai_ask(state: web::Data<AppState>, params: web::Query<AiQueryParams
         }
     };
 
+    // Resolve or create conversation ID
+    let conversation_id = body
+        .conversation_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    // Load prior messages from session (if resuming)
+    let prior_messages = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut sessions = state.sessions.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // Lazy cleanup: remove expired sessions
+        sessions
+            .retain(|_, s| now.saturating_sub(s.last_accessed) < super::SESSION_EXPIRY_SECS);
+
+        // Load messages from existing session, or None for new conversation
+        sessions.get_mut(&conversation_id).map(|session| {
+            session.last_accessed = now;
+            session.messages.clone()
+        })
+    };
+
     let db = state.db.clone();
     let context = state.ai_context.clone();
+    let sessions = state.sessions.clone();
+    let conv_id = conversation_id.clone();
 
     // Create channel for agent events
     let (tx, mut rx) = tokio::sync::mpsc::channel::<crime_map_ai::AgentEvent>(32);
@@ -579,13 +617,30 @@ pub async fn ai_ask(state: web::Data<AppState>, params: web::Query<AiQueryParams
                 db.as_ref(),
                 &context,
                 &question,
+                prior_messages,
                 tx.clone(),
             ),
         )
         .await;
 
         match result {
-            Ok(Ok(())) => {}
+            Ok(Ok(final_messages)) => {
+                // Store the updated conversation history
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+
+                if let Ok(mut sessions) = sessions.write() {
+                    sessions.insert(
+                        conv_id,
+                        super::ConversationSession {
+                            messages: final_messages,
+                            last_accessed: now,
+                        },
+                    );
+                }
+            }
             Ok(Err(e)) => {
                 log::error!("Agent error: {e}");
                 let _ = tx
@@ -607,6 +662,13 @@ pub async fn ai_ask(state: web::Data<AppState>, params: web::Query<AiQueryParams
 
     // Stream events as SSE
     let stream = async_stream::stream! {
+        // First event: send the conversation ID so the frontend can store it
+        let conv_event = crime_map_ai::AgentEvent::ConversationId {
+            id: conversation_id,
+        };
+        let json = serde_json::to_string(&conv_event).unwrap_or_default();
+        yield Ok::<_, actix_web::Error>(actix_web::web::Bytes::from(format!("data: {json}\n\n")));
+
         while let Some(event) = rx.recv().await {
             let json = serde_json::to_string(&event).unwrap_or_default();
             let sse = format!("data: {json}\n\n");
