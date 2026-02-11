@@ -1,0 +1,33 @@
+[package]
+authors = { workspace = true }
+description = "Persistent AI conversation storage and CLI for crime map"
+edition = { workspace = true }
+license = { workspace = true }
+name = "crime_map_conversations"
+repository = { workspace = true }
+version = "0.1.0"
+
+[[bin]]
+name = "crime_map_conversations"
+path = "src/main.rs"
+
+[dependencies]
+crime_map_ai = { workspace = true }
+
+chrono = { workspace = true }
+clap = { workspace = true }
+log = { workspace = true }
+moosicbox_json_utils = { workspace = true, features = ["database", "rusqlite"] }
+pretty_env_logger = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+switchy_database = { workspace = true, features = ["sqlite-rusqlite"] }
+switchy_database_connection = { workspace = true, features = [
+  "sqlite-rusqlite",
+] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+
+[features]
+default = []
+fail-on-warnings = []

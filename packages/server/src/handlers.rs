@@ -544,6 +544,7 @@ pub struct AiAskRequest {
 ///
 /// Supports multi-turn conversations: pass the `conversationId` from a
 /// prior response to continue the same conversation with full context.
+/// Conversation history is persisted to `SQLite` between requests.
 #[allow(clippy::too_many_lines)]
 pub async fn ai_ask(state: web::Data<AppState>, body: web::Json<AiAskRequest>) -> HttpResponse {
     let question = body.question.trim().to_string();
@@ -577,31 +578,23 @@ pub async fn ai_ask(state: web::Data<AppState>, body: web::Json<AiAskRequest>) -
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    // Load prior messages from session (if resuming)
-    let prior_messages = {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let mut sessions = state
-            .sessions
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        // Lazy cleanup: remove expired sessions
-        sessions.retain(|_, s| now.saturating_sub(s.last_accessed) < super::SESSION_EXPIRY_SECS);
-
-        // Load messages from existing session, or None for new conversation
-        sessions.get_mut(&conversation_id).map(|session| {
-            session.last_accessed = now;
-            session.messages.clone()
-        })
+    // Load prior messages from persistent storage
+    let prior_messages = match crime_map_conversations::load_messages(
+        state.conversations_db.as_ref(),
+        &conversation_id,
+    )
+    .await
+    {
+        Ok(msgs) => msgs,
+        Err(e) => {
+            log::error!("Failed to load conversation {conversation_id}: {e}");
+            None
+        }
     };
 
     let db = state.db.clone();
     let context = state.ai_context.clone();
-    let sessions = state.sessions.clone();
+    let conversations_db = state.conversations_db.clone();
     let conv_id = conversation_id.clone();
 
     // Create channel for agent events
@@ -624,20 +617,15 @@ pub async fn ai_ask(state: web::Data<AppState>, body: web::Json<AiAskRequest>) -
 
         match result {
             Ok(Ok(final_messages)) => {
-                // Store the updated conversation history
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-
-                if let Ok(mut sessions) = sessions.write() {
-                    sessions.insert(
-                        conv_id,
-                        super::ConversationSession {
-                            messages: final_messages,
-                            last_accessed: now,
-                        },
-                    );
+                // Persist the updated conversation history to SQLite
+                if let Err(e) = crime_map_conversations::save_conversation(
+                    conversations_db.as_ref(),
+                    &conv_id,
+                    &final_messages,
+                )
+                .await
+                {
+                    log::error!("Failed to save conversation {conv_id}: {e}");
                 }
             }
             Ok(Err(e)) => {

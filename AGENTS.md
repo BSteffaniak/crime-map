@@ -66,12 +66,19 @@
 
 ### Database
 
-- Uses `switchy_database` and `switchy_schema` from MoosicBox for database
-  abstraction and migrations
+- **Database abstraction**: Always use `switchy_database` and
+  `switchy_database_connection` for ALL database access — both PostgreSQL
+  and SQLite. Never use `rusqlite`, `tokio-postgres`, or other database
+  drivers directly. Use `init_sqlite_rusqlite` from
+  `switchy_database_connection` for SQLite connections and
+  `query_raw_params`/`exec_raw_params`/`exec_raw` for all queries.
+- Uses `switchy_schema` from MoosicBox for PostGIS migrations
 - PostGIS spatial queries use `query_raw_params()` with raw SQL
 - Non-spatial queries use the typed query builder where possible
-- Migrations are raw SQL files in `migrations/` using switchy_schema's embedded
-  migration runner
+- PostGIS migrations are raw SQL files in `migrations/` using
+  switchy_schema's embedded migration runner
+- SQLite databases (sidebar, conversations, discovery) create their
+  schemas at runtime via `exec_raw("CREATE TABLE IF NOT EXISTS ...")`
 - PostGIS container runs on port 5440 to avoid conflicts
 
 ### Frontend

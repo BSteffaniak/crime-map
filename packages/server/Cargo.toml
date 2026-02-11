@@ -21,6 +21,7 @@ crime_map_geography_models = { workspace = true }
 crime_map_analytics = { workspace = true }
 crime_map_analytics_models = { workspace = true }
 crime_map_ai = { workspace = true }
+crime_map_conversations = { workspace = true }
 moosicbox_json_utils = { workspace = true, features = ["database"] }
 switchy_database = { workspace = true, features = [
   "postgres-raw",

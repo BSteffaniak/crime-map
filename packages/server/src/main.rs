@@ -8,32 +8,20 @@
 //! (`PMTiles`) for the `MapLibre` frontend. Sidebar queries are served
 //! from a pre-generated `SQLite` database with R-tree spatial indexing.
 //! AI-powered queries are served via SSE streaming from the `/api/ai/ask`
-//! endpoint.
+//! endpoint. Conversation history is persisted in a dedicated `SQLite`
+//! database at `data/conversations.db`.
 
 mod handlers;
 
 use actix_cors::Cors;
 use actix_files::Files;
 use actix_web::{App, HttpServer, middleware, web};
-use crime_map_ai::providers::Message;
 use crime_map_database::{db, run_migrations};
 use crime_map_geography::queries as geo_queries;
-use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use switchy_database::Database;
 use switchy_database_connection::init_sqlite_rusqlite;
-
-/// A stored conversation session.
-pub struct ConversationSession {
-    /// The full LLM message history (user, assistant, tool calls, tool results).
-    pub messages: Vec<Message>,
-    /// Unix timestamp (seconds) of last access.
-    pub last_accessed: u64,
-}
-
-/// Maximum session idle time before expiry (30 minutes).
-const SESSION_EXPIRY_SECS: u64 = 30 * 60;
 
 /// Shared application state.
 pub struct AppState {
@@ -46,8 +34,8 @@ pub struct AppState {
     pub count_db: Arc<Mutex<duckdb::Connection>>,
     /// AI agent context (available cities, date range).
     pub ai_context: Arc<crime_map_ai::agent::AgentContext>,
-    /// Active conversation sessions keyed by conversation ID.
-    pub sessions: Arc<RwLock<BTreeMap<String, ConversationSession>>>,
+    /// `SQLite` database for persistent AI conversation storage.
+    pub conversations_db: Arc<dyn Database>,
 }
 
 #[actix_web::main]
@@ -79,6 +67,12 @@ async fn main() -> std::io::Result<()> {
     )
     .expect("Failed to open DuckDB count database");
 
+    log::info!("Opening conversations database...");
+    let conversations_db =
+        crime_map_conversations::open_db(Path::new(crime_map_conversations::DEFAULT_DB_PATH))
+            .await
+            .expect("Failed to open conversations database");
+
     // Build AI context: discover available cities and date range
     log::info!("Building AI context...");
     let available_cities = geo_queries::get_available_cities(db_conn.as_ref())
@@ -98,7 +92,7 @@ async fn main() -> std::io::Result<()> {
         sidebar_db: Arc::from(sidebar_db),
         count_db: Arc::new(Mutex::new(count_db)),
         ai_context: Arc::new(ai_context),
-        sessions: Arc::new(RwLock::new(BTreeMap::new())),
+        conversations_db: Arc::from(conversations_db),
     });
 
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".to_string());
