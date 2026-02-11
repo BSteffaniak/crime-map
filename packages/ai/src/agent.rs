@@ -2,6 +2,21 @@
 //!
 //! Implements the agentic tool-use loop: user question -> LLM decides
 //! tools -> execute tools -> feed results back -> repeat until final answer.
+//!
+//! The agent is governed by [`AgentLimits`] which provide multi-pronged
+//! safeguards:
+//!
+//! - **Per-tool timeout**: individual tool calls that exceed the limit get
+//!   an error injected back into the conversation so the LLM can retry or
+//!   pivot.
+//! - **Per-LLM-call timeout**: prevents hangs when the provider is slow.
+//! - **Tool call budget**: soft limit nudges the agent to wrap up; hard
+//!   limit forces a final answer.
+//! - **Duration budget**: soft limit nudges; hard limit forces graceful
+//!   termination with whatever findings the agent has so far.
+
+use std::fmt::Write;
+use std::time::{Duration, Instant};
 
 use crime_map_analytics::tools;
 use crime_map_analytics_models::{
@@ -14,8 +29,56 @@ use tokio::sync::mpsc;
 use crate::providers::{ContentBlock, LlmProvider, Message, MessageContent, StopReason};
 use crate::{AgentEvent, AiError};
 
-/// Maximum number of agent loop iterations to prevent infinite loops.
-const MAX_ITERATIONS: u32 = 10;
+/// Maximum number of LLM round-trips to prevent infinite loops.
+const MAX_ITERATIONS: u32 = 25;
+
+/// Maximum size of a tool result JSON string before truncation.
+/// Prevents overwhelming the LLM context window.
+const MAX_TOOL_RESULT_BYTES: usize = 8000;
+
+/// Configuration for agent resource limits.
+///
+/// All limits use a soft/hard pattern: the soft limit injects advisory
+/// context into the conversation telling the agent to wrap up, while
+/// the hard limit forces termination.
+pub struct AgentLimits {
+    /// Timeout for a single tool execution (e.g. a `PostGIS` query).
+    /// If exceeded, the tool returns an error and the agent continues.
+    pub per_tool_timeout: Duration,
+
+    /// Timeout for a single LLM provider call.
+    /// If exceeded, the agent terminates with an error.
+    pub per_llm_timeout: Duration,
+
+    /// Soft limit on total tool calls. When reached, a system message is
+    /// injected telling the agent to start wrapping up.
+    pub tool_call_soft_limit: u32,
+
+    /// Hard limit on total tool calls. When reached, tool dispatch stops
+    /// and the agent is forced to produce a final answer.
+    pub tool_call_hard_limit: u32,
+
+    /// Soft duration limit. When elapsed, a system message is injected
+    /// telling the agent time is running low.
+    pub duration_soft_limit: Duration,
+
+    /// Hard duration limit. When elapsed, the agent is forced to produce
+    /// a final answer with whatever it has gathered.
+    pub duration_hard_limit: Duration,
+}
+
+impl Default for AgentLimits {
+    fn default() -> Self {
+        Self {
+            per_tool_timeout: Duration::from_secs(30),
+            per_llm_timeout: Duration::from_secs(60),
+            tool_call_soft_limit: 25,
+            tool_call_hard_limit: 50,
+            duration_soft_limit: Duration::from_secs(90),
+            duration_hard_limit: Duration::from_secs(120),
+        }
+    }
+}
 
 /// System prompt for the crime data AI agent.
 fn build_system_prompt(context: &AgentContext) -> String {
@@ -72,6 +135,34 @@ pub struct AgentContext {
     pub max_date: Option<String>,
 }
 
+/// Mutable state tracked across the agent loop for enforcing limits.
+struct AgentBudget {
+    /// When the agent started running.
+    start: Instant,
+    /// Total tool calls executed so far.
+    tool_calls: u32,
+    /// Whether the soft tool-call warning has been injected.
+    tool_soft_warned: bool,
+    /// Whether the soft duration warning has been injected.
+    duration_soft_warned: bool,
+}
+
+impl AgentBudget {
+    fn new() -> Self {
+        Self {
+            start: Instant::now(),
+            tool_calls: 0,
+            tool_soft_warned: false,
+            duration_soft_warned: false,
+        }
+    }
+
+    /// Returns the elapsed time since the agent started.
+    fn elapsed(&self) -> Duration {
+        self.start.elapsed()
+    }
+}
+
 /// Runs the AI agent loop for a user question.
 ///
 /// If `prior_messages` is provided, the conversation continues from that
@@ -86,16 +177,19 @@ pub struct AgentContext {
 /// # Errors
 ///
 /// Returns [`AiError`] if the agent loop fails fatally.
+#[allow(clippy::too_many_lines)]
 pub async fn run_agent(
     provider: &dyn LlmProvider,
     db: &dyn Database,
     context: &AgentContext,
     question: &str,
     prior_messages: Option<Vec<Message>>,
+    limits: &AgentLimits,
     tx: mpsc::Sender<AgentEvent>,
 ) -> Result<Vec<Message>, AiError> {
     let system_prompt = build_system_prompt(context);
     let tools = tool_definitions();
+    let mut budget = AgentBudget::new();
 
     let mut messages = prior_messages.unwrap_or_default();
     messages.push(Message {
@@ -104,19 +198,98 @@ pub async fn run_agent(
     });
 
     for iteration in 0..MAX_ITERATIONS {
-        log::info!("Agent iteration {iteration}");
+        log::info!(
+            "Agent iteration {iteration} (tool_calls={}, elapsed={:.1}s)",
+            budget.tool_calls,
+            budget.elapsed().as_secs_f64(),
+        );
+
+        // ── Duration hard limit check ─────────────────────────────────
+        if budget.elapsed() >= limits.duration_hard_limit {
+            log::warn!(
+                "Agent hit duration hard limit ({:.0}s). Forcing final answer.",
+                limits.duration_hard_limit.as_secs_f64(),
+            );
+            return force_final_answer(
+                provider,
+                &system_prompt,
+                &mut messages,
+                &tools,
+                limits,
+                &tx,
+                "You have exceeded the maximum allowed time. Provide your final answer NOW \
+                 using only the information you have gathered so far. Do NOT call any more tools.",
+            )
+            .await;
+        }
+
+        // ── Duration soft limit check ─────────────────────────────────
+        if !budget.duration_soft_warned && budget.elapsed() >= limits.duration_soft_limit {
+            budget.duration_soft_warned = true;
+            log::info!("Agent hit duration soft limit. Injecting wrap-up advisory.");
+            inject_system_context(
+                &mut messages,
+                &format!(
+                    "NOTICE: You have been running for {:.0} seconds. You are approaching the \
+                     time limit. Please finish your analysis and provide your final answer \
+                     within the next 1-2 tool calls.",
+                    budget.elapsed().as_secs_f64(),
+                ),
+            );
+        }
+
+        // ── Tool budget hard limit check ──────────────────────────────
+        if budget.tool_calls >= limits.tool_call_hard_limit {
+            log::warn!(
+                "Agent hit tool call hard limit ({}). Forcing final answer.",
+                limits.tool_call_hard_limit,
+            );
+            return force_final_answer(
+                provider,
+                &system_prompt,
+                &mut messages,
+                &tools,
+                limits,
+                &tx,
+                "You have used the maximum number of tool calls. Provide your final answer NOW \
+                 using only the information you have gathered so far. Do NOT call any more tools.",
+            )
+            .await;
+        }
 
         let _ = tx
             .send(AgentEvent::Thinking {
                 message: if iteration == 0 {
                     "Analyzing your question...".to_string()
                 } else {
-                    "Processing results and thinking...".to_string()
+                    format!(
+                        "Processing results and thinking... ({} tool calls, {:.0}s elapsed)",
+                        budget.tool_calls,
+                        budget.elapsed().as_secs_f64(),
+                    )
                 },
             })
             .await;
 
-        let response = provider.chat(&system_prompt, &messages, &tools).await?;
+        // ── LLM call with timeout ─────────────────────────────────────
+        let Ok(response) = tokio::time::timeout(
+            limits.per_llm_timeout,
+            provider.chat(&system_prompt, &messages, &tools),
+        )
+        .await
+        else {
+            log::error!(
+                "LLM call timed out after {:.0}s",
+                limits.per_llm_timeout.as_secs_f64()
+            );
+            return Err(AiError::Provider {
+                message: format!(
+                    "LLM provider did not respond within {:.0} seconds. Please try again.",
+                    limits.per_llm_timeout.as_secs_f64()
+                ),
+            });
+        };
+        let response = response?;
 
         // Check if the model wants to use tools
         if response.stop_reason == StopReason::ToolUse {
@@ -143,6 +316,18 @@ pub async fn run_agent(
 
             for block in &response.content {
                 if let ContentBlock::ToolUse { id, name, input } = block {
+                    // Check tool budget before dispatching
+                    if budget.tool_calls >= limits.tool_call_hard_limit {
+                        log::warn!("Tool budget exhausted, skipping tool call: {name}");
+                        tool_results.push(ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: "Tool call limit reached. You must provide your final \
+                                      answer now using the data you have already gathered."
+                                .to_string(),
+                        });
+                        continue;
+                    }
+
                     let _ = tx
                         .send(AgentEvent::ToolCall {
                             tool: name.clone(),
@@ -150,7 +335,28 @@ pub async fn run_agent(
                         })
                         .await;
 
-                    let result = execute_tool(db, name.as_str(), input).await;
+                    budget.tool_calls += 1;
+
+                    // ── Per-tool timeout ───────────────────────────────
+                    let result = tokio::time::timeout(
+                        limits.per_tool_timeout,
+                        execute_tool(db, name.as_str(), input),
+                    )
+                    .await
+                    .unwrap_or_else(|_| {
+                        log::warn!(
+                            "Tool '{name}' timed out after {:.0}s",
+                            limits.per_tool_timeout.as_secs_f64()
+                        );
+                        Err(AiError::Provider {
+                            message: format!(
+                                "Tool '{name}' timed out after {:.0} seconds. \
+                                 Try a more specific query, add filters to narrow the \
+                                 scope, or use a different approach.",
+                                limits.per_tool_timeout.as_secs_f64()
+                            ),
+                        })
+                    });
 
                     let (summary, result_json) = match &result {
                         Ok(json) => {
@@ -182,7 +388,35 @@ pub async fn run_agent(
                         tool_use_id: id.clone(),
                         content: result_json,
                     });
+
+                    // ── Tool budget soft limit (inject after executing) ──
+                    if !budget.tool_soft_warned && budget.tool_calls >= limits.tool_call_soft_limit
+                    {
+                        budget.tool_soft_warned = true;
+                        log::info!(
+                            "Agent hit tool call soft limit ({}). Will inject wrap-up advisory.",
+                            limits.tool_call_soft_limit,
+                        );
+                    }
                 }
+            }
+
+            // Inject soft limit advisory as a text block alongside tool results
+            if budget.tool_soft_warned && !budget.duration_soft_warned {
+                // Only inject once — the flag prevents re-injection
+                let remaining = limits.tool_call_hard_limit - budget.tool_calls;
+                let mut advisory =
+                    String::from("NOTICE: You have used a significant number of tool calls. ");
+                write!(
+                    advisory,
+                    "You have approximately {remaining} tool calls remaining. \
+                     Please start forming your final answer soon."
+                )
+                .unwrap();
+                tool_results.push(ContentBlock::ToolResult {
+                    tool_use_id: "system_advisory".to_string(),
+                    content: advisory,
+                });
             }
 
             // Add tool results as a user message
@@ -208,6 +442,76 @@ pub async fn run_agent(
     })
 }
 
+/// Forces the agent to produce a final answer by injecting a directive
+/// and making one last LLM call with no tool dispatch.
+async fn force_final_answer(
+    provider: &dyn LlmProvider,
+    system_prompt: &str,
+    messages: &mut Vec<Message>,
+    tools: &[serde_json::Value],
+    limits: &AgentLimits,
+    tx: &mpsc::Sender<AgentEvent>,
+    directive: &str,
+) -> Result<Vec<Message>, AiError> {
+    inject_system_context(messages, directive);
+
+    let _ = tx
+        .send(AgentEvent::Thinking {
+            message: "Wrapping up and forming final answer...".to_string(),
+        })
+        .await;
+
+    // One final LLM call — we still pass tools but will ignore any tool_use
+    let Ok(response) = tokio::time::timeout(
+        limits.per_llm_timeout,
+        provider.chat(system_prompt, messages, tools),
+    )
+    .await
+    else {
+        // Even the wrap-up call timed out. Return a generic message.
+        let fallback = "I was unable to complete the analysis within the time limit. \
+                        Please try a more specific question."
+            .to_string();
+        let _ = tx
+            .send(AgentEvent::Answer {
+                text: fallback.clone(),
+            })
+            .await;
+        messages.push(Message {
+            role: "assistant".to_string(),
+            content: MessageContent::Text(fallback),
+        });
+        return Ok(messages.clone());
+    };
+    let response = response?;
+
+    let text = extract_text(&response.content);
+    let answer = if text.is_empty() {
+        "I was unable to form a complete answer within the resource limits. \
+         Please try a more specific question."
+            .to_string()
+    } else {
+        text
+    };
+
+    messages.push(Message {
+        role: "assistant".to_string(),
+        content: MessageContent::Blocks(response.content),
+    });
+    let _ = tx.send(AgentEvent::Answer { text: answer }).await;
+    Ok(messages.clone())
+}
+
+/// Injects a system-level advisory message into the conversation as a
+/// user message. LLM APIs don't support mid-conversation system messages,
+/// so we format it as a clearly-marked user message.
+fn inject_system_context(messages: &mut Vec<Message>, context: &str) {
+    messages.push(Message {
+        role: "user".to_string(),
+        content: MessageContent::Text(format!("[SYSTEM: {context}]")),
+    });
+}
+
 /// Extracts text content from content blocks.
 fn extract_text(blocks: &[ContentBlock]) -> String {
     blocks
@@ -222,10 +526,6 @@ fn extract_text(blocks: &[ContentBlock]) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
-
-/// Maximum size of a tool result JSON string before truncation.
-/// Prevents overwhelming the LLM context window.
-const MAX_TOOL_RESULT_BYTES: usize = 8000;
 
 /// Executes a single tool by name with the given parameters.
 async fn execute_tool(

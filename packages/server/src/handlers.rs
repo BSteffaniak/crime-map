@@ -600,16 +600,23 @@ pub async fn ai_ask(state: web::Data<AppState>, body: web::Json<AiAskRequest>) -
     // Create channel for agent events
     let (tx, mut rx) = tokio::sync::mpsc::channel::<crime_map_ai::AgentEvent>(32);
 
-    // Spawn the agent loop with a 60-second timeout
+    // The agent manages its own resource limits (per-tool timeouts,
+    // tool call budget, duration budget) via AgentLimits. A generous
+    // outer safety-net timeout remains as a last resort.
+    let limits = crime_map_ai::agent::AgentLimits::default();
+    let safety_timeout = std::time::Duration::from_secs(limits.duration_hard_limit.as_secs() + 60);
+
+    // Spawn the agent loop
     let agent_handle = tokio::spawn(async move {
         let result = tokio::time::timeout(
-            std::time::Duration::from_secs(60),
+            safety_timeout,
             crime_map_ai::agent::run_agent(
                 provider.as_ref(),
                 db.as_ref(),
                 &context,
                 &question,
                 prior_messages,
+                &limits,
                 tx.clone(),
             ),
         )
@@ -637,10 +644,13 @@ pub async fn ai_ask(state: web::Data<AppState>, body: web::Json<AiAskRequest>) -
                     .await;
             }
             Err(_) => {
-                log::error!("Agent timed out after 60 seconds");
+                // Safety-net timeout — should rarely fire since the agent
+                // has its own duration hard limit.
+                log::error!("Agent hit safety-net timeout after {safety_timeout:?}");
                 let _ = tx
                     .send(crime_map_ai::AgentEvent::Error {
-                        message: "Request timed out. Please try a simpler question.".to_string(),
+                        message: "Request exceeded the safety timeout. Please try again."
+                            .to_string(),
                     })
                     .await;
             }
