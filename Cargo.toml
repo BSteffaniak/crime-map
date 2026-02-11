@@ -23,6 +23,7 @@ members = [
   "packages/pdf",
   "packages/geocoder",
   "packages/conversations",
+  "packages/cli",
 ]
 
 resolver = "2"
@@ -46,6 +47,8 @@ repository = "https://github.com/BSteffaniak/crime-map"
 
 [workspace.dependencies]
 # Internal crime-map
+
+crime_map_conversations = { default-features = false, path = "packages/conversations" }
 crime_map_crime_models = { default-features = false, path = "packages/crime/models" }
 crime_map_source_models = { default-features = false, path = "packages/source/models" }
 crime_map_source = { default-features = false, path = "packages/source" }
@@ -68,8 +71,7 @@ crime_map_neighborhood = { default-features = false, path = "packages/neighborho
 crime_map_scraper = { default-features = false, path = "packages/scraper" }
 crime_map_pdf = { default-features = false, path = "packages/pdf" }
 crime_map_geocoder = { default-features = false, path = "packages/geocoder" }
-crime_map_conversations = { default-features = false, path = "packages/conversations" }
-
+crime_map_cli = { default-features = false, path = "packages/cli" }
 # MoosicBox / Switchy (git references)
 moosicbox_assert = { git = "https://github.com/MoosicBox/MoosicBox.git", branch = "master", default-features = false }
 moosicbox_profiles = { git = "https://github.com/MoosicBox/MoosicBox.git", branch = "master", default-features = false }
@@ -135,6 +137,10 @@ duckdb = { version = "1.4.4", default-features = false }
 indicatif = { version = "0.17.11", default-features = false }
 scraper = { version = "0.25.0", default-features = false }
 flate2 = { version = "1.1.9", default-features = false, features = ["default"] }
+console = { version = "0.16.2", default-features = false }
+dialoguer = { version = "0.12.0", default-features = false, features = [
+  "password",
+] }
 pdf-extract = { version = "0.10.0", default-features = false }
 
 # AWS SDK (optional, for Bedrock provider)

@@ -7,6 +7,10 @@ name = "crime_map_server"
 repository = { workspace = true }
 version = "0.1.0"
 
+[lib]
+name = "crime_map_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "crime_map_server"
 path = "src/main.rs"
@@ -38,6 +42,7 @@ actix-rt = { workspace = true }
 async-stream = { workspace = true }
 
 chrono = { workspace = true }
+dialoguer = { workspace = true }
 duckdb = { workspace = true }
 log = { workspace = true }
 pretty_env_logger = { workspace = true }

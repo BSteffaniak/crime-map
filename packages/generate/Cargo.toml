@@ -11,6 +11,10 @@ version = "0.1.0"
 name = "crime_map_generate"
 path = "src/main.rs"
 
+[lib]
+name = "crime_map_generate"
+path = "src/lib.rs"
+
 [dependencies]
 crime_map_crime_models = { workspace = true }
 crime_map_database_models = { workspace = true }
@@ -27,6 +31,7 @@ switchy_database_connection = { workspace = true, features = [
 
 clap = { workspace = true }
 chrono = { workspace = true }
+dialoguer = { workspace = true }
 duckdb = { workspace = true }
 log = { workspace = true }
 pretty_env_logger = { workspace = true }

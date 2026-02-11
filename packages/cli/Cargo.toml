@@ -1,0 +1,31 @@
+[package]
+authors = { workspace = true }
+description = "Interactive CLI orchestrator for the crime map toolchain"
+edition = { workspace = true }
+license = { workspace = true }
+name = "crime_map_cli"
+repository = { workspace = true }
+version = "0.1.0"
+
+[[bin]]
+name = "crime_map_cli"
+path = "src/main.rs"
+
+[dependencies]
+crime_map_ingest = { workspace = true }
+crime_map_generate = { workspace = true }
+crime_map_discover = { workspace = true }
+crime_map_server = { workspace = true }
+
+actix-web = { workspace = true }
+actix-rt = { workspace = true }
+dialoguer = { workspace = true }
+log = { workspace = true }
+pretty_env_logger = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+
+[features]
+default = ["bedrock"]
+bedrock = ["crime_map_server/bedrock"]
+duckdb-bundled = ["crime_map_generate/duckdb-bundled"]
+fail-on-warnings = []
