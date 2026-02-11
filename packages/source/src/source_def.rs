@@ -119,10 +119,10 @@ pub struct FieldMapping {
     pub occurred_at: DateExtractor,
     /// Optional field name for `reported_at` (parsed as Socrata datetime).
     pub reported_at: Option<String>,
-    /// Latitude coordinate field.
-    pub lat: CoordField,
-    /// Longitude coordinate field.
-    pub lng: CoordField,
+    /// Latitude coordinate field. `None` for sources that require geocoding.
+    pub lat: Option<CoordField>,
+    /// Longitude coordinate field. `None` for sources that require geocoding.
+    pub lng: Option<CoordField>,
     /// How to build the description string.
     pub description: DescriptionExtractor,
     /// Optional field name for block address.
@@ -557,8 +557,8 @@ impl SourceDefinition {
 
         for record in records {
             // ── Lat/lng ──────────────────────────────────────────────
-            let latitude = fields.lat.extract(record);
-            let longitude = fields.lng.extract(record);
+            let latitude = fields.lat.as_ref().and_then(|f| f.extract(record));
+            let longitude = fields.lng.as_ref().and_then(|f| f.extract(record));
 
             // Reject zero coordinates (treat as missing)
             let (latitude, longitude) = match (latitude, longitude) {
