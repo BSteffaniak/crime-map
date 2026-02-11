@@ -6,7 +6,8 @@
 //!
 //! Provides a unified entry point (`cargo crime-map`) that lets users
 //! interactively select which tool to run (ingest, generate, server,
-//! discover) and guides them through the configuration for each.
+//! discover, conversations) and guides them through the configuration
+//! for each.
 
 mod pipeline;
 
@@ -17,6 +18,7 @@ enum Tool {
     RunPipeline,
     Ingest,
     Generate,
+    Conversations,
     Server,
     Discover,
 }
@@ -26,6 +28,7 @@ impl Tool {
         Self::RunPipeline,
         Self::Ingest,
         Self::Generate,
+        Self::Conversations,
         Self::Server,
         Self::Discover,
     ];
@@ -36,6 +39,7 @@ impl Tool {
             Self::RunPipeline => "Run full pipeline",
             Self::Ingest => "Ingest data",
             Self::Generate => "Generate tiles & databases",
+            Self::Conversations => "Browse AI conversations",
             Self::Server => "Start server",
             Self::Discover => "Discover sources",
         }
@@ -61,6 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Tool::RunPipeline => pipeline::run().await?,
         Tool::Ingest => crime_map_ingest::interactive::run().await?,
         Tool::Generate => crime_map_generate::interactive::run().await?,
+        Tool::Conversations => crime_map_conversations::interactive::run().await?,
         Tool::Server => {
             // The server uses actix-web's runtime, so we need to run it
             // in a blocking task to avoid nesting tokio runtimes.

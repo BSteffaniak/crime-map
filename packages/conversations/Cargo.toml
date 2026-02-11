@@ -16,6 +16,7 @@ crime_map_ai = { workspace = true }
 
 chrono = { workspace = true }
 clap = { workspace = true }
+dialoguer = { workspace = true }
 log = { workspace = true }
 moosicbox_json_utils = { workspace = true, features = ["database", "rusqlite"] }
 pretty_env_logger = { workspace = true }

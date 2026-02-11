@@ -11,6 +11,8 @@
 //! cargo conversations delete <id>
 //! ```
 //!
+//! Running `cargo conversations` with no subcommand enters interactive mode.
+//!
 //! This binary is exposed via the cargo alias defined in `.cargo/config.toml`.
 
 use std::path::Path;
@@ -18,7 +20,7 @@ use std::path::Path;
 use clap::{Parser, Subcommand};
 use crime_map_conversations::{
     DEFAULT_DB_PATH, delete_conversation, format_conversation, get_conversation_messages,
-    list_conversations, load_messages, open_db,
+    list_conversations, load_messages, open_db, resolve_id,
 };
 
 #[derive(Parser)]
@@ -28,7 +30,7 @@ use crime_map_conversations::{
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -64,11 +66,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     pretty_env_logger::init();
     let cli = Cli::parse();
 
+    let Some(command) = cli.command else {
+        return crime_map_conversations::interactive::run().await;
+    };
+
     let db = open_db(Path::new(DEFAULT_DB_PATH)).await?;
 
-    match cli.command {
+    match command {
         Commands::List { limit } => {
-            let conversations = list_conversations(db.as_ref(), limit).await?;
+            let conversations = list_conversations(db.as_ref(), limit, 0).await?;
 
             if conversations.is_empty() {
                 println!("No conversations found.");
@@ -135,38 +141,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
-}
-
-/// Resolves a conversation ID, supporting prefix matching.
-///
-/// If the given ID is shorter than a full UUID, searches for a unique
-/// conversation whose ID starts with that prefix.
-async fn resolve_id(
-    db: &dyn switchy_database::Database,
-    id: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    // If it looks like a full UUID, use it directly
-    if id.len() >= 36 {
-        return Ok(id.to_string());
-    }
-
-    // Prefix search
-    let rows = db
-        .query_raw_params(
-            "SELECT id FROM conversations WHERE id LIKE $1 || '%' LIMIT 2",
-            &[switchy_database::DatabaseValue::String(id.to_string())],
-        )
-        .await
-        .map_err(|e| format!("Database error: {e}"))?;
-
-    match rows.len() {
-        0 => Err(format!("No conversation found matching prefix: {id}").into()),
-        1 => {
-            let full_id: String =
-                moosicbox_json_utils::database::ToValue::to_value(rows.first().unwrap(), "id")
-                    .unwrap_or_default();
-            Ok(full_id)
-        }
-        _ => Err(format!("Multiple conversations match prefix '{id}'. Be more specific.").into()),
-    }
 }

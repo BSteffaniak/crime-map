@@ -11,6 +11,8 @@
 //! Uses `switchy_database` for all database operations, following the same
 //! patterns as the discover and generate packages.
 
+pub mod interactive;
+
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -273,12 +275,16 @@ pub async fn load_messages(
 
 /// Lists recent conversations with summary information.
 ///
+/// Results are ordered by most recently updated first. Use `offset` to
+/// paginate through results.
+///
 /// # Errors
 ///
 /// Returns [`ConversationError`] if the database operation fails.
 pub async fn list_conversations(
     db: &dyn Database,
     limit: u32,
+    offset: u32,
 ) -> Result<Vec<ConversationSummary>, ConversationError> {
     let rows = db
         .query_raw_params(
@@ -286,8 +292,11 @@ pub async fn list_conversations(
                     (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) as message_count
              FROM conversations c
              ORDER BY c.updated_at DESC
-             LIMIT $1",
-            &[DatabaseValue::Int32(i32::try_from(limit).unwrap_or(i32::MAX))],
+             LIMIT $1 OFFSET $2",
+            &[
+                DatabaseValue::Int32(i32::try_from(limit).unwrap_or(i32::MAX)),
+                DatabaseValue::Int32(i32::try_from(offset).unwrap_or(0)),
+            ],
         )
         .await
         .map_err(|e| ConversationError::Database(e.to_string()))?;
@@ -360,6 +369,60 @@ pub async fn delete_conversation(
         .map_err(|e| ConversationError::Database(e.to_string()))?;
 
     Ok(deleted > 0)
+}
+
+/// Returns the total number of stored conversations.
+///
+/// # Errors
+///
+/// Returns [`ConversationError`] if the database operation fails.
+pub async fn count_conversations(db: &dyn Database) -> Result<u64, ConversationError> {
+    let rows = db
+        .query_raw_params("SELECT COUNT(*) as cnt FROM conversations", &[])
+        .await
+        .map_err(|e| ConversationError::Database(e.to_string()))?;
+
+    let count: i64 = rows.first().map_or(0, |r| r.to_value("cnt").unwrap_or(0));
+
+    #[allow(clippy::cast_sign_loss)]
+    Ok(count as u64)
+}
+
+/// Resolves a conversation ID, supporting prefix matching.
+///
+/// If the given ID is a full UUID (36+ chars), returns it directly.
+/// Otherwise, searches for a unique conversation whose ID starts with
+/// the given prefix.
+///
+/// # Errors
+///
+/// Returns an error if no conversation matches the prefix, or if
+/// multiple conversations match (ambiguous).
+pub async fn resolve_id(db: &dyn Database, id: &str) -> Result<String, Box<dyn std::error::Error>> {
+    // If it looks like a full UUID, use it directly
+    if id.len() >= 36 {
+        return Ok(id.to_string());
+    }
+
+    // Prefix search
+    let rows = db
+        .query_raw_params(
+            "SELECT id FROM conversations WHERE id LIKE $1 || '%' LIMIT 2",
+            &[DatabaseValue::String(id.to_string())],
+        )
+        .await
+        .map_err(|e| format!("Database error: {e}"))?;
+
+    match rows.len() {
+        0 => Err(format!("No conversation found matching prefix: {id}").into()),
+        1 => {
+            let full_id: String = rows
+                .first()
+                .map_or(String::new(), |r| r.to_value("id").unwrap_or_default());
+            Ok(full_id)
+        }
+        _ => Err(format!("Multiple conversations match prefix '{id}'. Be more specific.").into()),
+    }
 }
 
 // ---------------------------------------------------------------------------
