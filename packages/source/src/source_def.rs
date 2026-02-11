@@ -238,8 +238,8 @@ pub struct FieldMapping {
     pub lng: Option<CoordField>,
     /// How to build the description string.
     pub description: DescriptionExtractor,
-    /// Optional field name for block address.
-    pub block_address: Option<String>,
+    /// How to extract the block address.
+    pub block_address: Option<BlockAddressExtractor>,
     /// Optional field name for location type.
     pub location_type: Option<String>,
     /// How to extract the arrest flag.
@@ -357,6 +357,40 @@ pub enum ArrestExtractor {
         field: String,
         /// Substring to search for (case-insensitive).
         contains: String,
+    },
+}
+
+/// How to extract the block address from a JSON record.
+///
+/// Supports either a bare string (single field name, backward-compatible with
+/// all existing TOMLs) or a tagged struct for combining multiple fields.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum BlockAddressExtractor {
+    /// A single JSON field name (bare string in TOML: `block_address = "field"`).
+    Single(String),
+    /// Combine multiple JSON fields with a separator.
+    ///
+    /// In TOML:
+    /// ```toml
+    /// [fields.block_address]
+    /// type = "combine"
+    /// fields = ["street_number", "street_address"]
+    /// separator = " "
+    /// ```
+    Tagged(BlockAddressTagged),
+}
+
+/// Tagged variants for structured block address extraction.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BlockAddressTagged {
+    /// Combine multiple fields with a separator (skip empty fields).
+    Combine {
+        /// JSON field names to combine.
+        fields: Vec<String>,
+        /// Separator between non-empty values.
+        separator: String,
     },
 }
 
@@ -507,6 +541,36 @@ impl ArrestExtractor {
             Self::StringContains { field, contains } => {
                 let s = get_str(record, field)?;
                 Some(s.to_lowercase().contains(&contains.to_lowercase()))
+            }
+        }
+    }
+}
+
+impl BlockAddressExtractor {
+    /// Extracts a block address string from a JSON record.
+    fn extract(&self, record: &serde_json::Value) -> Option<String> {
+        match self {
+            Self::Single(field) => get_str(record, field).map(String::from),
+            Self::Tagged(tagged) => tagged.extract(record),
+        }
+    }
+}
+
+impl BlockAddressTagged {
+    /// Extracts a block address string from a JSON record.
+    fn extract(&self, record: &serde_json::Value) -> Option<String> {
+        match self {
+            Self::Combine { fields, separator } => {
+                let parts: Vec<&str> = fields
+                    .iter()
+                    .filter_map(|f| get_str(record, f))
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if parts.is_empty() {
+                    None
+                } else {
+                    Some(parts.join(separator))
+                }
             }
         }
     }
@@ -827,9 +891,8 @@ impl SourceDefinition {
             // ── Optional fields ──────────────────────────────────────
             let block_address = fields
                 .block_address
-                .as_deref()
-                .and_then(|f| get_str(record, f))
-                .map(String::from);
+                .as_ref()
+                .and_then(|ext| ext.extract(record));
 
             let location_type = fields
                 .location_type
@@ -1014,5 +1077,42 @@ mod tests {
         };
         assert!((lat_field.extract(&record).unwrap() - 32.714_063_262).abs() < 1e-6);
         assert!((lng_field.extract(&record).unwrap() - -96.888_799_822).abs() < 1e-6);
+    }
+
+    #[test]
+    fn extracts_block_address_single() {
+        let record = serde_json::json!({"address": "100 MAIN ST"});
+        let extractor = BlockAddressExtractor::Single("address".to_string());
+        assert_eq!(extractor.extract(&record).unwrap(), "100 MAIN ST");
+    }
+
+    #[test]
+    fn extracts_block_address_combine() {
+        let record =
+            serde_json::json!({"street_number": "5900 BLOCK", "street_address": "FISHER RD"});
+        let extractor = BlockAddressExtractor::Tagged(BlockAddressTagged::Combine {
+            fields: vec!["street_number".to_string(), "street_address".to_string()],
+            separator: " ".to_string(),
+        });
+        assert_eq!(extractor.extract(&record).unwrap(), "5900 BLOCK FISHER RD");
+    }
+
+    #[test]
+    fn extracts_block_address_combine_partial() {
+        // When street_number is missing, just use street_address
+        let record = serde_json::json!({"street_address": "MARLBORO PIKE EB"});
+        let extractor = BlockAddressExtractor::Tagged(BlockAddressTagged::Combine {
+            fields: vec!["street_number".to_string(), "street_address".to_string()],
+            separator: " ".to_string(),
+        });
+        assert_eq!(extractor.extract(&record).unwrap(), "MARLBORO PIKE EB");
+    }
+
+    #[test]
+    fn parses_pg_county_toml() {
+        let toml_str = include_str!("../sources/pg_county_md.toml");
+        let def = parse_source_toml(toml_str).unwrap();
+        assert_eq!(def.id, "pg_county_md");
+        assert!(def.fields.block_address.is_some());
     }
 }

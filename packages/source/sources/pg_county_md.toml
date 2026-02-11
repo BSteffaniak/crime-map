@@ -20,8 +20,14 @@ page_size = 50000
 [fields]
 incident_id = ["incident_case_id"]
 crime_type = ["clearance_code_inc_type"]
-block_address = "street_address"
 location_type = "pgpd_sector"
+
+# Combine street_number ("5900 BLOCK") + street_address ("FISHER RD")
+# to get a geocodable address like "5900 FISHER RD"
+[fields.block_address]
+type = "combine"
+fields = ["street_number", "street_address"]
+separator = " "
 
 # Date is MM/DD/YYYY text format in this dataset
 [fields.occurred_at]

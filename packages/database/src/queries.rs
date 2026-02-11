@@ -56,6 +56,34 @@ pub async fn upsert_source(
     Ok(id)
 }
 
+/// Looks up the database source ID for a source by its TOML `name` field.
+///
+/// The `name_fragment` is matched against the `name` column using
+/// case-insensitive `LIKE %fragment%` matching.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if the database operation fails or no matching source
+/// is found.
+pub async fn get_source_id_by_name(db: &dyn Database, name_fragment: &str) -> Result<i32, DbError> {
+    let rows = db
+        .query_raw_params(
+            "SELECT id FROM crime_sources WHERE LOWER(name) LIKE '%' || LOWER($1) || '%' LIMIT 1",
+            &[DatabaseValue::String(name_fragment.to_string())],
+        )
+        .await?;
+
+    let row = rows.first().ok_or_else(|| DbError::Conversion {
+        message: format!("No source found matching '{name_fragment}'"),
+    })?;
+
+    let id: i32 = row.to_value("id").map_err(|e| DbError::Conversion {
+        message: format!("Failed to parse source id: {e}"),
+    })?;
+
+    Ok(id)
+}
+
 /// Looks up the category ID for a [`CrimeSubcategory`] by its
 /// `SCREAMING_SNAKE_CASE` name.
 ///

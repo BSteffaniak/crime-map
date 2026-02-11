@@ -96,12 +96,24 @@ enum Commands {
     },
     /// Geocode incidents that are missing coordinates using block addresses
     Geocode {
-        /// Maximum number of incidents to geocode (for testing).
+        /// Maximum total number of incidents to geocode. If not set, all
+        /// eligible incidents are processed.
         #[arg(long)]
         limit: Option<u64>,
+        /// Number of incidents to fetch per batch (default: 50,000).
+        #[arg(long, default_value = "50000")]
+        batch_size: u64,
         /// Skip Census Bureau batch geocoder and only use Nominatim.
         #[arg(long)]
         nominatim_only: bool,
+        /// Re-geocode incidents that already have source-provided coordinates.
+        /// Useful for sources with block-centroid geocoding where address-level
+        /// precision would improve census place attribution.
+        #[arg(long)]
+        re_geocode: bool,
+        /// Only geocode incidents from this source ID (e.g., `pg_county_md`).
+        #[arg(long)]
+        source: Option<String>,
     },
 }
 
@@ -285,13 +297,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Geocode {
             limit,
+            batch_size,
             nominatim_only,
+            re_geocode,
+            source,
         } => {
             let db = db::connect_from_env().await?;
             run_migrations(db.as_ref()).await?;
 
+            // Resolve source name to database source_id if provided
+            let source_id = if let Some(ref name) = source {
+                let sid = queries::get_source_id_by_name(db.as_ref(), name).await?;
+                log::info!("Filtering to source '{name}' (id={sid})");
+                Some(sid)
+            } else {
+                None
+            };
+
             let start = Instant::now();
-            let geocoded = geocode_missing(db.as_ref(), limit, nominatim_only).await?;
+            let geocoded = if re_geocode {
+                re_geocode_source(db.as_ref(), batch_size, limit, nominatim_only, source_id).await?
+            } else {
+                geocode_missing(db.as_ref(), batch_size, limit, nominatim_only, source_id).await?
+            };
 
             let elapsed = start.elapsed();
             log::info!(
@@ -490,16 +518,51 @@ async fn sync_source(
     Ok(())
 }
 
+/// Builds a SQL source filter clause and corresponding parameter list.
+///
+/// When a `source_id` is provided, returns `" AND source_id = $2"` with
+/// the limit and source ID as parameters. Otherwise returns an empty clause
+/// with just the limit parameter.
+fn source_filter_params(
+    limit_val: u64,
+    source_id: Option<i32>,
+) -> (&'static str, Vec<switchy_database::DatabaseValue>) {
+    use switchy_database::DatabaseValue;
+
+    source_id.map_or_else(
+        || {
+            (
+                "",
+                vec![DatabaseValue::Int64(
+                    i64::try_from(limit_val).unwrap_or(i64::MAX),
+                )],
+            )
+        },
+        |sid| {
+            (
+                " AND source_id = $2",
+                vec![
+                    DatabaseValue::Int64(i64::try_from(limit_val).unwrap_or(i64::MAX)),
+                    DatabaseValue::Int32(sid),
+                ],
+            )
+        },
+    )
+}
+
 /// Geocodes incidents that have block addresses but no coordinates.
 ///
-/// Fetches un-geocoded incidents from the database, deduplicates by address,
-/// runs them through the Census Bureau batch geocoder (and Nominatim as
-/// fallback), then updates the incidents with the resolved coordinates.
+/// Fetches un-geocoded incidents from the database in batches, deduplicates
+/// by address, runs them through the Census Bureau batch geocoder (and
+/// Nominatim as fallback), then updates the incidents with the resolved
+/// coordinates. Loops until all eligible incidents have been processed.
 #[allow(clippy::too_many_lines)]
 async fn geocode_missing(
     db: &dyn switchy_database::Database,
+    batch_size: u64,
     limit: Option<u64>,
     nominatim_only: bool,
+    source_id: Option<i32>,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     use crime_map_geocoder::AddressInput;
     use crime_map_geocoder::address::{
@@ -509,213 +572,495 @@ async fn geocode_missing(
     use std::collections::BTreeMap;
     use switchy_database::DatabaseValue;
 
-    let limit_val = limit.unwrap_or(50_000);
-
-    // Fetch incidents missing coordinates that have a block address
-    let rows = db
-        .query_raw_params(
-            "SELECT id, block_address, city, state
-             FROM crime_incidents
-             WHERE has_coordinates = FALSE
-               AND block_address IS NOT NULL
-               AND block_address != ''
-               AND geocoded = FALSE
-             LIMIT $1",
-            &[DatabaseValue::Int64(
-                i64::try_from(limit_val).unwrap_or(i64::MAX),
-            )],
-        )
-        .await?;
-
-    if rows.is_empty() {
-        log::info!("No un-geocoded incidents with addresses found");
-        return Ok(0);
-    }
-
-    log::info!("Found {} incidents needing geocoding", rows.len());
-
-    // Deduplicate by (cleaned_address, city, state)
-    // Map: (address, city, state) -> Vec<incident_id>
-    let mut addr_groups: BTreeMap<(String, String, String), Vec<i64>> = BTreeMap::new();
-
-    for row in &rows {
-        let id: i64 = row.to_value("id").unwrap_or(0);
-        let block: String = row.to_value("block_address").unwrap_or_default();
-        let city: String = row.to_value("city").unwrap_or_default();
-        let state: String = row.to_value("state").unwrap_or_default();
-
-        let cleaned = clean_block_address(&block);
-        let street = match cleaned {
-            CleanedAddress::Street(s) => s,
-            CleanedAddress::Intersection { street1, street2 } => {
-                format!("{street1} and {street2}")
-            }
-            CleanedAddress::NotGeocodable => continue,
-        };
-
-        addr_groups
-            .entry((street, city, state))
-            .or_default()
-            .push(id);
-    }
-
-    log::info!(
-        "Deduplicated to {} unique addresses from {} incidents",
-        addr_groups.len(),
-        rows.len()
-    );
+    let (source_clause, _) = source_filter_params(batch_size, source_id);
 
     let client = reqwest::Client::builder()
         .user_agent("crime-map/1.0 (https://github.com/BSteffaniak/crime-map)")
         .build()?;
 
-    let mut total_geocoded = 0u64;
+    let mut grand_total = 0u64;
+    let mut batch_num = 0u64;
 
-    if !nominatim_only {
-        // --- Census Bureau batch geocoding ---
-        let inputs: Vec<(AddressInput, Vec<i64>)> = addr_groups
-            .iter()
-            .enumerate()
-            .map(|(i, ((street, city, state), ids))| {
-                (
-                    AddressInput {
-                        id: i.to_string(),
-                        street: street.clone(),
-                        city: city.clone(),
-                        state: state.clone(),
-                        zip: None,
-                    },
-                    ids.clone(),
-                )
-            })
-            .collect();
+    loop {
+        batch_num += 1;
 
-        // Process in chunks of MAX_BATCH_SIZE
-        for chunk in inputs.chunks(crime_map_geocoder::census::MAX_BATCH_SIZE) {
-            let batch_inputs: Vec<AddressInput> =
-                chunk.iter().map(|(input, _)| input.clone()).collect();
-
-            log::info!(
-                "Sending batch of {} addresses to Census geocoder...",
-                batch_inputs.len()
-            );
-
-            match crime_map_geocoder::census::geocode_batch(&client, &batch_inputs).await {
-                Ok(result) => {
-                    log::info!(
-                        "Census batch: {} matched, {} unmatched",
-                        result.matched.len(),
-                        result.unmatched.len()
-                    );
-
-                    for (id_str, geocoded) in &result.matched {
-                        let idx: usize = id_str.parse().unwrap_or(usize::MAX);
-                        if let Some((_, incident_ids)) = chunk.get(idx) {
-                            for &inc_id in incident_ids {
-                                db.exec_raw_params(
-                                    "UPDATE crime_incidents
-                                     SET location = ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
-                                         has_coordinates = TRUE,
-                                         geocoded = TRUE
-                                     WHERE id = $3",
-                                    &[
-                                        DatabaseValue::Real64(geocoded.longitude),
-                                        DatabaseValue::Real64(geocoded.latitude),
-                                        DatabaseValue::Int64(inc_id),
-                                    ],
-                                )
-                                .await?;
-                                total_geocoded += 1;
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::error!("Census batch geocoding failed: {e}");
-                }
-            }
+        // Compute effective fetch size respecting the total limit
+        let effective_size = limit.map_or(batch_size, |l| batch_size.min(l - grand_total));
+        if effective_size == 0 {
+            break;
         }
-    }
 
-    // --- Nominatim fallback for remaining un-geocoded ---
-    let remaining = db
-        .query_raw_params(
+        // Fetch next batch of incidents missing coordinates
+        let (_, base_params) = source_filter_params(effective_size, source_id);
+        let query = format!(
             "SELECT id, block_address, city, state
              FROM crime_incidents
              WHERE has_coordinates = FALSE
                AND block_address IS NOT NULL
                AND block_address != ''
-               AND geocoded = FALSE
-             LIMIT $1",
-            &[DatabaseValue::Int64(
-                i64::try_from(limit_val.saturating_sub(total_geocoded)).unwrap_or(i64::MAX),
-            )],
-        )
-        .await?;
+               AND geocoded = FALSE{source_clause}
+             LIMIT $1"
+        );
+        let rows = db.query_raw_params(&query, &base_params).await?;
 
-    if !remaining.is_empty() {
+        if rows.is_empty() {
+            if batch_num == 1 {
+                log::info!("No un-geocoded incidents with addresses found");
+            }
+            break;
+        }
+
         log::info!(
-            "Attempting Nominatim fallback for {} remaining incidents...",
-            remaining.len()
+            "Batch {batch_num}: found {} incidents needing geocoding",
+            rows.len()
         );
 
-        // Deduplicate again for Nominatim
-        let mut nom_groups: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+        // Deduplicate by (cleaned_address, city, state)
+        let mut addr_groups: BTreeMap<(String, String, String), Vec<i64>> = BTreeMap::new();
 
-        for row in &remaining {
+        for row in &rows {
             let id: i64 = row.to_value("id").unwrap_or(0);
             let block: String = row.to_value("block_address").unwrap_or_default();
             let city: String = row.to_value("city").unwrap_or_default();
             let state: String = row.to_value("state").unwrap_or_default();
 
             let cleaned = clean_block_address(&block);
-            let query = match cleaned {
-                CleanedAddress::Street(s) => build_one_line_address(&s, &city, &state),
+            let street = match cleaned {
+                CleanedAddress::Street(s) => s,
                 CleanedAddress::Intersection { street1, street2 } => {
-                    format!("{street1} and {street2}, {city}, {state}")
+                    format!("{street1} and {street2}")
                 }
                 CleanedAddress::NotGeocodable => continue,
             };
 
-            nom_groups.entry(query).or_default().push(id);
+            addr_groups
+                .entry((street, city, state))
+                .or_default()
+                .push(id);
         }
 
-        for (query, incident_ids) in &nom_groups {
-            // Nominatim rate limit: 1 request per second
-            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        log::info!(
+            "Deduplicated to {} unique addresses from {} incidents",
+            addr_groups.len(),
+            rows.len()
+        );
 
-            match crime_map_geocoder::nominatim::geocode_freeform(&client, query).await {
-                Ok(Some(geocoded)) => {
-                    for &inc_id in incident_ids {
-                        db.exec_raw_params(
-                            "UPDATE crime_incidents
-                             SET location = ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
-                                 has_coordinates = TRUE,
-                                 geocoded = TRUE
-                             WHERE id = $3",
-                            &[
-                                DatabaseValue::Real64(geocoded.longitude),
-                                DatabaseValue::Real64(geocoded.latitude),
-                                DatabaseValue::Int64(inc_id),
-                            ],
-                        )
-                        .await?;
-                        total_geocoded += 1;
+        let mut batch_geocoded = 0u64;
+
+        if !nominatim_only {
+            // --- Census Bureau batch geocoding ---
+            let inputs: Vec<(AddressInput, Vec<i64>)> = addr_groups
+                .iter()
+                .enumerate()
+                .map(|(i, ((street, city, state), ids))| {
+                    (
+                        AddressInput {
+                            id: i.to_string(),
+                            street: street.clone(),
+                            city: city.clone(),
+                            state: state.clone(),
+                            zip: None,
+                        },
+                        ids.clone(),
+                    )
+                })
+                .collect();
+
+            for chunk in inputs.chunks(crime_map_geocoder::census::MAX_BATCH_SIZE) {
+                let batch_inputs: Vec<AddressInput> =
+                    chunk.iter().map(|(input, _)| input.clone()).collect();
+
+                log::info!(
+                    "Sending batch of {} addresses to Census geocoder...",
+                    batch_inputs.len()
+                );
+
+                match crime_map_geocoder::census::geocode_batch(&client, &batch_inputs).await {
+                    Ok(result) => {
+                        log::info!(
+                            "Census batch: {} matched, {} unmatched",
+                            result.matched.len(),
+                            result.unmatched.len()
+                        );
+
+                        for (id_str, geocoded) in &result.matched {
+                            let idx: usize = id_str.parse().unwrap_or(usize::MAX);
+                            if let Some((_, incident_ids)) = chunk.get(idx) {
+                                for &inc_id in incident_ids {
+                                    db.exec_raw_params(
+                                        "UPDATE crime_incidents
+                                         SET location = ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
+                                             has_coordinates = TRUE,
+                                             geocoded = TRUE
+                                         WHERE id = $3",
+                                        &[
+                                            DatabaseValue::Real64(geocoded.longitude),
+                                            DatabaseValue::Real64(geocoded.latitude),
+                                            DatabaseValue::Int64(inc_id),
+                                        ],
+                                    )
+                                    .await?;
+                                    batch_geocoded += 1;
+                                }
+                            }
+                        }
                     }
-                }
-                Ok(None) => {
-                    log::debug!("Nominatim: no match for '{query}'");
-                }
-                Err(e) => {
-                    log::warn!("Nominatim error for '{query}': {e}");
-                    if matches!(e, crime_map_geocoder::GeocodeError::RateLimited) {
-                        log::warn!("Rate limited by Nominatim, waiting 60s...");
-                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    Err(e) => {
+                        log::error!("Census batch geocoding failed: {e}");
                     }
                 }
             }
         }
+
+        // --- Nominatim fallback for remaining un-geocoded in this batch ---
+        let (_, remaining_params) = source_filter_params(effective_size, source_id);
+        let remaining_query = format!(
+            "SELECT id, block_address, city, state
+             FROM crime_incidents
+             WHERE has_coordinates = FALSE
+               AND block_address IS NOT NULL
+               AND block_address != ''
+               AND geocoded = FALSE{source_clause}
+             LIMIT $1"
+        );
+        let remaining = db
+            .query_raw_params(&remaining_query, &remaining_params)
+            .await?;
+
+        if !remaining.is_empty() {
+            log::info!(
+                "Attempting Nominatim fallback for {} remaining incidents...",
+                remaining.len()
+            );
+
+            let mut nom_groups: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+
+            for row in &remaining {
+                let id: i64 = row.to_value("id").unwrap_or(0);
+                let block: String = row.to_value("block_address").unwrap_or_default();
+                let city: String = row.to_value("city").unwrap_or_default();
+                let state: String = row.to_value("state").unwrap_or_default();
+
+                let cleaned = clean_block_address(&block);
+                let query = match cleaned {
+                    CleanedAddress::Street(s) => build_one_line_address(&s, &city, &state),
+                    CleanedAddress::Intersection { street1, street2 } => {
+                        format!("{street1} and {street2}, {city}, {state}")
+                    }
+                    CleanedAddress::NotGeocodable => continue,
+                };
+
+                nom_groups.entry(query).or_default().push(id);
+            }
+
+            for (query, incident_ids) in &nom_groups {
+                tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+                match crime_map_geocoder::nominatim::geocode_freeform(&client, query).await {
+                    Ok(Some(geocoded)) => {
+                        for &inc_id in incident_ids {
+                            db.exec_raw_params(
+                                "UPDATE crime_incidents
+                                 SET location = ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
+                                     has_coordinates = TRUE,
+                                     geocoded = TRUE
+                                 WHERE id = $3",
+                                &[
+                                    DatabaseValue::Real64(geocoded.longitude),
+                                    DatabaseValue::Real64(geocoded.latitude),
+                                    DatabaseValue::Int64(inc_id),
+                                ],
+                            )
+                            .await?;
+                            batch_geocoded += 1;
+                        }
+                    }
+                    Ok(None) => {
+                        log::debug!("Nominatim: no match for '{query}'");
+                    }
+                    Err(e) => {
+                        log::warn!("Nominatim error for '{query}': {e}");
+                        if matches!(e, crime_map_geocoder::GeocodeError::RateLimited) {
+                            log::warn!("Rate limited by Nominatim, waiting 60s...");
+                            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        }
+                    }
+                }
+            }
+        }
+
+        grand_total += batch_geocoded;
+        log::info!(
+            "Batch {batch_num} complete: {batch_geocoded} geocoded this batch, {grand_total} cumulative"
+        );
+
+        if limit.is_some_and(|l| grand_total >= l) {
+            log::info!("Reached --limit of {}, stopping", limit.unwrap_or(0));
+            break;
+        }
     }
 
-    Ok(total_geocoded)
+    Ok(grand_total)
+}
+
+/// Re-geocodes incidents that already have source-provided coordinates.
+///
+/// This is useful for sources like PG County where coordinates are block
+/// centroids and address-level geocoding would produce more precise locations,
+/// improving census place attribution for small municipalities.
+///
+/// Only re-geocodes incidents that have `geocoded = FALSE` (i.e., coordinates
+/// came from the source, not from a previous geocoding run). Processes all
+/// eligible incidents in batches.
+#[allow(clippy::too_many_lines)]
+async fn re_geocode_source(
+    db: &dyn switchy_database::Database,
+    batch_size: u64,
+    limit: Option<u64>,
+    nominatim_only: bool,
+    source_id: Option<i32>,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    use crime_map_geocoder::AddressInput;
+    use crime_map_geocoder::address::{
+        CleanedAddress, build_one_line_address, clean_block_address,
+    };
+    use moosicbox_json_utils::database::ToValue as _;
+    use std::collections::BTreeMap;
+    use switchy_database::DatabaseValue;
+
+    let (source_clause, _) = source_filter_params(batch_size, source_id);
+
+    let client = reqwest::Client::builder()
+        .user_agent("crime-map/1.0 (https://github.com/BSteffaniak/crime-map)")
+        .build()?;
+
+    let mut grand_total = 0u64;
+    let mut batch_num = 0u64;
+
+    loop {
+        batch_num += 1;
+
+        // Compute effective fetch size respecting the total limit
+        let effective_size = limit.map_or(batch_size, |l| batch_size.min(l - grand_total));
+        if effective_size == 0 {
+            break;
+        }
+
+        // Fetch next batch of incidents with source coordinates
+        let (_, params) = source_filter_params(effective_size, source_id);
+        let query = format!(
+            "SELECT id, block_address, city, state
+             FROM crime_incidents
+             WHERE has_coordinates = TRUE
+               AND geocoded = FALSE
+               AND block_address IS NOT NULL
+               AND block_address != ''{source_clause}
+             LIMIT $1"
+        );
+
+        let rows = db.query_raw_params(&query, &params).await?;
+
+        if rows.is_empty() {
+            if batch_num == 1 {
+                log::info!("No incidents eligible for re-geocoding");
+            }
+            break;
+        }
+
+        log::info!(
+            "Batch {batch_num}: found {} incidents eligible for re-geocoding",
+            rows.len()
+        );
+
+        // Deduplicate by (cleaned_address, city, state)
+        let mut addr_groups: BTreeMap<(String, String, String), Vec<i64>> = BTreeMap::new();
+
+        for row in &rows {
+            let id: i64 = row.to_value("id").unwrap_or(0);
+            let block: String = row.to_value("block_address").unwrap_or_default();
+            let city: String = row.to_value("city").unwrap_or_default();
+            let state: String = row.to_value("state").unwrap_or_default();
+
+            let cleaned = clean_block_address(&block);
+            let street = match cleaned {
+                CleanedAddress::Street(s) => s,
+                CleanedAddress::Intersection { street1, street2 } => {
+                    format!("{street1} and {street2}")
+                }
+                CleanedAddress::NotGeocodable => continue,
+            };
+
+            addr_groups
+                .entry((street, city, state))
+                .or_default()
+                .push(id);
+        }
+
+        log::info!(
+            "Deduplicated to {} unique addresses from {} incidents",
+            addr_groups.len(),
+            rows.len()
+        );
+
+        let mut batch_geocoded = 0u64;
+
+        if !nominatim_only {
+            // --- Census Bureau batch geocoding ---
+            let inputs: Vec<(AddressInput, Vec<i64>)> = addr_groups
+                .iter()
+                .enumerate()
+                .map(|(i, ((street, city, state), ids))| {
+                    (
+                        AddressInput {
+                            id: i.to_string(),
+                            street: street.clone(),
+                            city: city.clone(),
+                            state: state.clone(),
+                            zip: None,
+                        },
+                        ids.clone(),
+                    )
+                })
+                .collect();
+
+            for chunk in inputs.chunks(crime_map_geocoder::census::MAX_BATCH_SIZE) {
+                let batch_inputs: Vec<AddressInput> =
+                    chunk.iter().map(|(input, _)| input.clone()).collect();
+
+                log::info!(
+                    "Sending batch of {} addresses to Census geocoder for re-geocoding...",
+                    batch_inputs.len()
+                );
+
+                match crime_map_geocoder::census::geocode_batch(&client, &batch_inputs).await {
+                    Ok(result) => {
+                        log::info!(
+                            "Census batch: {} matched, {} unmatched",
+                            result.matched.len(),
+                            result.unmatched.len()
+                        );
+
+                        for (id_str, geocoded) in &result.matched {
+                            let idx: usize = id_str.parse().unwrap_or(usize::MAX);
+                            if let Some((_, incident_ids)) = chunk.get(idx) {
+                                for &inc_id in incident_ids {
+                                    // Clear the census_place_geoid so it gets
+                                    // re-attributed on the next `attribute` run.
+                                    db.exec_raw_params(
+                                        "UPDATE crime_incidents
+                                         SET location = ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
+                                             geocoded = TRUE,
+                                             census_place_geoid = NULL,
+                                             census_tract_geoid = NULL
+                                         WHERE id = $3",
+                                        &[
+                                            DatabaseValue::Real64(geocoded.longitude),
+                                            DatabaseValue::Real64(geocoded.latitude),
+                                            DatabaseValue::Int64(inc_id),
+                                        ],
+                                    )
+                                    .await?;
+                                    batch_geocoded += 1;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Census batch geocoding failed: {e}");
+                    }
+                }
+            }
+        }
+
+        // --- Nominatim fallback for remaining in this batch ---
+        let (_, remaining_params) = source_filter_params(effective_size, source_id);
+        let remaining_query = format!(
+            "SELECT id, block_address, city, state
+             FROM crime_incidents
+             WHERE has_coordinates = TRUE
+               AND geocoded = FALSE
+               AND block_address IS NOT NULL
+               AND block_address != ''{source_clause}
+             LIMIT $1"
+        );
+
+        let remaining = db
+            .query_raw_params(&remaining_query, &remaining_params)
+            .await?;
+
+        if !remaining.is_empty() {
+            log::info!(
+                "Attempting Nominatim fallback for {} remaining re-geocode targets...",
+                remaining.len()
+            );
+
+            let mut nom_groups: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+
+            for row in &remaining {
+                let id: i64 = row.to_value("id").unwrap_or(0);
+                let block: String = row.to_value("block_address").unwrap_or_default();
+                let city: String = row.to_value("city").unwrap_or_default();
+                let state: String = row.to_value("state").unwrap_or_default();
+
+                let cleaned = clean_block_address(&block);
+                let query = match cleaned {
+                    CleanedAddress::Street(s) => build_one_line_address(&s, &city, &state),
+                    CleanedAddress::Intersection { street1, street2 } => {
+                        format!("{street1} and {street2}, {city}, {state}")
+                    }
+                    CleanedAddress::NotGeocodable => continue,
+                };
+
+                nom_groups.entry(query).or_default().push(id);
+            }
+
+            for (query, incident_ids) in &nom_groups {
+                tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+                match crime_map_geocoder::nominatim::geocode_freeform(&client, query).await {
+                    Ok(Some(geocoded)) => {
+                        for &inc_id in incident_ids {
+                            db.exec_raw_params(
+                                "UPDATE crime_incidents
+                                 SET location = ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
+                                     geocoded = TRUE,
+                                     census_place_geoid = NULL,
+                                     census_tract_geoid = NULL
+                                 WHERE id = $3",
+                                &[
+                                    DatabaseValue::Real64(geocoded.longitude),
+                                    DatabaseValue::Real64(geocoded.latitude),
+                                    DatabaseValue::Int64(inc_id),
+                                ],
+                            )
+                            .await?;
+                            batch_geocoded += 1;
+                        }
+                    }
+                    Ok(None) => {
+                        log::debug!("Nominatim: no match for '{query}'");
+                    }
+                    Err(e) => {
+                        log::warn!("Nominatim error for '{query}': {e}");
+                        if matches!(e, crime_map_geocoder::GeocodeError::RateLimited) {
+                            log::warn!("Rate limited by Nominatim, waiting 60s...");
+                            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        }
+                    }
+                }
+            }
+        }
+
+        grand_total += batch_geocoded;
+        log::info!(
+            "Batch {batch_num} complete: {batch_geocoded} geocoded this batch, {grand_total} cumulative"
+        );
+
+        if limit.is_some_and(|l| grand_total >= l) {
+            log::info!("Reached --limit of {}, stopping", limit.unwrap_or(0));
+            break;
+        }
+    }
+
+    Ok(grand_total)
 }
