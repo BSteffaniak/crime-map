@@ -20,6 +20,7 @@ members = [
   "packages/neighborhood/models",
   "packages/neighborhood",
   "packages/scraper",
+  "packages/geocoder",
 ]
 
 resolver = "2"
@@ -63,6 +64,7 @@ crime_map_discover = { default-features = false, path = "packages/discover" }
 crime_map_neighborhood_models = { default-features = false, path = "packages/neighborhood/models" }
 crime_map_neighborhood = { default-features = false, path = "packages/neighborhood" }
 crime_map_scraper = { default-features = false, path = "packages/scraper" }
+crime_map_geocoder = { default-features = false, path = "packages/geocoder" }
 
 # MoosicBox / Switchy (git references)
 moosicbox_assert = { git = "https://github.com/MoosicBox/MoosicBox.git", branch = "master", default-features = false }

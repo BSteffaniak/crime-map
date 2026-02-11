@@ -1,0 +1,21 @@
+[package]
+authors = { workspace = true }
+description = "Geocoding service for crime map data using Census Bureau and Nominatim"
+edition = { workspace = true }
+license = { workspace = true }
+name = "crime_map_geocoder"
+repository = { workspace = true }
+version = "0.1.0"
+
+[dependencies]
+log = { workspace = true }
+regex = { workspace = true, features = ["std"] }
+reqwest = { workspace = true, features = ["multipart"] }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+
+[features]
+default = []
+fail-on-warnings = []

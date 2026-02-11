@@ -58,9 +58,7 @@ fn build_common_filters(
     }
 
     if let Some(place_geoid) = place_geoid {
-        frags.push(format!(
-            "ST_Covers((SELECT boundary FROM census_places WHERE geoid = ${idx}), i.location)"
-        ));
+        frags.push(format!("i.census_place_geoid = ${idx}"));
         params.push(DatabaseValue::String(place_geoid.to_string()));
         idx += 1;
     }
@@ -236,9 +234,7 @@ pub async fn rank_areas(
 
     // Either city or placeGeoid is required to scope the ranking
     if let Some(ref place_geoid) = params.place_geoid {
-        frags.push(format!(
-            "ST_Covers((SELECT boundary FROM census_places WHERE geoid = ${idx}), i.location)"
-        ));
+        frags.push(format!("i.census_place_geoid = ${idx}"));
         db_params.push(DatabaseValue::String(place_geoid.clone()));
         idx += 1;
     } else if let Some(ref city) = params.city {

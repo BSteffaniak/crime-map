@@ -879,8 +879,8 @@ fn build_batch_query(
     let mut params: Vec<DatabaseValue> = Vec::new();
     let mut param_idx: usize = 1;
 
-    // Always filter by id > last_id
-    let mut where_clause = format!("i.id > ${param_idx}");
+    // Always filter by id > last_id and only include geocoded points
+    let mut where_clause = format!("i.id > ${param_idx} AND i.has_coordinates = TRUE");
     params.push(DatabaseValue::Int64(last_id));
     param_idx += 1;
 

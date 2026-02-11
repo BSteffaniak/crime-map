@@ -91,6 +91,10 @@ pub async fn get_category_id(
 /// Uses `ON CONFLICT` to skip duplicates based on
 /// `(source_id, source_incident_id)`.
 ///
+/// Incidents without coordinates use a sentinel point at `(0, 0)` with
+/// `has_coordinates = FALSE` so the `NOT NULL` constraint on `location`
+/// is satisfied while still storing the incident for aggregate counting.
+///
 /// # Errors
 ///
 /// Returns [`DbError`] if any database operation fails.
@@ -112,24 +116,29 @@ pub async fn insert_incidents(
             continue;
         };
 
+        let has_coordinates = incident.longitude.is_some() && incident.latitude.is_some();
+        let lng = incident.longitude.unwrap_or(0.0);
+        let lat = incident.latitude.unwrap_or(0.0);
+
         let result = db
             .exec_raw_params(
                 "INSERT INTO crime_incidents (
                     source_id, source_incident_id, category_id, location,
                     occurred_at, reported_at, description, block_address,
-                    city, state, arrest_made, domestic, location_type
+                    city, state, arrest_made, domestic, location_type,
+                    has_coordinates, geocoded
                 ) VALUES (
                     $1, $2, $3,
                     ST_SetSRID(ST_MakePoint($4, $5), 4326)::geography,
-                    $6, $7, $8, $9, $10, $11, $12, $13, $14
+                    $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
                 )
                 ON CONFLICT (source_id, source_incident_id) DO NOTHING",
                 &[
                     DatabaseValue::Int32(source_id),
                     DatabaseValue::String(incident.source_incident_id.clone()),
                     DatabaseValue::Int32(cat_id),
-                    DatabaseValue::Real64(incident.longitude),
-                    DatabaseValue::Real64(incident.latitude),
+                    DatabaseValue::Real64(lng),
+                    DatabaseValue::Real64(lat),
                     DatabaseValue::DateTime(incident.occurred_at.naive_utc()),
                     incident
                         .reported_at
@@ -157,6 +166,8 @@ pub async fn insert_incidents(
                         .location_type
                         .as_ref()
                         .map_or(DatabaseValue::Null, |l| DatabaseValue::String(l.clone())),
+                    DatabaseValue::Bool(has_coordinates),
+                    DatabaseValue::Bool(incident.geocoded),
                 ],
             )
             .await?;
@@ -309,7 +320,7 @@ pub async fn query_incidents(
          FROM crime_incidents i
          JOIN crime_categories c ON i.category_id = c.id
          LEFT JOIN crime_categories pc ON c.parent_id = pc.id
-         WHERE 1=1",
+         WHERE i.has_coordinates = TRUE",
     );
 
     let mut params: Vec<DatabaseValue> = Vec::new();
@@ -442,4 +453,142 @@ pub async fn get_all_category_ids(
     }
 
     Ok(map)
+}
+
+/// Assigns census place GEOIDs to incidents that have coordinates but no
+/// `census_place_geoid` yet.
+///
+/// Uses a two-pass approach:
+/// 1. **Exact containment** — `ST_Covers` assigns incidents that fall
+///    directly inside a place boundary. When a point is inside multiple
+///    overlapping places, the smallest (by area) wins.
+/// 2. **Nearest within buffer** — For remaining unmatched incidents,
+///    `ST_DWithin` with a configurable buffer (meters) finds the nearest
+///    place. This handles source-data coordinate imprecision where points
+///    land slightly outside the true boundary.
+///
+/// Each incident is assigned to exactly one place (the most specific
+/// containing place, or the nearest one within the buffer).
+///
+/// Processes in batches to avoid locking the table for too long.
+/// Returns the total number of incidents updated.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if the database operation fails.
+pub async fn attribute_places(
+    db: &dyn Database,
+    buffer_meters: f64,
+    batch_size: u32,
+) -> Result<u64, DbError> {
+    let mut total = 0u64;
+
+    // Pass 1: Exact containment (ST_Covers).
+    // DISTINCT ON (i2.id) + ORDER BY ST_Area picks the smallest containing
+    // place when boundaries overlap.
+    log::info!("Pass 1: exact containment (ST_Covers)...");
+    loop {
+        let updated = db
+            .exec_raw_params(
+                "UPDATE crime_incidents i
+                 SET census_place_geoid = sub.geoid
+                 FROM (
+                     SELECT DISTINCT ON (i2.id) i2.id, p.geoid
+                     FROM crime_incidents i2
+                     JOIN census_places p
+                       ON ST_Covers(p.boundary, i2.location)
+                     WHERE i2.census_place_geoid IS NULL
+                       AND i2.has_coordinates = TRUE
+                     ORDER BY i2.id, ST_Area(p.boundary)
+                     LIMIT $1
+                 ) sub
+                 WHERE i.id = sub.id",
+                &[DatabaseValue::Int64(i64::from(batch_size))],
+            )
+            .await?;
+
+        if updated == 0 {
+            break;
+        }
+
+        total += updated;
+        log::info!("  exact: {updated} incidents attributed ({total} total)");
+    }
+
+    // Pass 2: Nearest place within buffer distance.
+    // For incidents whose coordinates fall just outside a boundary due to
+    // source-data imprecision. DISTINCT ON + ORDER BY ST_Distance picks
+    // the single nearest place per incident.
+    log::info!("Pass 2: nearest within {buffer_meters}m buffer...");
+    loop {
+        let updated = db
+            .exec_raw_params(
+                "UPDATE crime_incidents i
+                 SET census_place_geoid = sub.geoid
+                 FROM (
+                     SELECT DISTINCT ON (i2.id) i2.id, p.geoid
+                     FROM crime_incidents i2
+                     JOIN census_places p
+                       ON ST_DWithin(p.boundary, i2.location, $1)
+                     WHERE i2.census_place_geoid IS NULL
+                       AND i2.has_coordinates = TRUE
+                     ORDER BY i2.id, ST_Distance(p.boundary, i2.location)
+                     LIMIT $2
+                 ) sub
+                 WHERE i.id = sub.id",
+                &[
+                    DatabaseValue::Real64(buffer_meters),
+                    DatabaseValue::Int64(i64::from(batch_size)),
+                ],
+            )
+            .await?;
+
+        if updated == 0 {
+            break;
+        }
+
+        total += updated;
+        log::info!("  buffer: {updated} incidents attributed ({total} total)");
+    }
+
+    Ok(total)
+}
+
+/// Assigns census tract GEOIDs to incidents that have coordinates but no
+/// `census_tract_geoid` yet.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if the database operation fails.
+pub async fn attribute_tracts(db: &dyn Database, batch_size: u32) -> Result<u64, DbError> {
+    let mut total = 0u64;
+
+    loop {
+        let updated = db
+            .exec_raw_params(
+                "UPDATE crime_incidents i
+                 SET census_tract_geoid = sub.geoid
+                 FROM (
+                     SELECT i2.id, ct.geoid
+                     FROM crime_incidents i2
+                     JOIN census_tracts ct
+                       ON ST_Covers(ct.boundary, i2.location)
+                     WHERE i2.census_tract_geoid IS NULL
+                       AND i2.has_coordinates = TRUE
+                     LIMIT $1
+                 ) sub
+                 WHERE i.id = sub.id",
+                &[DatabaseValue::Int64(i64::from(batch_size))],
+            )
+            .await?;
+
+        if updated == 0 {
+            break;
+        }
+
+        total += updated;
+        log::info!("Attributed {updated} incidents to census tracts ({total} total)");
+    }
+
+    Ok(total)
 }

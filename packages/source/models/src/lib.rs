@@ -67,7 +67,8 @@ pub struct SourceConfig {
 /// A crime incident normalized to the canonical schema.
 ///
 /// All data sources produce this type after parsing and mapping their
-/// source-specific formats.
+/// source-specific formats. Coordinates are optional — incidents without
+/// precise lat/lng can still be stored for counting purposes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedIncident {
@@ -75,10 +76,10 @@ pub struct NormalizedIncident {
     pub source_incident_id: String,
     /// Mapped crime subcategory from the canonical taxonomy.
     pub subcategory: CrimeSubcategory,
-    /// Longitude (WGS84).
-    pub longitude: f64,
-    /// Latitude (WGS84).
-    pub latitude: f64,
+    /// Longitude (WGS84). `None` if the source lacks coordinates.
+    pub longitude: Option<f64>,
+    /// Latitude (WGS84). `None` if the source lacks coordinates.
+    pub latitude: Option<f64>,
     /// When the crime occurred.
     pub occurred_at: DateTime<Utc>,
     /// When the crime was reported (may differ from occurrence).
@@ -97,6 +98,8 @@ pub struct NormalizedIncident {
     pub domestic: Option<bool>,
     /// Type of location (e.g., "STREET", "RESIDENCE", "COMMERCIAL").
     pub location_type: Option<String>,
+    /// Whether this incident was geocoded by us (vs coordinates from source).
+    pub geocoded: bool,
 }
 
 /// A record in the `crime_sources` table tracking a data provider.

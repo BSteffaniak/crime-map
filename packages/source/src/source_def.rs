@@ -557,17 +557,14 @@ impl SourceDefinition {
 
         for record in records {
             // ── Lat/lng ──────────────────────────────────────────────
-            let Some(latitude) = fields.lat.extract(record) else {
-                continue;
-            };
-            let Some(longitude) = fields.lng.extract(record) else {
-                continue;
-            };
+            let latitude = fields.lat.extract(record);
+            let longitude = fields.lng.extract(record);
 
-            // Reject zero coordinates
-            if latitude == 0.0 || longitude == 0.0 {
-                continue;
-            }
+            // Reject zero coordinates (treat as missing)
+            let (latitude, longitude) = match (latitude, longitude) {
+                (Some(lat), Some(lng)) if lat != 0.0 && lng != 0.0 => (Some(lat), Some(lng)),
+                _ => (None, None),
+            };
 
             // ── Incident ID ──────────────────────────────────────────
             let Some(source_incident_id) = extract_incident_id(record, &fields.incident_id) else {
@@ -626,6 +623,7 @@ impl SourceDefinition {
                 arrest_made,
                 domestic,
                 location_type,
+                geocoded: false,
             });
         }
 

@@ -40,6 +40,7 @@ fn build_system_prompt(context: &AgentContext) -> String {
 - Crime categories: VIOLENT (Homicide, Sexual Assault, Robbery, Aggravated Assault, Simple Assault), PROPERTY (Burglary, Larceny/Theft, Motor Vehicle Theft, Arson, Vandalism), DRUG_NARCOTICS (Drug Possession, Drug Sales/Manufacturing, Drug Equipment), PUBLIC_ORDER (Weapons Violation, DUI, Disorderly Conduct, Trespassing, Prostitution), FRAUD_FINANCIAL (Fraud, Forgery, Embezzlement, Identity Theft), OTHER (Missing Person, Non-Criminal, Unknown)
 - Severity levels: 1 (Minimal) through 5 (Critical)
 - Geographic resolution: Neighborhoods (real boundary data for many cities) or census tracts as fallback. The rank_areas tool aggregates all tracts within a neighborhood and returns the neighborhood name when available.
+- Incidents are pre-attributed to Census places and tracts at ingest time, so placeGeoid filtering is fast and accurate (no runtime spatial queries needed).
 
 ## Instructions
 1. Use the tools provided to query the crime database. Do NOT make up statistics.
@@ -48,7 +49,7 @@ fn build_system_prompt(context: &AgentContext) -> String {
 4. For "safest neighborhood" questions, use rank_areas with safestFirst=true.
 5. When comparing cities, call count_incidents for each city separately.
 6. Provide specific numbers and percentages in your answers.
-7. If the user asks about a location not directly in the dataset, use search_locations to find matching jurisdictions AND Census places. If search_locations returns a Census place with a placeGeoid, use that placeGeoid in subsequent tool calls (count_incidents, rank_areas, etc.) for precise geographic filtering within that city/town boundary. This is especially important for small cities within large counties (e.g., Capitol Heights within Prince George's County) — using placeGeoid filters to just the incidents within the city limits rather than the entire county.
+7. If the user asks about a location not directly in the dataset, use search_locations to find matching jurisdictions AND Census places. If search_locations returns a Census place with a placeGeoid, use that placeGeoid in subsequent tool calls (count_incidents, rank_areas, etc.) for precise geographic filtering within that city/town boundary. This is especially important for small cities within large counties (e.g., Capitol Heights within Prince George's County) — using placeGeoid filters to just the incidents within the city limits rather than the entire county. The placeGeoid filter uses pre-computed spatial attribution with a buffer to handle coordinate imprecision, so it captures all nearby incidents.
 8. Format your final answer in clear markdown with key statistics bolded.
 9. Today's date is {today}. When users say "2025", "this year", "last year", etc., interpret relative to today.
 10. Use category names in SCREAMING_SNAKE_CASE when calling tools (e.g., "VIOLENT", "PROPERTY").
