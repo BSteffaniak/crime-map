@@ -37,3 +37,4 @@ field = "HIGHEST_NIBRS_DESCRIPTION"
 [fields.arrest]
 type = "string_contains"
 field = "CLEARANCE_STATUS"
+contains = "arrest"

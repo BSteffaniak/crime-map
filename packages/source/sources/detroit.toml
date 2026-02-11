@@ -46,3 +46,4 @@ separator = ": "
 [fields.arrest]
 type = "string_contains"
 field = "case_status"
+contains = "arrest"

@@ -37,3 +37,4 @@ field = "crm_cd_desc"
 [fields.arrest]
 type = "string_contains"
 field = "status_desc"
+contains = "arrest"

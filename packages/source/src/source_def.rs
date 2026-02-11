@@ -238,10 +238,12 @@ pub enum ArrestExtractor {
         /// JSON field name.
         field: String,
     },
-    /// String field checked for "arrest" substring (case-insensitive).
+    /// String field checked for a configurable substring (case-insensitive).
     StringContains {
         /// JSON field name.
         field: String,
+        /// Substring to search for (case-insensitive).
+        contains: String,
     },
 }
 
@@ -389,9 +391,9 @@ impl ArrestExtractor {
         match self {
             Self::None => Option::None,
             Self::DirectBool { field } => get_bool(record, field),
-            Self::StringContains { field } => {
+            Self::StringContains { field, contains } => {
                 let s = get_str(record, field)?;
-                Some(s.to_lowercase().contains("arrest"))
+                Some(s.to_lowercase().contains(&contains.to_lowercase()))
             }
         }
     }
@@ -716,6 +718,7 @@ mod tests {
         let record = serde_json::json!({"status": "Adult Arrest"});
         let extractor = ArrestExtractor::StringContains {
             field: "status".to_string(),
+            contains: "Arrest".to_string(),
         };
         assert_eq!(extractor.extract(&record), Some(true));
     }

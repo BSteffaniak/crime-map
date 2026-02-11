@@ -35,3 +35,4 @@ field = "incident_description"
 [fields.arrest]
 type = "string_contains"
 field = "resolution"
+contains = "arrest"
