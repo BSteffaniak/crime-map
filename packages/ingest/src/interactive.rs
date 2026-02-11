@@ -9,6 +9,45 @@ use std::time::Instant;
 
 use dialoguer::{Confirm, Input, MultiSelect, Select};
 
+/// Top-level actions available in the ingest interactive menu.
+enum IngestAction {
+    SyncSources,
+    ListSources,
+    Geocode,
+    Attribute,
+    IngestTracts,
+    IngestPlaces,
+    IngestNeighborhoods,
+    RunMigrations,
+}
+
+impl IngestAction {
+    const ALL: &[Self] = &[
+        Self::SyncSources,
+        Self::ListSources,
+        Self::Geocode,
+        Self::Attribute,
+        Self::IngestTracts,
+        Self::IngestPlaces,
+        Self::IngestNeighborhoods,
+        Self::RunMigrations,
+    ];
+
+    #[must_use]
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::SyncSources => "Sync sources",
+            Self::ListSources => "List sources",
+            Self::Geocode => "Geocode missing coordinates",
+            Self::Attribute => "Attribute census data",
+            Self::IngestTracts => "Ingest census tracts",
+            Self::IngestPlaces => "Ingest census places",
+            Self::IngestNeighborhoods => "Ingest neighborhoods",
+            Self::RunMigrations => "Run database migrations",
+        }
+    }
+}
+
 /// Runs the interactive menu loop, prompting the user to select and
 /// configure ingest operations.
 ///
@@ -21,37 +60,27 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let db = crime_map_database::db::connect_from_env().await?;
     crime_map_database::run_migrations(db.as_ref()).await?;
 
-    let choices = &[
-        "Sync sources",
-        "List sources",
-        "Geocode missing coordinates",
-        "Attribute census data",
-        "Ingest census tracts",
-        "Ingest census places",
-        "Ingest neighborhoods",
-        "Run database migrations",
-    ];
+    let labels: Vec<&str> = IngestAction::ALL.iter().map(IngestAction::label).collect();
 
-    let selection = Select::new()
+    let idx = Select::new()
         .with_prompt("What would you like to do?")
-        .items(choices)
+        .items(&labels)
         .default(0)
         .interact()?;
 
-    match selection {
-        0 => sync_sources(db.as_ref()).await?,
-        1 => list_sources(),
-        2 => geocode_missing_interactive(db.as_ref()).await?,
-        3 => attribute_census_data(db.as_ref()).await?,
-        4 => ingest_census_tracts(db.as_ref()).await?,
-        5 => ingest_census_places(db.as_ref()).await?,
-        6 => ingest_neighborhoods(db.as_ref()).await?,
-        7 => {
+    match IngestAction::ALL[idx] {
+        IngestAction::SyncSources => sync_sources(db.as_ref()).await?,
+        IngestAction::ListSources => list_sources(),
+        IngestAction::Geocode => geocode_missing_interactive(db.as_ref()).await?,
+        IngestAction::Attribute => attribute_census_data(db.as_ref()).await?,
+        IngestAction::IngestTracts => ingest_census_tracts(db.as_ref()).await?,
+        IngestAction::IngestPlaces => ingest_census_places(db.as_ref()).await?,
+        IngestAction::IngestNeighborhoods => ingest_neighborhoods(db.as_ref()).await?,
+        IngestAction::RunMigrations => {
             log::info!("Running database migrations...");
             crime_map_database::run_migrations(db.as_ref()).await?;
             log::info!("Migrations complete.");
         }
-        _ => unreachable!(),
     }
 
     Ok(())

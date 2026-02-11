@@ -10,6 +10,28 @@
 
 use dialoguer::Select;
 
+/// Top-level tool selection for the crime map toolchain.
+enum Tool {
+    Ingest,
+    Generate,
+    Server,
+    Discover,
+}
+
+impl Tool {
+    const ALL: &[Self] = &[Self::Ingest, Self::Generate, Self::Server, Self::Discover];
+
+    #[must_use]
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::Ingest => "Ingest data",
+            Self::Generate => "Generate tiles & databases",
+            Self::Server => "Start server",
+            Self::Discover => "Discover sources",
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     pretty_env_logger::init();
@@ -17,23 +39,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Crime Map Toolchain");
     println!();
 
-    let tools = &[
-        "Ingest data",
-        "Generate tiles & databases",
-        "Start server",
-        "Discover sources",
-    ];
+    let labels: Vec<&str> = Tool::ALL.iter().map(Tool::label).collect();
 
-    let selection = Select::new()
+    let idx = Select::new()
         .with_prompt("What would you like to do?")
-        .items(tools)
+        .items(&labels)
         .default(0)
         .interact()?;
 
-    match selection {
-        0 => crime_map_ingest::interactive::run().await?,
-        1 => crime_map_generate::interactive::run().await?,
-        2 => {
+    match Tool::ALL[idx] {
+        Tool::Ingest => crime_map_ingest::interactive::run().await?,
+        Tool::Generate => crime_map_generate::interactive::run().await?,
+        Tool::Server => {
             // The server uses actix-web's runtime, so we need to run it
             // in a blocking task to avoid nesting tokio runtimes.
             tokio::task::spawn_blocking(|| {
@@ -41,8 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .await??;
         }
-        3 => crime_map_discover::interactive::run().await?,
-        _ => unreachable!(),
+        Tool::Discover => crime_map_discover::interactive::run().await?,
     }
 
     Ok(())

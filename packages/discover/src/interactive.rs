@@ -12,6 +12,58 @@ use crate::{LeadAction, LegalAction, ScrapeAction, SearchLogAction, SourceAction
 /// Default path for the discovery `SQLite` database.
 const DEFAULT_DB_PATH: &str = "data/discovery.db";
 
+// ---------------------------------------------------------------------------
+// Top-level menu
+// ---------------------------------------------------------------------------
+
+/// Top-level actions in the discovery interactive menu.
+enum DiscoverAction {
+    Status,
+    Leads,
+    Sources,
+    SearchLog,
+    Legal,
+    Scrape,
+    Seed,
+    Integrate,
+    Verify,
+    Suggest,
+    Exit,
+}
+
+impl DiscoverAction {
+    const ALL: &[Self] = &[
+        Self::Status,
+        Self::Leads,
+        Self::Sources,
+        Self::SearchLog,
+        Self::Legal,
+        Self::Scrape,
+        Self::Seed,
+        Self::Integrate,
+        Self::Verify,
+        Self::Suggest,
+        Self::Exit,
+    ];
+
+    #[must_use]
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::Status => "Show status dashboard",
+            Self::Leads => "Manage leads",
+            Self::Sources => "Manage sources",
+            Self::SearchLog => "Search history",
+            Self::Legal => "Legal/licensing info",
+            Self::Scrape => "Scrape targets",
+            Self::Seed => "Seed database",
+            Self::Integrate => "Integrate lead into pipeline",
+            Self::Verify => "Health-check sources",
+            Self::Suggest => "Suggest next actions",
+            Self::Exit => "Exit",
+        }
+    }
+}
+
 /// Runs the interactive discovery menu loop.
 ///
 /// Opens the discovery database at the default path and presents a
@@ -34,44 +86,153 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// Returns an error if a database operation or I/O prompt fails.
 pub async fn run_with_db(database: &dyn Database) -> Result<(), Box<dyn std::error::Error>> {
+    let labels: Vec<&str> = DiscoverAction::ALL
+        .iter()
+        .map(DiscoverAction::label)
+        .collect();
+
     loop {
         println!();
-        let items = &[
-            "Show status dashboard",
-            "Manage leads",
-            "Manage sources",
-            "Search history",
-            "Legal/licensing info",
-            "Scrape targets",
-            "Seed database",
-            "Integrate lead into pipeline",
-            "Health-check sources",
-            "Suggest next actions",
-            "Exit",
-        ];
 
-        let selection = Select::new()
+        let idx = Select::new()
             .with_prompt("Discovery tool")
-            .items(items)
+            .items(&labels)
             .default(0)
             .interact()?;
 
-        match selection {
-            0 => crate::cmd_status(database).await?,
-            1 => handle_leads(database).await?,
-            2 => handle_sources(database).await?,
-            3 => handle_search_log(database).await?,
-            4 => handle_legal(database).await?,
-            5 => handle_scrape(database).await?,
-            6 => crate::cmd_seed(database).await?,
-            7 => handle_integrate(database).await?,
-            8 => handle_verify(database).await?,
-            9 => handle_suggest(database).await?,
-            10 => {
+        match DiscoverAction::ALL[idx] {
+            DiscoverAction::Status => crate::cmd_status(database).await?,
+            DiscoverAction::Leads => handle_leads(database).await?,
+            DiscoverAction::Sources => handle_sources(database).await?,
+            DiscoverAction::SearchLog => handle_search_log(database).await?,
+            DiscoverAction::Legal => handle_legal(database).await?,
+            DiscoverAction::Scrape => handle_scrape(database).await?,
+            DiscoverAction::Seed => crate::cmd_seed(database).await?,
+            DiscoverAction::Integrate => handle_integrate(database).await?,
+            DiscoverAction::Verify => handle_verify(database).await?,
+            DiscoverAction::Suggest => handle_suggest(database).await?,
+            DiscoverAction::Exit => {
                 println!("Goodbye.");
                 return Ok(());
             }
-            _ => unreachable!(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sub-menu enums
+// ---------------------------------------------------------------------------
+
+/// Lead management sub-actions.
+enum LeadMenuAction {
+    List,
+    Add,
+    Update,
+    Investigate,
+    Back,
+}
+
+impl LeadMenuAction {
+    const ALL: &[Self] = &[
+        Self::List,
+        Self::Add,
+        Self::Update,
+        Self::Investigate,
+        Self::Back,
+    ];
+
+    #[must_use]
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::List => "List",
+            Self::Add => "Add",
+            Self::Update => "Update",
+            Self::Investigate => "Investigate",
+            Self::Back => "Back",
+        }
+    }
+}
+
+/// Source management sub-actions.
+enum SourceMenuAction {
+    List,
+    Add,
+    Update,
+    Back,
+}
+
+impl SourceMenuAction {
+    const ALL: &[Self] = &[Self::List, Self::Add, Self::Update, Self::Back];
+
+    #[must_use]
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::List => "List",
+            Self::Add => "Add",
+            Self::Update => "Update",
+            Self::Back => "Back",
+        }
+    }
+}
+
+/// Search log sub-actions.
+enum SearchLogMenuAction {
+    List,
+    Add,
+    Back,
+}
+
+impl SearchLogMenuAction {
+    const ALL: &[Self] = &[Self::List, Self::Add, Self::Back];
+
+    #[must_use]
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::List => "List recent",
+            Self::Add => "Add entry",
+            Self::Back => "Back",
+        }
+    }
+}
+
+/// Legal info sub-actions.
+enum LegalMenuAction {
+    List,
+    Add,
+    Show,
+    Back,
+}
+
+impl LegalMenuAction {
+    const ALL: &[Self] = &[Self::List, Self::Add, Self::Show, Self::Back];
+
+    #[must_use]
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::List => "List",
+            Self::Add => "Add",
+            Self::Show => "Show details",
+            Self::Back => "Back",
+        }
+    }
+}
+
+/// Scrape target sub-actions.
+enum ScrapeMenuAction {
+    List,
+    Add,
+    Back,
+}
+
+impl ScrapeMenuAction {
+    const ALL: &[Self] = &[Self::List, Self::Add, Self::Back];
+
+    #[must_use]
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::List => "List",
+            Self::Add => "Add",
+            Self::Back => "Back",
         }
     }
 }
@@ -81,16 +242,20 @@ pub async fn run_with_db(database: &dyn Database) -> Result<(), Box<dyn std::err
 // ---------------------------------------------------------------------------
 
 /// Interactive lead management sub-menu.
+#[allow(clippy::too_many_lines)]
 async fn handle_leads(database: &dyn Database) -> Result<(), Box<dyn std::error::Error>> {
-    let items = &["List", "Add", "Update", "Investigate", "Back"];
-    let selection = Select::new()
+    let labels: Vec<&str> = LeadMenuAction::ALL
+        .iter()
+        .map(LeadMenuAction::label)
+        .collect();
+    let idx = Select::new()
         .with_prompt("Leads")
-        .items(items)
+        .items(&labels)
         .default(0)
         .interact()?;
 
-    match selection {
-        0 => {
+    match LeadMenuAction::ALL[idx] {
+        LeadMenuAction::List => {
             let status: String = Input::new()
                 .with_prompt("Filter by status (blank for all)")
                 .allow_empty(true)
@@ -114,7 +279,7 @@ async fn handle_leads(database: &dyn Database) -> Result<(), Box<dyn std::error:
             };
             crate::cmd_leads(database, action).await?;
         }
-        1 => {
+        LeadMenuAction::Add => {
             let jurisdiction: String = Input::new()
                 .with_prompt("Jurisdiction (e.g. Washington, DC)")
                 .interact_text()?;
@@ -151,7 +316,7 @@ async fn handle_leads(database: &dyn Database) -> Result<(), Box<dyn std::error:
             };
             crate::cmd_leads(database, action).await?;
         }
-        2 => {
+        LeadMenuAction::Update => {
             let id: i64 = Input::new().with_prompt("Lead ID").interact_text()?;
             let status: String = Input::new()
                 .with_prompt("New status (blank to skip)")
@@ -175,12 +340,12 @@ async fn handle_leads(database: &dyn Database) -> Result<(), Box<dyn std::error:
             };
             crate::cmd_leads(database, action).await?;
         }
-        3 => {
+        LeadMenuAction::Investigate => {
             let id: i64 = Input::new().with_prompt("Lead ID").interact_text()?;
             let action = LeadAction::Investigate { id };
             crate::cmd_leads(database, action).await?;
         }
-        _ => {}
+        LeadMenuAction::Back => {}
     }
 
     Ok(())
@@ -192,15 +357,18 @@ async fn handle_leads(database: &dyn Database) -> Result<(), Box<dyn std::error:
 
 /// Interactive source management sub-menu.
 async fn handle_sources(database: &dyn Database) -> Result<(), Box<dyn std::error::Error>> {
-    let items = &["List", "Add", "Update", "Back"];
-    let selection = Select::new()
+    let labels: Vec<&str> = SourceMenuAction::ALL
+        .iter()
+        .map(SourceMenuAction::label)
+        .collect();
+    let idx = Select::new()
         .with_prompt("Sources")
-        .items(items)
+        .items(&labels)
         .default(0)
         .interact()?;
 
-    match selection {
-        0 => {
+    match SourceMenuAction::ALL[idx] {
+        SourceMenuAction::List => {
             let status: String = Input::new()
                 .with_prompt("Filter by status (blank for all)")
                 .allow_empty(true)
@@ -214,7 +382,7 @@ async fn handle_sources(database: &dyn Database) -> Result<(), Box<dyn std::erro
             };
             crate::cmd_sources(database, action).await?;
         }
-        1 => {
+        SourceMenuAction::Add => {
             let source_id: String = Input::new()
                 .with_prompt("Source ID (e.g. philadelphia_pd)")
                 .interact_text()?;
@@ -244,10 +412,10 @@ async fn handle_sources(database: &dyn Database) -> Result<(), Box<dyn std::erro
             };
             crate::cmd_sources(database, action).await?;
         }
-        2 => {
+        SourceMenuAction::Update => {
             println!("sources update: Not yet implemented");
         }
-        _ => {}
+        SourceMenuAction::Back => {}
     }
 
     Ok(())
@@ -259,15 +427,18 @@ async fn handle_sources(database: &dyn Database) -> Result<(), Box<dyn std::erro
 
 /// Interactive search-history sub-menu.
 async fn handle_search_log(database: &dyn Database) -> Result<(), Box<dyn std::error::Error>> {
-    let items = &["List recent", "Add entry", "Back"];
-    let selection = Select::new()
+    let labels: Vec<&str> = SearchLogMenuAction::ALL
+        .iter()
+        .map(SearchLogMenuAction::label)
+        .collect();
+    let idx = Select::new()
         .with_prompt("Search history")
-        .items(items)
+        .items(&labels)
         .default(0)
         .interact()?;
 
-    match selection {
-        0 => {
+    match SearchLogMenuAction::ALL[idx] {
+        SearchLogMenuAction::List => {
             let limit: u32 = Input::new()
                 .with_prompt("Max entries to show")
                 .default(20)
@@ -275,7 +446,7 @@ async fn handle_search_log(database: &dyn Database) -> Result<(), Box<dyn std::e
             let action = SearchLogAction::List { limit };
             crate::cmd_search_log(database, action).await?;
         }
-        1 => {
+        SearchLogMenuAction::Add => {
             let search_type: String = Input::new()
                 .with_prompt("Search type (e.g. web, socrata_catalog)")
                 .interact_text()?;
@@ -306,7 +477,7 @@ async fn handle_search_log(database: &dyn Database) -> Result<(), Box<dyn std::e
             };
             crate::cmd_search_log(database, action).await?;
         }
-        _ => {}
+        SearchLogMenuAction::Back => {}
     }
 
     Ok(())
@@ -318,18 +489,21 @@ async fn handle_search_log(database: &dyn Database) -> Result<(), Box<dyn std::e
 
 /// Interactive legal-info sub-menu.
 async fn handle_legal(database: &dyn Database) -> Result<(), Box<dyn std::error::Error>> {
-    let items = &["List", "Add", "Show details", "Back"];
-    let selection = Select::new()
+    let labels: Vec<&str> = LegalMenuAction::ALL
+        .iter()
+        .map(LegalMenuAction::label)
+        .collect();
+    let idx = Select::new()
         .with_prompt("Legal/licensing")
-        .items(items)
+        .items(&labels)
         .default(0)
         .interact()?;
 
-    match selection {
-        0 => {
+    match LegalMenuAction::ALL[idx] {
+        LegalMenuAction::List => {
             crate::cmd_legal(database, LegalAction::List).await?;
         }
-        1 => {
+        LegalMenuAction::Add => {
             let lead_id: String = Input::new()
                 .with_prompt("Lead ID (blank for none)")
                 .allow_empty(true)
@@ -386,13 +560,13 @@ async fn handle_legal(database: &dyn Database) -> Result<(), Box<dyn std::error:
             };
             crate::cmd_legal(database, action).await?;
         }
-        2 => {
+        LegalMenuAction::Show => {
             let id: i64 = Input::new()
                 .with_prompt("Legal record ID")
                 .interact_text()?;
             crate::cmd_legal(database, LegalAction::Show { id }).await?;
         }
-        _ => {}
+        LegalMenuAction::Back => {}
     }
 
     Ok(())
@@ -404,18 +578,21 @@ async fn handle_legal(database: &dyn Database) -> Result<(), Box<dyn std::error:
 
 /// Interactive scrape-targets sub-menu.
 async fn handle_scrape(database: &dyn Database) -> Result<(), Box<dyn std::error::Error>> {
-    let items = &["List", "Add", "Back"];
-    let selection = Select::new()
+    let labels: Vec<&str> = ScrapeMenuAction::ALL
+        .iter()
+        .map(ScrapeMenuAction::label)
+        .collect();
+    let idx = Select::new()
         .with_prompt("Scrape targets")
-        .items(items)
+        .items(&labels)
         .default(0)
         .interact()?;
 
-    match selection {
-        0 => {
+    match ScrapeMenuAction::ALL[idx] {
+        ScrapeMenuAction::List => {
             crate::cmd_scrape(database, ScrapeAction::List).await?;
         }
-        1 => {
+        ScrapeMenuAction::Add => {
             let lead_id: i64 = Input::new()
                 .with_prompt("Associated lead ID")
                 .interact_text()?;
@@ -444,7 +621,7 @@ async fn handle_scrape(database: &dyn Database) -> Result<(), Box<dyn std::error
             };
             crate::cmd_scrape(database, action).await?;
         }
-        _ => {}
+        ScrapeMenuAction::Back => {}
     }
 
     Ok(())
