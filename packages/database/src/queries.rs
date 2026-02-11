@@ -116,6 +116,10 @@ pub async fn get_category_id(
 
 /// Inserts a batch of normalized incidents into the database.
 ///
+/// Uses multi-row `INSERT ... VALUES (...), (...), ...` statements chunked
+/// to stay within the 65,535 bind-parameter limit. Each row uses 16
+/// parameters, giving ~4,095 rows per chunk.
+///
 /// Uses `ON CONFLICT` to skip duplicates based on
 /// `(source_id, source_incident_id)`.
 ///
@@ -126,84 +130,145 @@ pub async fn get_category_id(
 /// # Errors
 ///
 /// Returns [`DbError`] if any database operation fails.
+#[allow(clippy::too_many_lines)]
 pub async fn insert_incidents(
     db: &dyn Database,
     source_id: i32,
     incidents: &[NormalizedIncident],
     category_ids: &BTreeMap<CrimeSubcategory, i32>,
 ) -> Result<u64, DbError> {
-    let mut inserted = 0u64;
+    use std::fmt::Write as _;
 
-    for incident in incidents {
-        let Some(&cat_id) = category_ids.get(&incident.subcategory) else {
-            log::warn!(
-                "No category ID for {:?}, skipping incident {}",
-                incident.subcategory,
-                incident.source_incident_id
-            );
-            continue;
-        };
+    /// Number of `$N` placeholders per row in the VALUES clause.
+    const PARAMS_PER_ROW: u32 = 16;
+    /// Maximum number of bind parameters per statement.
+    const PG_MAX_PARAMS: u32 = 65_535;
+    /// Maximum rows per INSERT chunk.
+    const CHUNK_SIZE: usize = (PG_MAX_PARAMS / PARAMS_PER_ROW) as usize;
 
-        let has_coordinates = incident.longitude.is_some() && incident.latitude.is_some();
-        let lng = incident.longitude.unwrap_or(0.0);
-        let lat = incident.latitude.unwrap_or(0.0);
+    // Pre-filter incidents that have a valid category, logging warnings for
+    // those that don't.
+    let valid: Vec<(&NormalizedIncident, i32)> = incidents
+        .iter()
+        .filter_map(|incident| {
+            if let Some(&cat_id) = category_ids.get(&incident.subcategory) {
+                Some((incident, cat_id))
+            } else {
+                log::warn!(
+                    "No category ID for {:?}, skipping incident {}",
+                    incident.subcategory,
+                    incident.source_incident_id
+                );
+                None
+            }
+        })
+        .collect();
 
-        let result = db
-            .exec_raw_params(
-                "INSERT INTO crime_incidents (
-                    source_id, source_incident_id, category_id, location,
-                    occurred_at, reported_at, description, block_address,
-                    city, state, arrest_made, domestic, location_type,
-                    has_coordinates, geocoded
-                ) VALUES (
-                    $1, $2, $3,
-                    ST_SetSRID(ST_MakePoint($4, $5), 4326)::geography,
-                    $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
-                )
-                ON CONFLICT (source_id, source_incident_id) DO NOTHING",
-                &[
-                    DatabaseValue::Int32(source_id),
-                    DatabaseValue::String(incident.source_incident_id.clone()),
-                    DatabaseValue::Int32(cat_id),
-                    DatabaseValue::Real64(lng),
-                    DatabaseValue::Real64(lat),
-                    DatabaseValue::DateTime(incident.occurred_at.naive_utc()),
-                    incident
-                        .reported_at
-                        .as_ref()
-                        .map_or(DatabaseValue::Null, |dt| {
-                            DatabaseValue::DateTime(dt.naive_utc())
-                        }),
-                    incident
-                        .description
-                        .as_ref()
-                        .map_or(DatabaseValue::Null, |d| DatabaseValue::String(d.clone())),
-                    incident
-                        .block_address
-                        .as_ref()
-                        .map_or(DatabaseValue::Null, |a| DatabaseValue::String(a.clone())),
-                    DatabaseValue::String(incident.city.clone()),
-                    DatabaseValue::String(incident.state.clone()),
-                    incident
-                        .arrest_made
-                        .map_or(DatabaseValue::Null, DatabaseValue::Bool),
-                    incident
-                        .domestic
-                        .map_or(DatabaseValue::Null, DatabaseValue::Bool),
-                    incident
-                        .location_type
-                        .as_ref()
-                        .map_or(DatabaseValue::Null, |l| DatabaseValue::String(l.clone())),
-                    DatabaseValue::Bool(has_coordinates),
-                    DatabaseValue::Bool(incident.geocoded),
-                ],
-            )
-            .await?;
-
-        inserted += result;
+    if valid.is_empty() {
+        return Ok(0);
     }
 
-    Ok(inserted)
+    let mut total_inserted = 0u64;
+
+    for chunk in valid.chunks(CHUNK_SIZE) {
+        let mut sql = String::from(
+            "INSERT INTO crime_incidents (\
+                source_id, source_incident_id, category_id, location, \
+                occurred_at, reported_at, description, block_address, \
+                city, state, arrest_made, domestic, location_type, \
+                has_coordinates, geocoded\
+            ) VALUES ",
+        );
+        let mut params: Vec<DatabaseValue> =
+            Vec::with_capacity(chunk.len() * PARAMS_PER_ROW as usize);
+        let mut idx = 1u32;
+
+        for (i, (incident, cat_id)) in chunk.iter().enumerate() {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            write!(
+                sql,
+                "(${p1}, ${p2}, ${p3}, \
+                 ST_SetSRID(ST_MakePoint(${p4}, ${p5}), 4326)::geography, \
+                 ${p6}, ${p7}, ${p8}, ${p9}, ${p10}, ${p11}, ${p12}, ${p13}, ${p14}, ${p15}, ${p16})",
+                p1 = idx,
+                p2 = idx + 1,
+                p3 = idx + 2,
+                p4 = idx + 3,
+                p5 = idx + 4,
+                p6 = idx + 5,
+                p7 = idx + 6,
+                p8 = idx + 7,
+                p9 = idx + 8,
+                p10 = idx + 9,
+                p11 = idx + 10,
+                p12 = idx + 11,
+                p13 = idx + 12,
+                p14 = idx + 13,
+                p15 = idx + 14,
+                p16 = idx + 15,
+            )
+            .unwrap();
+
+            let has_coordinates = incident.longitude.is_some() && incident.latitude.is_some();
+
+            params.push(DatabaseValue::Int32(source_id));
+            params.push(DatabaseValue::String(incident.source_incident_id.clone()));
+            params.push(DatabaseValue::Int32(*cat_id));
+            params.push(DatabaseValue::Real64(incident.longitude.unwrap_or(0.0)));
+            params.push(DatabaseValue::Real64(incident.latitude.unwrap_or(0.0)));
+            params.push(DatabaseValue::DateTime(incident.occurred_at.naive_utc()));
+            params.push(
+                incident
+                    .reported_at
+                    .as_ref()
+                    .map_or(DatabaseValue::Null, |dt| {
+                        DatabaseValue::DateTime(dt.naive_utc())
+                    }),
+            );
+            params.push(
+                incident
+                    .description
+                    .as_ref()
+                    .map_or(DatabaseValue::Null, |d| DatabaseValue::String(d.clone())),
+            );
+            params.push(
+                incident
+                    .block_address
+                    .as_ref()
+                    .map_or(DatabaseValue::Null, |a| DatabaseValue::String(a.clone())),
+            );
+            params.push(DatabaseValue::String(incident.city.clone()));
+            params.push(DatabaseValue::String(incident.state.clone()));
+            params.push(
+                incident
+                    .arrest_made
+                    .map_or(DatabaseValue::Null, DatabaseValue::Bool),
+            );
+            params.push(
+                incident
+                    .domestic
+                    .map_or(DatabaseValue::Null, DatabaseValue::Bool),
+            );
+            params.push(
+                incident
+                    .location_type
+                    .as_ref()
+                    .map_or(DatabaseValue::Null, |l| DatabaseValue::String(l.clone())),
+            );
+            params.push(DatabaseValue::Bool(has_coordinates));
+            params.push(DatabaseValue::Bool(incident.geocoded));
+
+            idx += PARAMS_PER_ROW;
+        }
+
+        sql.push_str(" ON CONFLICT (source_id, source_incident_id) DO NOTHING");
+
+        total_inserted += db.exec_raw_params(&sql, &params).await?;
+    }
+
+    Ok(total_inserted)
 }
 
 /// Returns the number of incidents already stored for a given source.
