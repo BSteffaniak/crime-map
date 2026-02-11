@@ -12,10 +12,12 @@ name = "crime_map_cli"
 path = "src/main.rs"
 
 [dependencies]
+crime_map_database = { workspace = true }
 crime_map_ingest = { workspace = true }
 crime_map_generate = { workspace = true }
 crime_map_discover = { workspace = true }
 crime_map_server = { workspace = true }
+crime_map_source = { workspace = true }
 
 actix-web = { workspace = true }
 actix-rt = { workspace = true }

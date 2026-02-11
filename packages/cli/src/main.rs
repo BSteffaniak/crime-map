@@ -8,10 +8,13 @@
 //! interactively select which tool to run (ingest, generate, server,
 //! discover) and guides them through the configuration for each.
 
+mod pipeline;
+
 use dialoguer::Select;
 
 /// Top-level tool selection for the crime map toolchain.
 enum Tool {
+    RunPipeline,
     Ingest,
     Generate,
     Server,
@@ -19,11 +22,18 @@ enum Tool {
 }
 
 impl Tool {
-    const ALL: &[Self] = &[Self::Ingest, Self::Generate, Self::Server, Self::Discover];
+    const ALL: &[Self] = &[
+        Self::RunPipeline,
+        Self::Ingest,
+        Self::Generate,
+        Self::Server,
+        Self::Discover,
+    ];
 
     #[must_use]
     const fn label(&self) -> &'static str {
         match self {
+            Self::RunPipeline => "Run full pipeline",
             Self::Ingest => "Ingest data",
             Self::Generate => "Generate tiles & databases",
             Self::Server => "Start server",
@@ -48,6 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .interact()?;
 
     match Tool::ALL[idx] {
+        Tool::RunPipeline => pipeline::run().await?,
         Tool::Ingest => crime_map_ingest::interactive::run().await?,
         Tool::Generate => crime_map_generate::interactive::run().await?,
         Tool::Server => {
