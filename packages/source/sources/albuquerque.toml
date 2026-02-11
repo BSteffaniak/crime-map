@@ -1,0 +1,41 @@
+id = "albuquerque_pd"
+name = "Albuquerque Police Department"
+city = "Albuquerque"
+state = "NM"
+output_filename = "albuquerque_crimes.json"
+
+[fetcher]
+type = "arcgis"
+# Official APD Incidents from cityofalbuquerque on ArcGIS Online.
+# 108K+ records with point geometry (State Plane 2903, request outSR=4326).
+# Fields are minimal: ReportDateTime, IncidentType, BlockAddress, CMLegend.
+query_urls = [
+  "https://services.arcgis.com/CWv1abTnC3urn4bV/arcgis/rest/services/Incidents/FeatureServer/0/query",
+]
+page_size = 2000
+date_column = "ReportDateTime"
+
+[fields]
+incident_id = ["OBJECTID"]
+crime_type = ["CMLegend"]
+block_address = "BlockAddress"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "ReportDateTime"
+
+[fields.lat]
+field = "_geometry_y"
+type = "f64"
+
+[fields.lng]
+field = "_geometry_x"
+type = "f64"
+
+[fields.description]
+type = "combine"
+fields = ["CMLegend", "IncidentType"]
+separator = " - "
+
+[fields.arrest]
+type = "none"

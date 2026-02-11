@@ -1,0 +1,28 @@
+id = "norfolk_pd"
+name = "Norfolk Police Department"
+city = "Norfolk"
+state = "VA"
+output_filename = "norfolk_crimes.json"
+
+[fetcher]
+type = "socrata"
+api_url = "https://data.norfolk.gov/resource/r7bn-2egr.json"
+date_column = "date_occu"
+page_size = 50000
+
+[fields]
+incident_id = ["inci_id"]
+crime_type = ["offense"]
+block_address = "street"
+location_type = "neighborhd"
+
+[fields.occurred_at]
+type = "simple"
+field = "date_occu"
+
+[fields.description]
+type = "single"
+field = "offense"
+
+[fields.arrest]
+type = "none"

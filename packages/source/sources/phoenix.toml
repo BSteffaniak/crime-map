@@ -1,0 +1,30 @@
+id = "phoenix_pd"
+name = "Phoenix Police Department"
+city = "Phoenix"
+state = "AZ"
+output_filename = "phoenix_crimes.json"
+
+[fetcher]
+type = "ckan"
+api_url = "https://www.phoenixopendata.com/api/3/action/datastore_search"
+resource_ids = ["0ce3411a-2fc6-4302-a33f-167f68608a20"]
+page_size = 5000
+date_column = "OCCURRED ON"
+
+[fields]
+incident_id = ["INC NUMBER"]
+crime_type = ["UCR CRIME CATEGORY"]
+block_address = "100 BLOCK ADDR"
+location_type = "PREMISE TYPE"
+
+[fields.occurred_at]
+type = "simple"
+field = "OCCURRED ON"
+
+[fields.description]
+type = "combine"
+fields = ["UCR CRIME CATEGORY", "PREMISE TYPE"]
+separator = " - "
+
+[fields.arrest]
+type = "none"

@@ -45,6 +45,7 @@ const SOURCE_TOMLS: &[(&str, &str)] = &[
     ("cambridge", include_str!("../sources/cambridge.toml")),
     ("mesa", include_str!("../sources/mesa.toml")),
     ("everett", include_str!("../sources/everett.toml")),
+    ("norfolk_va", include_str!("../sources/norfolk_va.toml")),
     // ── ArcGIS sources ───────────────────────────────────────────────
     ("dc", include_str!("../sources/dc.toml")),
     ("baltimore_md", include_str!("../sources/baltimore_md.toml")),
@@ -79,6 +80,11 @@ const SOURCE_TOMLS: &[(&str, &str)] = &[
     ),
     ("houston", include_str!("../sources/houston.toml")),
     ("nashville", include_str!("../sources/nashville.toml")),
+    ("albuquerque", include_str!("../sources/albuquerque.toml")),
+    (
+        "virginia_beach_va",
+        include_str!("../sources/virginia_beach_va.toml"),
+    ),
     // ── Carto sources ────────────────────────────────────────────────
     ("philly", include_str!("../sources/philly.toml")),
     // ── CKAN sources ─────────────────────────────────────────────────
@@ -88,13 +94,14 @@ const SOURCE_TOMLS: &[(&str, &str)] = &[
         "pittsburgh_current",
         include_str!("../sources/pittsburgh_current.toml"),
     ),
+    ("phoenix", include_str!("../sources/phoenix.toml")),
     // ── OData sources ────────────────────────────────────────────────
     ("arlington_va", include_str!("../sources/arlington_va.toml")),
 ];
 
 /// Total number of configured sources (used in tests).
 #[cfg(test)]
-const EXPECTED_SOURCE_COUNT: usize = 44;
+const EXPECTED_SOURCE_COUNT: usize = 48;
 
 /// Returns all configured source definitions, parsed from embedded TOML.
 ///

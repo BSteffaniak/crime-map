@@ -1,0 +1,34 @@
+id = "virginia_beach_pd"
+name = "Virginia Beach Police Department"
+city = "Virginia Beach"
+state = "VA"
+output_filename = "virginia_beach_crimes.json"
+
+[fetcher]
+type = "arcgis"
+# Police Offense Reports from VBCGIS_OrgAcct1.
+# Non-spatial table (no geometry), 175K+ records. NIBRS codes.
+query_urls = [
+  "https://services2.arcgis.com/CyVvlIiUfRBmMQuu/arcgis/rest/services/Police_Incident_Reports_view/FeatureServer/0/query",
+]
+page_size = 2000
+date_column = "Date_Occurred"
+
+[fields]
+incident_id = ["IncidentNumber"]
+crime_type = ["Offense_Code", "Offense_Description"]
+block_address = "Street"
+location_type = "Subdivision"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "Date_Occurred"
+
+[fields.description]
+type = "single"
+field = "Offense_Description"
+
+[fields.arrest]
+type = "string_contains"
+field = "Case_Status"
+contains = "arrest"
