@@ -27,7 +27,7 @@ use switchy_database::Database;
 use tokio::sync::mpsc;
 
 use crate::providers::{ContentBlock, LlmProvider, Message, MessageContent, StopReason};
-use crate::{AgentEvent, AiError};
+use crate::{AgentEvent, AgentOutcome, AiError};
 
 /// Maximum number of LLM round-trips to prevent infinite loops.
 const MAX_ITERATIONS: u32 = 25;
@@ -171,12 +171,8 @@ impl AgentBudget {
 /// Sends [`AgentEvent`]s through the provided channel as the agent works.
 /// The final event will be either `AgentEvent::Answer` or `AgentEvent::Error`.
 ///
-/// Returns the full conversation `messages` vec on success, so the caller
-/// can store it for session continuity.
-///
-/// # Errors
-///
-/// Returns [`AiError`] if the agent loop fails fatally.
+/// Always returns an [`AgentOutcome`] containing the accumulated messages,
+/// even on failure. This ensures the caller can persist partial progress.
 #[allow(clippy::too_many_lines)]
 pub async fn run_agent(
     provider: &dyn LlmProvider,
@@ -186,7 +182,7 @@ pub async fn run_agent(
     prior_messages: Option<Vec<Message>>,
     limits: &AgentLimits,
     tx: mpsc::Sender<AgentEvent>,
-) -> Result<Vec<Message>, AiError> {
+) -> AgentOutcome {
     let system_prompt = build_system_prompt(context);
     let tools = tool_definitions();
     let mut budget = AgentBudget::new();
@@ -282,14 +278,25 @@ pub async fn run_agent(
                 "LLM call timed out after {:.0}s",
                 limits.per_llm_timeout.as_secs_f64()
             );
-            return Err(AiError::Provider {
-                message: format!(
-                    "LLM provider did not respond within {:.0} seconds. Please try again.",
-                    limits.per_llm_timeout.as_secs_f64()
-                ),
-            });
+            return AgentOutcome {
+                messages,
+                result: Err(AiError::Provider {
+                    message: format!(
+                        "LLM provider did not respond within {:.0} seconds. Please try again.",
+                        limits.per_llm_timeout.as_secs_f64()
+                    ),
+                }),
+            };
         };
-        let response = response?;
+        let response = match response {
+            Ok(r) => r,
+            Err(e) => {
+                return AgentOutcome {
+                    messages,
+                    result: Err(e),
+                };
+            }
+        };
 
         // Check if the model wants to use tools
         if response.stop_reason == StopReason::ToolUse {
@@ -302,7 +309,10 @@ pub async fn run_agent(
                 // No actual tool calls despite stop_reason — treat as final answer
                 let text = extract_text(&response.content);
                 let _ = tx.send(AgentEvent::Answer { text }).await;
-                return Ok(messages);
+                return AgentOutcome {
+                    messages,
+                    result: Ok(()),
+                };
             }
 
             // Add assistant message with all content blocks
@@ -433,13 +443,19 @@ pub async fn run_agent(
                 content: MessageContent::Blocks(response.content),
             });
             let _ = tx.send(AgentEvent::Answer { text }).await;
-            return Ok(messages);
+            return AgentOutcome {
+                messages,
+                result: Ok(()),
+            };
         }
     }
 
-    Err(AiError::MaxIterations {
-        max_iterations: MAX_ITERATIONS,
-    })
+    AgentOutcome {
+        messages,
+        result: Err(AiError::MaxIterations {
+            max_iterations: MAX_ITERATIONS,
+        }),
+    }
 }
 
 /// Forces the agent to produce a final answer by injecting a directive
@@ -452,7 +468,7 @@ async fn force_final_answer(
     limits: &AgentLimits,
     tx: &mpsc::Sender<AgentEvent>,
     directive: &str,
-) -> Result<Vec<Message>, AiError> {
+) -> AgentOutcome {
     inject_system_context(messages, directive);
 
     let _ = tx
@@ -481,9 +497,20 @@ async fn force_final_answer(
             role: "assistant".to_string(),
             content: MessageContent::Text(fallback),
         });
-        return Ok(messages.clone());
+        return AgentOutcome {
+            messages: messages.clone(),
+            result: Ok(()),
+        };
     };
-    let response = response?;
+    let response = match response {
+        Ok(r) => r,
+        Err(e) => {
+            return AgentOutcome {
+                messages: messages.clone(),
+                result: Err(e),
+            };
+        }
+    };
 
     let text = extract_text(&response.content);
     let answer = if text.is_empty() {
@@ -499,7 +526,10 @@ async fn force_final_answer(
         content: MessageContent::Blocks(response.content),
     });
     let _ = tx.send(AgentEvent::Answer { text: answer }).await;
-    Ok(messages.clone())
+    AgentOutcome {
+        messages: messages.clone(),
+        result: Ok(()),
+    }
 }
 
 /// Injects a system-level advisory message into the conversation as a

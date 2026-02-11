@@ -52,6 +52,22 @@ pub enum AiError {
     },
 }
 
+/// The result of an agent run, always containing the accumulated messages
+/// regardless of whether the agent succeeded or failed.
+///
+/// This ensures the caller can always persist the conversation state,
+/// including partial progress when the agent errors out.
+pub struct AgentOutcome {
+    /// The full conversation message history, including the user's new
+    /// question and any tool calls / results accumulated before completion
+    /// or failure.
+    pub messages: Vec<providers::Message>,
+
+    /// `Ok(())` if the agent produced a final answer, or the error that
+    /// caused it to stop.
+    pub result: Result<(), AiError>,
+}
+
 /// Events emitted by the agent during execution.
 ///
 /// These are streamed to the frontend via SSE.

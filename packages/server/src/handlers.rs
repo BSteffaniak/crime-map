@@ -592,6 +592,26 @@ pub async fn ai_ask(state: web::Data<AppState>, body: web::Json<AiAskRequest>) -
         }
     };
 
+    // ── Eager-save: persist the user's new question immediately ────────
+    // This ensures the question is never lost, even if the agent crashes
+    // or the safety-net timeout fires and cancels the future.
+    {
+        let mut eager_messages = prior_messages.clone().unwrap_or_default();
+        eager_messages.push(crime_map_ai::providers::Message {
+            role: "user".to_string(),
+            content: crime_map_ai::providers::MessageContent::Text(question.clone()),
+        });
+        if let Err(e) = crime_map_conversations::save_conversation(
+            state.conversations_db.as_ref(),
+            &conversation_id,
+            &eager_messages,
+        )
+        .await
+        {
+            log::error!("Failed to eager-save user message for {conversation_id}: {e}");
+        }
+    }
+
     let db = state.db.clone();
     let context = state.ai_context.clone();
     let conversations_db = state.conversations_db.clone();
@@ -622,20 +642,25 @@ pub async fn ai_ask(state: web::Data<AppState>, body: web::Json<AiAskRequest>) -
         )
         .await;
 
-        match result {
-            Ok(Ok(final_messages)) => {
-                // Persist the updated conversation history to SQLite
-                if let Err(e) = crime_map_conversations::save_conversation(
-                    conversations_db.as_ref(),
-                    &conv_id,
-                    &final_messages,
-                )
-                .await
+        // Helper: persist conversation state to SQLite
+        let save = |msgs: &[crime_map_ai::providers::Message]| {
+            let db = conversations_db.clone();
+            let id = conv_id.clone();
+            let msgs = msgs.to_vec();
+            async move {
+                if let Err(e) =
+                    crime_map_conversations::save_conversation(db.as_ref(), &id, &msgs).await
                 {
-                    log::error!("Failed to save conversation {conv_id}: {e}");
+                    log::error!("Failed to save conversation {id}: {e}");
                 }
             }
-            Ok(Err(e)) => {
+        };
+
+        if let Ok(outcome) = result {
+            // Always save the messages — whether the agent succeeded or failed
+            save(&outcome.messages).await;
+
+            if let Err(e) = outcome.result {
                 log::error!("Agent error: {e}");
                 let _ = tx
                     .send(crime_map_ai::AgentEvent::Error {
@@ -643,17 +668,16 @@ pub async fn ai_ask(state: web::Data<AppState>, body: web::Json<AiAskRequest>) -
                     })
                     .await;
             }
-            Err(_) => {
-                // Safety-net timeout — should rarely fire since the agent
-                // has its own duration hard limit.
-                log::error!("Agent hit safety-net timeout after {safety_timeout:?}");
-                let _ = tx
-                    .send(crime_map_ai::AgentEvent::Error {
-                        message: "Request exceeded the safety timeout. Please try again."
-                            .to_string(),
-                    })
-                    .await;
-            }
+        } else {
+            // Safety-net timeout — the agent future was cancelled so we
+            // don't have its messages. The eager-save above ensures the
+            // user's question is at least persisted.
+            log::error!("Agent hit safety-net timeout after {safety_timeout:?}");
+            let _ = tx
+                .send(crime_map_ai::AgentEvent::Error {
+                    message: "Request exceeded the safety timeout. Please try again.".to_string(),
+                })
+                .await;
         }
     });
 
