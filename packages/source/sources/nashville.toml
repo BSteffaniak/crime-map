@@ -4,6 +4,13 @@ city = "Nashville"
 state = "TN"
 output_filename = "nashville_crimes.json"
 
+[license]
+license_type = "open_data"
+attribution_required = true
+attribution_text = "Metro Nashville"
+allows_redistribution = true
+restricted = false
+
 [fetcher]
 type = "arcgis"
 # Metro Nashville Police Department Incidents — single view layer.

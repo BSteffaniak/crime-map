@@ -4,6 +4,14 @@ city = "Phoenix"
 state = "AZ"
 output_filename = "phoenix_crimes.json"
 
+[license]
+license_type = "open_data"
+tos_url = "https://www.phoenixopendata.com/pages/terms"
+attribution_required = true
+attribution_text = "City of Phoenix"
+allows_redistribution = true
+restricted = false
+
 [fetcher]
 type = "ckan"
 api_url = "https://www.phoenixopendata.com/api/3/action/datastore_search"

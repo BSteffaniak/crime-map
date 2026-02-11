@@ -4,6 +4,13 @@ city = "Denver"
 state = "CO"
 output_filename = "denver_crimes.json"
 
+[license]
+license_type = "open_data"
+attribution_required = true
+attribution_text = "City and County of Denver"
+allows_redistribution = true
+restricted = false
+
 [fetcher]
 type = "socrata"
 api_url = "https://data.denvergov.org/resource/j6g8-fkyh.json"

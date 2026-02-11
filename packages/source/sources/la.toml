@@ -4,6 +4,14 @@ city = "Los Angeles"
 state = "CA"
 output_filename = "la_crimes.json"
 
+[license]
+license_type = "cc_zero"
+tos_url = "https://data.lacity.org/terms-of-use"
+attribution_required = false
+allows_redistribution = true
+allows_scraping = true
+restricted = false
+
 [fetcher]
 type = "socrata"
 api_url = "https://data.lacity.org/resource/2nrs-mtv8.json"

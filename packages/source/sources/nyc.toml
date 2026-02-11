@@ -4,6 +4,15 @@ city = "New York"
 state = "NY"
 output_filename = "nyc_crimes.json"
 
+[license]
+license_type = "open_data"
+tos_url = "https://opendata.cityofnewyork.us/overview/#termsofuse"
+attribution_required = true
+attribution_text = "Police Department (NYPD)"
+allows_redistribution = true
+allows_scraping = true
+restricted = false
+
 [fetcher]
 type = "socrata"
 api_url = "https://data.cityofnewyork.us/resource/5uac-w243.json"

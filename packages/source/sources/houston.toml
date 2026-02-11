@@ -4,6 +4,13 @@ city = "Houston"
 state = "TX"
 output_filename = "houston_crimes.json"
 
+[license]
+license_type = "open_data"
+attribution_required = true
+attribution_text = "Houston Police Department"
+allows_redistribution = true
+restricted = false
+
 [fetcher]
 type = "arcgis"
 # HPD NIBRS Yearly Cases — five layers covering 2020–2024.

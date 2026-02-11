@@ -20,6 +20,7 @@ members = [
   "packages/neighborhood/models",
   "packages/neighborhood",
   "packages/scraper",
+  "packages/pdf",
   "packages/geocoder",
 ]
 
@@ -64,6 +65,7 @@ crime_map_discover = { default-features = false, path = "packages/discover" }
 crime_map_neighborhood_models = { default-features = false, path = "packages/neighborhood/models" }
 crime_map_neighborhood = { default-features = false, path = "packages/neighborhood" }
 crime_map_scraper = { default-features = false, path = "packages/scraper" }
+crime_map_pdf = { default-features = false, path = "packages/pdf" }
 crime_map_geocoder = { default-features = false, path = "packages/geocoder" }
 
 # MoosicBox / Switchy (git references)
@@ -131,6 +133,7 @@ duckdb = { version = "1.4.4", default-features = false }
 indicatif = { version = "0.17.11", default-features = false }
 scraper = { version = "0.25.0", default-features = false }
 flate2 = { version = "1.1.9", default-features = false, features = ["default"] }
+pdf-extract = { version = "0.10.0", default-features = false }
 
 # AWS SDK (optional, for Bedrock provider)
 aws-sdk-bedrockruntime = { version = "1.124.0", default-features = false }

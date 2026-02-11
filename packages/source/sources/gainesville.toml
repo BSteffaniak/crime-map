@@ -4,6 +4,13 @@ city = "Gainesville"
 state = "FL"
 output_filename = "gainesville_crimes.json"
 
+[license]
+license_type = "open_data"
+attribution_required = true
+attribution_text = "City of Gainesville"
+allows_redistribution = true
+restricted = false
+
 [fetcher]
 type = "socrata"
 api_url = "https://data.cityofgainesville.org/resource/gvua-xt9q.json"

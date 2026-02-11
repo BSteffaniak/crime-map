@@ -4,6 +4,16 @@ city = "Chicago"
 state = "IL"
 output_filename = "chicago_crimes.json"
 
+[license]
+license_type = "tos_restricted"
+tos_url = "https://www.chicago.gov/city/en/narr/foia/data_disclaimer.html"
+attribution_required = true
+attribution_text = "Chicago Police Department"
+allows_redistribution = true
+allows_scraping = true
+restricted = false
+notes = "SEE_TERMS_OF_USE per Socrata metadata - permits free use but prohibits misrepresentation"
+
 [fetcher]
 type = "socrata"
 api_url = "https://data.cityofchicago.org/resource/ijzp-q8t2.json"

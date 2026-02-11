@@ -1421,6 +1421,14 @@ fn extract_source_info(fetcher: &crime_map_source::source_def::FetcherConfig) ->
         ),
         FetcherConfig::Carto { api_url, .. } => ("carto", api_url.clone()),
         FetcherConfig::Odata { api_url, .. } => ("odata", api_url.clone()),
+        FetcherConfig::HtmlTable { url, .. } => ("scrape", url.clone()),
+        FetcherConfig::CsvDownload { urls, .. } => {
+            ("csv", urls.first().cloned().unwrap_or_default())
+        }
+        FetcherConfig::JsonPaginated { api_url, .. } => ("json_paginated", api_url.clone()),
+        FetcherConfig::PdfExtract { urls, .. } => {
+            ("pdf_extract", urls.first().cloned().unwrap_or_default())
+        }
     }
 }
 

@@ -8,6 +8,8 @@
 //! so that normalization and database insertion happen incrementally rather
 //! than buffering the entire dataset in memory.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use crime_map_source_models::NormalizedIncident;
 use serde::Deserialize;
@@ -16,8 +18,12 @@ use tokio::sync::mpsc;
 use crate::arcgis::{ArcGisConfig, fetch_arcgis};
 use crate::carto::{CartoConfig, fetch_carto};
 use crate::ckan::{CkanConfig, fetch_ckan};
+use crate::csv_download::{CsvDownloadConfig, fetch_csv_download};
+use crate::html_table::{HtmlTableConfig, fetch_html_table};
+use crate::json_paginated::{JsonPaginatedConfig, fetch_json_paginated};
 use crate::odata::{ODataConfig, fetch_odata};
 use crate::parsing::parse_socrata_date;
+use crate::pdf_extract::{PdfExtractConfig, fetch_pdf_extract};
 use crate::socrata::{SocrataConfig, fetch_socrata};
 use crate::type_mapping::map_crime_type;
 use crate::{FetchOptions, SourceError};
@@ -40,10 +46,45 @@ pub struct SourceDefinition {
     pub state: String,
     /// Legacy output filename (kept for config compatibility).
     pub output_filename: String,
+    /// Licensing and usage metadata for this data source.
+    pub license: LicenseInfo,
     /// How to fetch raw data from the API.
     pub fetcher: FetcherConfig,
     /// Field name mappings for normalization.
     pub fields: FieldMapping,
+}
+
+// ── License metadata ─────────────────────────────────────────────────────
+
+/// Licensing and usage restrictions for a data source.
+///
+/// Every source MUST explicitly document its license. This ensures we
+/// always know what we can and cannot do with each dataset.
+#[derive(Debug, Deserialize)]
+pub struct LicenseInfo {
+    /// License type identifier.
+    ///
+    /// One of: `"public_domain"`, `"cc_zero"`, `"cc_by"`, `"cc_by_sa"`,
+    /// `"open_data"`, `"tos_restricted"`, `"proprietary"`, `"unknown"`.
+    pub license_type: String,
+    /// URL to the terms of service or license page, if available.
+    pub tos_url: Option<String>,
+    /// Whether attribution is required when using this data.
+    pub attribution_required: bool,
+    /// Verbatim attribution text to display when required.
+    pub attribution_text: Option<String>,
+    /// Whether redistribution of the data is allowed.
+    pub allows_redistribution: bool,
+    /// Whether scraping is explicitly allowed or not prohibited by the TOS.
+    ///
+    /// `None` when the TOS does not address scraping.
+    pub allows_scraping: Option<bool>,
+    /// If `true`, this source requires explicit opt-in to ingest (e.g.
+    /// proprietary or restricted-use data). Restricted sources are skipped
+    /// by default during `cargo ingest sync-all`.
+    pub restricted: bool,
+    /// Free-form notes about usage restrictions or licensing details.
+    pub notes: Option<String>,
 }
 
 // ── Fetcher config ───────────────────────────────────────────────────────
@@ -102,6 +143,78 @@ pub enum FetcherConfig {
         date_column: String,
         /// Records per page.
         page_size: u64,
+    },
+    /// HTML table scraping (police department websites with tabular data).
+    HtmlTable {
+        /// URL of the page containing the table.
+        url: String,
+        /// CSS selector for the target table element.
+        table_selector: Option<String>,
+        /// CSS selector for header cells.
+        header_selector: Option<String>,
+        /// CSS selector for body rows.
+        row_selector: Option<String>,
+        /// CSS selector for cells within a row.
+        cell_selector: Option<String>,
+        /// Delay between page fetches in milliseconds.
+        delay_ms: Option<u64>,
+        /// Additional HTTP headers.
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+    },
+    /// CSV file download (single or multiple URLs for yearly files).
+    CsvDownload {
+        /// URLs of CSV files to download.
+        urls: Vec<String>,
+        /// Field delimiter (default: comma).
+        delimiter: Option<String>,
+        /// Compression format: `"gzip"` or omit for uncompressed.
+        compressed: Option<String>,
+        /// Maximum records per CSV file.
+        max_records: Option<u64>,
+        /// Additional HTTP headers.
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+    },
+    /// Generic paginated JSON API (hidden APIs behind dashboards, etc.).
+    JsonPaginated {
+        /// Base API URL.
+        api_url: String,
+        /// Pagination strategy: `"offset"`, `"page"`, or `"cursor"`.
+        pagination: String,
+        /// Response format: `"bare_array"` (default) or `"wrapped"`.
+        response_format: Option<String>,
+        /// Dot-path to the records array (for `"wrapped"` responses).
+        records_path: Option<String>,
+        /// Records per page.
+        page_size: u64,
+        /// Override for the pagination query parameter name.
+        page_param: Option<String>,
+        /// Override for the page-size query parameter name.
+        size_param: Option<String>,
+        /// Delay between page fetches in milliseconds.
+        delay_ms: Option<u64>,
+        /// Additional HTTP headers.
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+    },
+    /// PDF table extraction (crime bulletins, reports, etc.).
+    PdfExtract {
+        /// URLs of PDF files to download.
+        urls: Vec<String>,
+        /// Extraction strategy: `"regex_rows"`, `"text_table"`, or
+        /// `"line_delimited"`.
+        extraction_strategy: String,
+        /// Regex pattern with named capture groups (for `regex_rows`).
+        row_pattern: Option<String>,
+        /// Column start character positions (for `text_table`).
+        column_boundaries: Option<Vec<u32>>,
+        /// Column names (for `text_table` and `line_delimited`).
+        column_names: Option<Vec<String>>,
+        /// Delimiter character (for `line_delimited`).
+        delimiter: Option<String>,
+        /// Number of header lines to skip.
+        skip_header_lines: Option<usize>,
     },
 }
 
@@ -418,6 +531,19 @@ impl SourceDefinition {
         &self.name
     }
 
+    /// Returns the licensing metadata for this source.
+    #[must_use]
+    pub const fn license(&self) -> &LicenseInfo {
+        &self.license
+    }
+
+    /// Returns `true` if this source is restricted and requires explicit
+    /// opt-in to ingest.
+    #[must_use]
+    pub const fn is_restricted(&self) -> bool {
+        self.license.restricted
+    }
+
     /// Returns the configured page size for this source's fetcher.
     #[must_use]
     pub const fn page_size(&self) -> u64 {
@@ -426,7 +552,12 @@ impl SourceDefinition {
             | FetcherConfig::Arcgis { page_size, .. }
             | FetcherConfig::Ckan { page_size, .. }
             | FetcherConfig::Carto { page_size, .. }
-            | FetcherConfig::Odata { page_size, .. } => *page_size,
+            | FetcherConfig::Odata { page_size, .. }
+            | FetcherConfig::JsonPaginated { page_size, .. } => *page_size,
+            // Non-paginated fetchers: return total-file-at-once sizes
+            FetcherConfig::HtmlTable { .. }
+            | FetcherConfig::CsvDownload { .. }
+            | FetcherConfig::PdfExtract { .. } => 0,
         }
     }
 
@@ -438,6 +569,7 @@ impl SourceDefinition {
     ///
     /// A fetch error (if any) is returned via the [`tokio::task::JoinHandle`].
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn fetch_pages(
         &self,
         options: &FetchOptions,
@@ -537,6 +669,106 @@ impl SourceDefinition {
                             date_column,
                             label: &name,
                             page_size: *page_size,
+                        },
+                        &options,
+                        &tx,
+                    )
+                    .await
+                }
+                FetcherConfig::HtmlTable {
+                    url,
+                    table_selector,
+                    header_selector,
+                    row_selector,
+                    cell_selector,
+                    delay_ms: _,
+                    headers,
+                } => {
+                    fetch_html_table(
+                        &HtmlTableConfig {
+                            url,
+                            label: &name,
+                            table_selector: table_selector.as_deref(),
+                            header_selector: header_selector.as_deref(),
+                            row_selector: row_selector.as_deref(),
+                            cell_selector: cell_selector.as_deref(),
+                            delay_ms: None,
+                            headers,
+                        },
+                        &options,
+                        &tx,
+                    )
+                    .await
+                }
+                FetcherConfig::CsvDownload {
+                    urls,
+                    delimiter,
+                    compressed,
+                    max_records,
+                    headers,
+                } => {
+                    fetch_csv_download(
+                        &CsvDownloadConfig {
+                            urls,
+                            label: &name,
+                            delimiter: delimiter.as_deref(),
+                            compressed: compressed.as_deref(),
+                            max_records: *max_records,
+                            headers,
+                        },
+                        &options,
+                        &tx,
+                    )
+                    .await
+                }
+                FetcherConfig::JsonPaginated {
+                    api_url,
+                    pagination,
+                    response_format,
+                    records_path,
+                    page_size,
+                    page_param,
+                    size_param,
+                    delay_ms,
+                    headers,
+                } => {
+                    fetch_json_paginated(
+                        &JsonPaginatedConfig {
+                            api_url,
+                            label: &name,
+                            pagination,
+                            response_format: response_format.as_deref(),
+                            records_path: records_path.as_deref(),
+                            page_size: *page_size,
+                            page_param: page_param.as_deref(),
+                            size_param: size_param.as_deref(),
+                            delay_ms: *delay_ms,
+                            headers,
+                        },
+                        &options,
+                        &tx,
+                    )
+                    .await
+                }
+                FetcherConfig::PdfExtract {
+                    urls,
+                    extraction_strategy,
+                    row_pattern,
+                    column_boundaries,
+                    column_names,
+                    delimiter,
+                    skip_header_lines,
+                } => {
+                    fetch_pdf_extract(
+                        &PdfExtractConfig {
+                            urls,
+                            label: &name,
+                            extraction_strategy,
+                            row_pattern: row_pattern.as_deref(),
+                            column_boundaries: column_boundaries.as_deref(),
+                            column_names: column_names.as_deref(),
+                            delimiter: delimiter.as_deref(),
+                            skip_header_lines: *skip_header_lines,
                         },
                         &options,
                         &tx,

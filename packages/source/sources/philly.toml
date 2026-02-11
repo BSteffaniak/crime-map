@@ -4,6 +4,15 @@ city = "Philadelphia"
 state = "PA"
 output_filename = "philly_crimes.json"
 
+[license]
+license_type = "open_data"
+tos_url = "https://www.opendataphilly.org/pages/open-data-policy"
+attribution_required = true
+attribution_text = "City of Philadelphia"
+allows_redistribution = true
+allows_scraping = true
+restricted = false
+
 [fetcher]
 type = "carto"
 api_url = "https://phl.carto.com/api/v2/sql"

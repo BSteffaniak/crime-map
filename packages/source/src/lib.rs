@@ -15,8 +15,12 @@
 pub mod arcgis;
 pub mod carto;
 pub mod ckan;
+pub mod csv_download;
+pub mod html_table;
+pub mod json_paginated;
 pub mod odata;
 pub mod parsing;
+pub mod pdf_extract;
 pub mod registry;
 pub mod socrata;
 pub mod source_def;
@@ -43,6 +47,10 @@ pub enum SourceError {
         /// Description of what went wrong.
         message: String,
     },
+
+    /// A scraping operation failed.
+    #[error("Scrape error: {0}")]
+    Scrape(#[from] crime_map_scraper::ScrapeError),
 }
 
 /// Configuration for fetching data from a source.

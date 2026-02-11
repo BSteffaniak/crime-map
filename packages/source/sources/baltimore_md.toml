@@ -4,6 +4,13 @@ city = "Baltimore"
 state = "MD"
 output_filename = "baltimore_arrests.json"
 
+[license]
+license_type = "open_data"
+attribution_required = true
+attribution_text = "Baltimore Police Department"
+allows_redistribution = true
+restricted = false
+
 [fetcher]
 type = "arcgis"
 query_urls = [

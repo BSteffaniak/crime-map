@@ -4,6 +4,14 @@ city = "Pittsburgh"
 state = "PA"
 output_filename = "pittsburgh_crimes_current.json"
 
+[license]
+license_type = "open_data"
+attribution_required = true
+attribution_text = "Western Pennsylvania Regional Data Center"
+allows_redistribution = true
+allows_scraping = true
+restricted = false
+
 [fetcher]
 type = "ckan"
 api_url = "https://data.wprdc.org/api/3/action/datastore_search"

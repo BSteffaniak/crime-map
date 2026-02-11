@@ -4,6 +4,14 @@ city = "Seattle"
 state = "WA"
 output_filename = "seattle_crimes.json"
 
+[license]
+license_type = "public_domain"
+tos_url = "https://data.seattle.gov/stories/s/Data-Policy/6ukr-wvup/"
+attribution_required = false
+allows_redistribution = true
+allows_scraping = true
+restricted = false
+
 [fetcher]
 type = "socrata"
 api_url = "https://data.seattle.gov/resource/tazs-3rd5.json"

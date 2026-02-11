@@ -4,6 +4,13 @@ city = "Oakland"
 state = "CA"
 output_filename = "oakland_crimes.json"
 
+[license]
+license_type = "open_data"
+attribution_required = true
+attribution_text = "Oakland Police Department"
+allows_redistribution = true
+restricted = false
+
 [fetcher]
 type = "socrata"
 api_url = "https://data.oaklandca.gov/resource/ppgh-7dqv.json"

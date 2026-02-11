@@ -4,6 +4,13 @@ city = "Baton Rouge"
 state = "LA"
 output_filename = "baton_rouge_crimes_historical.json"
 
+[license]
+license_type = "open_data"
+attribution_required = true
+attribution_text = "City of Baton Rouge"
+allows_redistribution = true
+restricted = false
+
 [fetcher]
 type = "socrata"
 api_url = "https://data.brla.gov/resource/fabb-cnnu.json"

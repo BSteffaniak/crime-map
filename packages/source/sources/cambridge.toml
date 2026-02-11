@@ -4,6 +4,13 @@ city = "Cambridge"
 state = "MA"
 output_filename = "cambridge_crimes.json"
 
+[license]
+license_type = "open_data"
+attribution_required = true
+attribution_text = "City of Cambridge"
+allows_redistribution = true
+restricted = false
+
 [fetcher]
 type = "socrata"
 api_url = "https://data.cambridgema.gov/resource/xuad-73uj.json"

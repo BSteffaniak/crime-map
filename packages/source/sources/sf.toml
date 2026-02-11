@@ -4,6 +4,15 @@ city = "San Francisco"
 state = "CA"
 output_filename = "sf_crimes.json"
 
+[license]
+license_type = "public_domain"
+tos_url = "https://datasf.org/opendata/terms-of-use/"
+attribution_required = false
+allows_redistribution = true
+allows_scraping = true
+restricted = false
+notes = "PDDL (Public Domain Dedication and License) per Socrata metadata"
+
 [fetcher]
 type = "socrata"
 api_url = "https://data.sfgov.org/resource/wg3w-h783.json"

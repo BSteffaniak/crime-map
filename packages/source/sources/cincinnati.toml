@@ -4,6 +4,12 @@ city = "Cincinnati"
 state = "OH"
 output_filename = "cincinnati_crimes.json"
 
+[license]
+license_type = "public_domain"
+attribution_required = false
+allows_redistribution = true
+restricted = false
+
 [fetcher]
 type = "socrata"
 api_url = "https://data.cincinnati-oh.gov/resource/k59e-2pvf.json"

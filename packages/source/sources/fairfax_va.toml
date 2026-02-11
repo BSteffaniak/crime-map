@@ -4,6 +4,13 @@ city = "Fairfax County"
 state = "VA"
 output_filename = "fairfax_county_crimes.json"
 
+[license]
+license_type = "open_data"
+attribution_required = true
+attribution_text = "Fairfax County Police Department"
+allows_redistribution = true
+restricted = false
+
 [fetcher]
 type = "arcgis"
 # Three NIBRS category layers: Person (layer 1), Property (layer 0), Society (layer 0).

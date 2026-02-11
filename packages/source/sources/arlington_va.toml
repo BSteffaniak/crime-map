@@ -4,6 +4,13 @@ city = "Arlington"
 state = "VA"
 output_filename = "arlington_crimes.json"
 
+[license]
+license_type = "open_data"
+attribution_required = true
+attribution_text = "Arlington County"
+allows_redistribution = true
+restricted = false
+
 [fetcher]
 type = "odata"
 api_url = "https://datahub-v2.arlingtonva.us/api/Police/IncidentLog"

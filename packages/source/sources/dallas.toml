@@ -4,6 +4,15 @@ city = "Dallas"
 state = "TX"
 output_filename = "dallas_crimes.json"
 
+[license]
+license_type = "cc_by"
+attribution_required = true
+attribution_text = "Dallas Police Department"
+allows_redistribution = true
+allows_scraping = true
+restricted = false
+notes = "ODC-BY (Open Data Commons Attribution License) per Socrata metadata"
+
 [fetcher]
 type = "socrata"
 api_url = "https://www.dallasopendata.com/resource/qv6i-rri7.json"

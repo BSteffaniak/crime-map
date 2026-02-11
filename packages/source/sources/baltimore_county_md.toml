@@ -4,6 +4,13 @@ city = "Baltimore County"
 state = "MD"
 output_filename = "baltimore_county_crimes.json"
 
+[license]
+license_type = "open_data"
+attribution_required = true
+attribution_text = "Baltimore County"
+allows_redistribution = true
+restricted = false
+
 [fetcher]
 type = "arcgis"
 # MapServer table (no geometry layer) — queries use the same ArcGIS REST API.
