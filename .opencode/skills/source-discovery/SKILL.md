@@ -18,6 +18,51 @@ Every city with a police department has crime data. The question is never "does 
 - **Document licensing, always.** Every source needs a `[license]` section in its TOML. This is non-negotiable. But "restricted" data is still configured — it's just opt-in at ingest time.
 - **Never mark a city as "no data."** Mark it as "not yet found." Come back with new strategies.
 
+## Evolving the System
+
+**You are not just a user of this system — you are a builder.** When you encounter a data source that doesn't fit the current infrastructure, your job is not to log it and move on. You should fix the infrastructure so it fits.
+
+**If you're working around a limitation, fix the limitation.**
+
+### What you can (and should) change directly:
+
+1. **Create new fetcher types.** If none of the existing fetchers (`socrata`, `arcgis`, `ckan`, `carto`, `odata`, `html_table`, `csv_download`, `json_paginated`, `pdf_extract`) can handle a source, add a new `FetcherConfig` variant in `packages/source/src/source_def.rs`, implement its bridge function, and wire it into `fetch_pages()`. Examples of fetchers that might be needed in the future: `graphql`, `xlsx_download`, `soap_xml`, `geojson_download`, `rss_feed`.
+
+2. **Enhance existing fetchers.** If a fetcher is close but needs new fields or behaviors, add them. For example: adding cookie/session auth to `json_paginated`, adding POST request support, adding retry logic, adding custom date filtering. Add the new field to the `FetcherConfig` variant (as `Option` so existing TOMLs don't break), implement the behavior in the bridge function, and update the TOML template in this SKILL.md.
+
+3. **Add new PDF extraction strategies.** The `crime_map_pdf` crate (`packages/pdf/`) currently has three strategies: `regex_rows`, `text_table`, `line_delimited`. If a PDF doesn't fit these, add a new `ExtractionStrategy` variant and implement it. Examples: multi-line records, nested tables, form-based PDFs, scanned PDFs (OCR).
+
+4. **Add new date/description/coordinate extractors.** If a source's date format doesn't fit the existing `DateExtractor` variants, add a new one. Same for `DescriptionExtractor`, `ArrestExtractor`, and `CoordType`. These are all enums in `source_def.rs` designed to grow.
+
+5. **Create new crates.** If a capability doesn't belong in any existing crate, create a new one under `packages/`. Follow the naming convention (`crime_map_{name}`), add it to the workspace `Cargo.toml`, and include the standard clippy/feature attributes. This is how `crime_map_pdf` was created.
+
+6. **Update this SKILL.md.** When you discover new search strategies, API patterns, platform-specific techniques, license discovery methods, or lessons learned, add them to this document. This file is a living guide that should grow with every discovery session.
+
+7. **Add new CLI commands or flags** to `cargo discover` if the current commands don't support a workflow you need. The CLI is in `packages/discover/src/main.rs`.
+
+8. **Modify the source TOML schema.** Add fields to `SourceDefinition`, `FieldMapping`, `LicenseInfo`, or any other struct when a source requires metadata that the current schema can't express. Use `Option<T>` for new fields to maintain backward compatibility with existing TOMLs.
+
+### When making infrastructure changes, follow project conventions:
+
+- **Collections:** Always use `BTreeMap`/`BTreeSet`, never `HashMap`/`HashSet`
+- **Dependencies:** `workspace = true` in package Cargo.toml, `default-features = false` with full patch version in workspace Cargo.toml
+- **Clippy:** `#![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]` and `fail-on-warnings` feature in every crate
+- **`#[must_use]`:** On constructors and getters returning types other than `Result`/`Option`
+- **Verify:** `cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test` must all pass
+- **Tests:** Add tests for new functionality. Every new fetcher should have at least a TOML parsing test.
+
+### Examples of infrastructure evolution:
+
+| Scenario | Action |
+|----------|--------|
+| Source needs cookie-based auth | Add `cookies: Option<BTreeMap<String, String>>` to `JsonPaginated` variant |
+| Source publishes Excel files | Create `XlsxDownload` fetcher type (may need new crate or extend `crime_map_scraper`) |
+| PDF has multi-line records spanning 3 lines each | Add `MultiLineRegex` extraction strategy to `crime_map_pdf` |
+| Source uses GraphQL API | Add `GraphQL` variant to `FetcherConfig` with `query` and `variables` fields |
+| Source has a unique date format like "Jan 15, 2024 2:30PM" | Add a new `DateExtractor` variant (e.g., `CustomFormat { field, format }`) |
+| Discovery CLI needs a "retry all rejected leads" command | Add the command to `packages/discover/src/main.rs` |
+| New license type encountered (e.g., ODbL) | Add it to the license type list in this SKILL.md and use it in the TOML |
+
 ## Overview
 
 The crime-map project maintains a discovery system for finding, evaluating, and tracking public crime data APIs across the United States. All discovery state is persisted in a SQLite database at `data/discovery.db`, managed through the CLI tool `cargo discover`.
@@ -334,6 +379,8 @@ When a city publishes data on its website without a formal API, evaluate for scr
 | `json_paginated` | `type = "json_paginated"` | Hidden JSON APIs behind dashboards/maps |
 | `pdf_extract` | `type = "pdf_extract"` | PDF crime bulletins and reports |
 
+**If none of these fetcher types fit the source's format, create a new one.** See the "Evolving the System" section above. Don't force a source into the wrong fetcher type — extend the system instead.
+
 **Recording scrape targets:**
 
 ```
@@ -605,6 +652,8 @@ cargo discover sources add \
 
 ### Source TOML Templates
 
+The following templates cover the currently supported fetcher types. This list is designed to grow — if a source doesn't fit any of these, create a new fetcher type (see "Evolving the System" above).
+
 #### Standard API Source (Socrata/ArcGIS/CKAN/Carto/OData)
 
 ```toml
@@ -729,6 +778,8 @@ row_pattern = '(?P<date>\d{2}/\d{2}/\d{4})\s+(?P<type>\w+)\s+(?P<address>.+)'
 # skip_header_lines = 2
 ```
 
+**If a PDF doesn't fit any of the three extraction strategies (`regex_rows`, `text_table`, `line_delimited`), add a new `ExtractionStrategy` variant to `packages/pdf/src/lib.rs` and implement it.** The PDF crate is explicitly designed to be extended.
+
 ## Recording Findings
 
 Every action during a discovery session must be persisted:
@@ -796,6 +847,7 @@ A standard discovery session follows this pattern:
    - What leads were evaluated and their outcomes
    - What sources were integrated
    - What new API patterns were discovered (cross-pollinate for other cities!)
+   - What infrastructure improvements were made (new fetcher types, extraction strategies, CLI commands, SKILL.md updates)
    - Suggested next steps for the following session
 
 ## CLI Reference
