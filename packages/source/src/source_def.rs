@@ -52,6 +52,12 @@ pub struct SourceDefinition {
     pub fetcher: FetcherConfig,
     /// Field name mappings for normalization.
     pub fields: FieldMapping,
+    /// Whether incidents from this source should be re-geocoded from their
+    /// block addresses even when they already have source-provided coordinates.
+    /// Set to `true` for sources that provide imprecise block-centroid
+    /// coordinates. Defaults to `false`.
+    #[serde(default)]
+    pub re_geocode: bool,
 }
 
 // ── License metadata ─────────────────────────────────────────────────────
@@ -608,6 +614,13 @@ impl SourceDefinition {
         self.license.restricted
     }
 
+    /// Returns `true` if incidents from this source should be re-geocoded
+    /// from block addresses even when source-provided coordinates exist.
+    #[must_use]
+    pub const fn re_geocode(&self) -> bool {
+        self.re_geocode
+    }
+
     /// Returns the configured page size for this source's fetcher.
     #[must_use]
     pub const fn page_size(&self) -> u64 {
@@ -1114,5 +1127,16 @@ mod tests {
         let def = parse_source_toml(toml_str).unwrap();
         assert_eq!(def.id, "pg_county_md");
         assert!(def.fields.block_address.is_some());
+        assert!(def.re_geocode, "pg_county_md should have re_geocode = true");
+    }
+
+    #[test]
+    fn re_geocode_defaults_to_false() {
+        let toml_str = include_str!("../sources/chicago.toml");
+        let def = parse_source_toml(toml_str).unwrap();
+        assert!(
+            !def.re_geocode,
+            "sources without re_geocode should default to false"
+        );
     }
 }

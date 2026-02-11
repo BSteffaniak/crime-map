@@ -3,6 +3,7 @@ name = "Prince George's County Police Department (2017-2023)"
 city = "Prince George's County"
 state = "MD"
 output_filename = "pg_county_md_historical_crimes.json"
+re_geocode = true
 
 [license]
 license_type = "open_data"

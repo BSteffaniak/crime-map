@@ -101,7 +101,10 @@ enum Commands {
         #[arg(long)]
         tracts_only: bool,
     },
-    /// Geocode incidents that are missing coordinates using block addresses
+    /// Geocode incidents that are missing coordinates using block addresses.
+    /// Also automatically re-geocodes sources marked with `re_geocode = true`
+    /// in their TOML config (e.g., sources with imprecise block-centroid
+    /// coordinates).
     Geocode {
         /// Maximum total number of incidents to geocode. If not set, all
         /// eligible incidents are processed.
@@ -113,12 +116,7 @@ enum Commands {
         /// Skip Census Bureau batch geocoder and only use Nominatim.
         #[arg(long)]
         nominatim_only: bool,
-        /// Re-geocode incidents that already have source-provided coordinates.
-        /// Useful for sources with block-centroid geocoding where address-level
-        /// precision would improve census place attribution.
-        #[arg(long)]
-        re_geocode: bool,
-        /// Only geocode incidents from this source ID (e.g., `pg_county_md`).
+        /// Only geocode incidents from this source (TOML id, e.g., `pg_county_md`).
         #[arg(long)]
         source: Option<String>,
     },
@@ -306,31 +304,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             limit,
             batch_size,
             nominatim_only,
-            re_geocode,
             source,
         } => {
             let db = db::connect_from_env().await?;
             run_migrations(db.as_ref()).await?;
 
-            // Resolve source name to database source_id if provided
-            let source_id = if let Some(ref name) = source {
-                let sid = queries::get_source_id_by_name(db.as_ref(), name).await?;
-                log::info!("Filtering to source '{name}' (id={sid})");
+            // Resolve --source via TOML registry (deterministic id match)
+            let source_id = if let Some(ref toml_id) = source {
+                let src = all_sources()
+                    .into_iter()
+                    .find(|s| s.id() == toml_id)
+                    .ok_or_else(|| format!("Unknown source: {toml_id}"))?;
+                let sid = queries::get_source_id_by_name(db.as_ref(), src.name()).await?;
+                log::info!("Filtering to source '{}' (db id={sid})", src.id());
                 Some(sid)
             } else {
                 None
             };
 
             let start = Instant::now();
-            let geocoded = if re_geocode {
-                re_geocode_source(db.as_ref(), batch_size, limit, nominatim_only, source_id).await?
-            } else {
-                geocode_missing(db.as_ref(), batch_size, limit, nominatim_only, source_id).await?
-            };
 
+            // Phase 1: Geocode incidents that have no coordinates
+            let missing_count =
+                geocode_missing(db.as_ref(), batch_size, limit, nominatim_only, source_id).await?;
+
+            // Phase 2: Re-geocode sources with imprecise coords (re_geocode = true)
+            let re_geocode_ids =
+                resolve_re_geocode_source_ids(db.as_ref(), source.as_deref()).await?;
+
+            let mut re_geocode_count = 0u64;
+            if !re_geocode_ids.is_empty() {
+                let remaining_limit = limit.map(|l| l.saturating_sub(missing_count));
+                if remaining_limit.is_none_or(|l| l > 0) {
+                    log::info!(
+                        "Re-geocoding {} source(s) with imprecise coordinates...",
+                        re_geocode_ids.len()
+                    );
+                    for sid in &re_geocode_ids {
+                        let count = re_geocode_source(
+                            db.as_ref(),
+                            batch_size,
+                            remaining_limit,
+                            nominatim_only,
+                            Some(*sid),
+                        )
+                        .await?;
+                        re_geocode_count += count;
+                    }
+                }
+            }
+
+            let total = missing_count + re_geocode_count;
             let elapsed = start.elapsed();
             log::info!(
-                "Geocoding complete: {geocoded} incidents geocoded in {:.1}s",
+                "Geocoding complete: {total} incidents geocoded ({missing_count} missing-coord + {re_geocode_count} re-geocoded) in {:.1}s",
                 elapsed.as_secs_f64()
             );
         }
@@ -555,6 +582,45 @@ fn source_filter_params(
             )
         },
     )
+}
+
+/// Resolves database source IDs for all TOML sources that have
+/// `re_geocode = true`.
+///
+/// If `filter_toml_id` is provided, only returns the matching source
+/// (if it also has `re_geocode = true`).
+async fn resolve_re_geocode_source_ids(
+    db: &dyn switchy_database::Database,
+    filter_toml_id: Option<&str>,
+) -> Result<Vec<i32>, Box<dyn std::error::Error>> {
+    let sources = all_sources();
+    let re_geocode_sources: Vec<&SourceDefinition> = sources
+        .iter()
+        .filter(|s| s.re_geocode())
+        .filter(|s| filter_toml_id.is_none_or(|id| s.id() == id))
+        .collect();
+
+    let mut db_ids = Vec::new();
+    for src in &re_geocode_sources {
+        match queries::get_source_id_by_name(db, src.name()).await {
+            Ok(sid) => {
+                log::info!(
+                    "Source '{}' ({}) is marked for re-geocoding (db id={sid})",
+                    src.id(),
+                    src.name()
+                );
+                db_ids.push(sid);
+            }
+            Err(e) => {
+                log::warn!(
+                    "Source '{}' has re_geocode=true but not found in DB: {e}",
+                    src.id()
+                );
+            }
+        }
+    }
+
+    Ok(db_ids)
 }
 
 /// Maximum number of parameters `PostgreSQL` allows per statement.
