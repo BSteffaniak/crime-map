@@ -550,6 +550,79 @@ fn source_filter_params(
     )
 }
 
+/// Maximum number of parameters `PostgreSQL` allows per statement.
+const PG_MAX_PARAMS: usize = 65_535;
+
+/// Applies geocoded coordinates to incidents using batch `UPDATE … FROM
+/// (VALUES …)` statements instead of individual row updates.
+///
+/// When `clear_attribution` is `true` (used by re-geocode), the census
+/// place and tract GEOIDs are also cleared so the next `attribute` run
+/// reassigns them based on the new coordinates.
+///
+/// Returns the number of rows updated.
+async fn batch_update_geocoded(
+    db: &dyn switchy_database::Database,
+    updates: &[(i64, f64, f64)],
+    clear_attribution: bool,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    use std::fmt::Write as _;
+    use switchy_database::DatabaseValue;
+
+    if updates.is_empty() {
+        return Ok(0);
+    }
+
+    let mut total_updated = 0u64;
+
+    // Each row in the VALUES clause uses 3 parameters: (id, lng, lat).
+    // If columns are added to the VALUES clause, update this constant so
+    // the chunk size adjusts automatically.
+    let params_per_row: usize = 3;
+    let chunk_size = PG_MAX_PARAMS / params_per_row;
+
+    for chunk in updates.chunks(chunk_size) {
+        let set_clause = if clear_attribution {
+            "SET location = ST_SetSRID(ST_MakePoint(d.lng, d.lat), 4326)::geography,
+                 geocoded = TRUE,
+                 census_place_geoid = NULL,
+                 census_tract_geoid = NULL"
+        } else {
+            "SET location = ST_SetSRID(ST_MakePoint(d.lng, d.lat), 4326)::geography,
+                 has_coordinates = TRUE,
+                 geocoded = TRUE"
+        };
+
+        let mut sql = format!("UPDATE crime_incidents i {set_clause}\nFROM (VALUES ");
+        let mut params: Vec<DatabaseValue> = Vec::with_capacity(chunk.len() * 3);
+        let mut idx = 1u32;
+
+        for (i, &(id, lng, lat)) in chunk.iter().enumerate() {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            write!(
+                sql,
+                "(${idx}::bigint, ${e1}::float8, ${e2}::float8)",
+                e1 = idx + 1,
+                e2 = idx + 2,
+            )
+            .unwrap();
+            params.push(DatabaseValue::Int64(id));
+            params.push(DatabaseValue::Real64(lng));
+            params.push(DatabaseValue::Real64(lat));
+            idx += 3;
+        }
+
+        sql.push_str(") AS d(id, lng, lat) WHERE i.id = d.id");
+
+        let rows_affected = db.exec_raw_params(&sql, &params).await?;
+        total_updated += rows_affected;
+    }
+
+    Ok(total_updated)
+}
+
 /// Geocodes incidents that have block addresses but no coordinates.
 ///
 /// Fetches un-geocoded incidents from the database in batches, deduplicates
@@ -570,7 +643,6 @@ async fn geocode_missing(
     };
     use moosicbox_json_utils::database::ToValue as _;
     use std::collections::BTreeMap;
-    use switchy_database::DatabaseValue;
 
     let (source_clause, _) = source_filter_params(batch_size, source_id);
 
@@ -646,6 +718,7 @@ async fn geocode_missing(
         );
 
         let mut batch_geocoded = 0u64;
+        let mut pending_updates: Vec<(i64, f64, f64)> = Vec::new();
 
         if !nominatim_only {
             // --- Census Bureau batch geocoding ---
@@ -687,20 +760,11 @@ async fn geocode_missing(
                             let idx: usize = id_str.parse().unwrap_or(usize::MAX);
                             if let Some((_, incident_ids)) = chunk.get(idx) {
                                 for &inc_id in incident_ids {
-                                    db.exec_raw_params(
-                                        "UPDATE crime_incidents
-                                         SET location = ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
-                                             has_coordinates = TRUE,
-                                             geocoded = TRUE
-                                         WHERE id = $3",
-                                        &[
-                                            DatabaseValue::Real64(geocoded.longitude),
-                                            DatabaseValue::Real64(geocoded.latitude),
-                                            DatabaseValue::Int64(inc_id),
-                                        ],
-                                    )
-                                    .await?;
-                                    batch_geocoded += 1;
+                                    pending_updates.push((
+                                        inc_id,
+                                        geocoded.longitude,
+                                        geocoded.latitude,
+                                    ));
                                 }
                             }
                         }
@@ -709,6 +773,16 @@ async fn geocode_missing(
                         log::error!("Census batch geocoding failed: {e}");
                     }
                 }
+            }
+
+            // Flush Census results
+            if !pending_updates.is_empty() {
+                log::info!(
+                    "Writing {} geocoded incidents to database...",
+                    pending_updates.len()
+                );
+                batch_geocoded += batch_update_geocoded(db, &pending_updates, false).await?;
+                pending_updates.clear();
             }
         }
 
@@ -759,20 +833,7 @@ async fn geocode_missing(
                 match crime_map_geocoder::nominatim::geocode_freeform(&client, query).await {
                     Ok(Some(geocoded)) => {
                         for &inc_id in incident_ids {
-                            db.exec_raw_params(
-                                "UPDATE crime_incidents
-                                 SET location = ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
-                                     has_coordinates = TRUE,
-                                     geocoded = TRUE
-                                 WHERE id = $3",
-                                &[
-                                    DatabaseValue::Real64(geocoded.longitude),
-                                    DatabaseValue::Real64(geocoded.latitude),
-                                    DatabaseValue::Int64(inc_id),
-                                ],
-                            )
-                            .await?;
-                            batch_geocoded += 1;
+                            pending_updates.push((inc_id, geocoded.longitude, geocoded.latitude));
                         }
                     }
                     Ok(None) => {
@@ -786,6 +847,16 @@ async fn geocode_missing(
                         }
                     }
                 }
+            }
+
+            // Flush Nominatim results
+            if !pending_updates.is_empty() {
+                log::info!(
+                    "Writing {} Nominatim-geocoded incidents to database...",
+                    pending_updates.len()
+                );
+                batch_geocoded += batch_update_geocoded(db, &pending_updates, false).await?;
+                pending_updates.clear();
             }
         }
 
@@ -826,7 +897,6 @@ async fn re_geocode_source(
     };
     use moosicbox_json_utils::database::ToValue as _;
     use std::collections::BTreeMap;
-    use switchy_database::DatabaseValue;
 
     let (source_clause, _) = source_filter_params(batch_size, source_id);
 
@@ -903,6 +973,7 @@ async fn re_geocode_source(
         );
 
         let mut batch_geocoded = 0u64;
+        let mut pending_updates: Vec<(i64, f64, f64)> = Vec::new();
 
         if !nominatim_only {
             // --- Census Bureau batch geocoding ---
@@ -944,23 +1015,11 @@ async fn re_geocode_source(
                             let idx: usize = id_str.parse().unwrap_or(usize::MAX);
                             if let Some((_, incident_ids)) = chunk.get(idx) {
                                 for &inc_id in incident_ids {
-                                    // Clear the census_place_geoid so it gets
-                                    // re-attributed on the next `attribute` run.
-                                    db.exec_raw_params(
-                                        "UPDATE crime_incidents
-                                         SET location = ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
-                                             geocoded = TRUE,
-                                             census_place_geoid = NULL,
-                                             census_tract_geoid = NULL
-                                         WHERE id = $3",
-                                        &[
-                                            DatabaseValue::Real64(geocoded.longitude),
-                                            DatabaseValue::Real64(geocoded.latitude),
-                                            DatabaseValue::Int64(inc_id),
-                                        ],
-                                    )
-                                    .await?;
-                                    batch_geocoded += 1;
+                                    pending_updates.push((
+                                        inc_id,
+                                        geocoded.longitude,
+                                        geocoded.latitude,
+                                    ));
                                 }
                             }
                         }
@@ -969,6 +1028,16 @@ async fn re_geocode_source(
                         log::error!("Census batch geocoding failed: {e}");
                     }
                 }
+            }
+
+            // Flush Census results (clear_attribution = true for re-geocode)
+            if !pending_updates.is_empty() {
+                log::info!(
+                    "Writing {} re-geocoded incidents to database...",
+                    pending_updates.len()
+                );
+                batch_geocoded += batch_update_geocoded(db, &pending_updates, true).await?;
+                pending_updates.clear();
             }
         }
 
@@ -1020,21 +1089,7 @@ async fn re_geocode_source(
                 match crime_map_geocoder::nominatim::geocode_freeform(&client, query).await {
                     Ok(Some(geocoded)) => {
                         for &inc_id in incident_ids {
-                            db.exec_raw_params(
-                                "UPDATE crime_incidents
-                                 SET location = ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
-                                     geocoded = TRUE,
-                                     census_place_geoid = NULL,
-                                     census_tract_geoid = NULL
-                                 WHERE id = $3",
-                                &[
-                                    DatabaseValue::Real64(geocoded.longitude),
-                                    DatabaseValue::Real64(geocoded.latitude),
-                                    DatabaseValue::Int64(inc_id),
-                                ],
-                            )
-                            .await?;
-                            batch_geocoded += 1;
+                            pending_updates.push((inc_id, geocoded.longitude, geocoded.latitude));
                         }
                     }
                     Ok(None) => {
@@ -1048,6 +1103,16 @@ async fn re_geocode_source(
                         }
                     }
                 }
+            }
+
+            // Flush Nominatim results (clear_attribution = true for re-geocode)
+            if !pending_updates.is_empty() {
+                log::info!(
+                    "Writing {} Nominatim re-geocoded incidents to database...",
+                    pending_updates.len()
+                );
+                batch_geocoded += batch_update_geocoded(db, &pending_updates, true).await?;
+                pending_updates.clear();
             }
         }
 
