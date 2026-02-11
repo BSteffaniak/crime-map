@@ -77,6 +77,8 @@ const SOURCE_TOMLS: &[(&str, &str)] = &[
         "chesterfield_va",
         include_str!("../sources/chesterfield_va.toml"),
     ),
+    ("houston", include_str!("../sources/houston.toml")),
+    ("nashville", include_str!("../sources/nashville.toml")),
     // ── Carto sources ────────────────────────────────────────────────
     ("philly", include_str!("../sources/philly.toml")),
     // ── CKAN sources ─────────────────────────────────────────────────
@@ -92,7 +94,7 @@ const SOURCE_TOMLS: &[(&str, &str)] = &[
 
 /// Total number of configured sources (used in tests).
 #[cfg(test)]
-const EXPECTED_SOURCE_COUNT: usize = 42;
+const EXPECTED_SOURCE_COUNT: usize = 44;
 
 /// Returns all configured source definitions, parsed from embedded TOML.
 ///

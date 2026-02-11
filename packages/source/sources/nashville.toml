@@ -1,0 +1,45 @@
+id = "nashville_pd"
+name = "Metro Nashville Police Department"
+city = "Nashville"
+state = "TN"
+output_filename = "nashville_crimes.json"
+
+[fetcher]
+type = "arcgis"
+# Metro Nashville Police Department Incidents — single view layer.
+# Owner: NashvilleOpenData on ArcGIS Online. Updated regularly.
+# 861K+ records with point geometry, NIBRS offense codes.
+query_urls = [
+  "https://services2.arcgis.com/HdTo6HJqh92wn4D8/arcgis/rest/services/Metro_Nashville_Police_Department_Incidents_view/FeatureServer/0/query",
+]
+page_size = 2000
+date_column = "Incident_Occurred"
+where_clause = "Latitude <> 0 AND Longitude <> 0"
+
+[fields]
+incident_id = ["Incident_Number"]
+crime_type = ["Offense_NIBRS", "Offense_Description"]
+block_address = "Incident_Location"
+location_type = "Location_Description"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "Incident_Occurred"
+
+[fields.lat]
+field = "Latitude"
+type = "f64"
+
+[fields.lng]
+field = "Longitude"
+type = "f64"
+
+[fields.description]
+type = "combine"
+fields = ["Offense_Description", "Weapon_Description"]
+separator = " - "
+
+[fields.arrest]
+type = "string_contains"
+field = "Incident_Status_Description"
+contains = "arrest"

@@ -1,0 +1,47 @@
+id = "houston_pd"
+name = "Houston Police Department"
+city = "Houston"
+state = "TX"
+output_filename = "houston_crimes.json"
+
+[fetcher]
+type = "arcgis"
+# HPD NIBRS Yearly Cases — five layers covering 2020–2024.
+# Each layer has the same schema with point geometry (State Plane TX South).
+# Source: MyCityHouston on ArcGIS Online, public domain.
+query_urls = [
+  "https://services.arcgis.com/NummVBqZSIJKUeVR/arcgis/rest/services/HPD_NIBRS_Yearly_Cases/FeatureServer/0/query",
+  "https://services.arcgis.com/NummVBqZSIJKUeVR/arcgis/rest/services/HPD_NIBRS_Yearly_Cases/FeatureServer/1/query",
+  "https://services.arcgis.com/NummVBqZSIJKUeVR/arcgis/rest/services/HPD_NIBRS_Yearly_Cases/FeatureServer/2/query",
+  "https://services.arcgis.com/NummVBqZSIJKUeVR/arcgis/rest/services/HPD_NIBRS_Yearly_Cases/FeatureServer/3/query",
+  "https://services.arcgis.com/NummVBqZSIJKUeVR/arcgis/rest/services/HPD_NIBRS_Yearly_Cases/FeatureServer/4/query",
+]
+page_size = 2000
+date_column = "HPD_Occurrence_Date"
+where_clause = "Latitude <> 0 AND Longitude <> 0"
+
+[fields]
+incident_id = ["HPD_Incident"]
+crime_type = ["HPD_NIBRS_Class", "HPD_NIBRSDescription"]
+block_address = "Address"
+location_type = "SNBR"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "HPD_Occurrence_Date"
+
+[fields.lat]
+field = "Latitude"
+type = "f64"
+
+[fields.lng]
+field = "Longitude"
+type = "f64"
+
+[fields.description]
+type = "combine"
+fields = ["HPD_NIBRSDescription", "HPD_Premise"]
+separator = " - "
+
+[fields.arrest]
+type = "none"
