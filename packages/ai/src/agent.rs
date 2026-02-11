@@ -117,6 +117,7 @@ fn build_system_prompt(context: &AgentContext) -> String {
 9. Today's date is {today}. When users say "2025", "this year", "last year", etc., interpret relative to today.
 10. Use category names in SCREAMING_SNAKE_CASE when calling tools (e.g., "VIOLENT", "PROPERTY").
 11. State abbreviations should be uppercase 2-letter codes (e.g., "IL", "DC", "CA").
+12. Tool performance: rank_areas is the most expensive tool — it joins incidents to census tracts and aggregates by neighborhood. For large cities, always include date filters or a category filter. If rank_areas times out, fall back to count_incidents or top_crime_types which are much faster. compare_periods runs two count queries internally, so it can also be slow without filters.
 
 Be concise but thorough. Always cite the actual numbers from tool results."#,
         cities = cities,
@@ -359,12 +360,7 @@ pub async fn run_agent(
                             limits.per_tool_timeout.as_secs_f64()
                         );
                         Err(AiError::Provider {
-                            message: format!(
-                                "Tool '{name}' timed out after {:.0} seconds. \
-                                 Try a more specific query, add filters to narrow the \
-                                 scope, or use a different approach.",
-                                limits.per_tool_timeout.as_secs_f64()
-                            ),
+                            message: tool_timeout_message(name, limits.per_tool_timeout),
                         })
                     });
 
@@ -644,5 +640,29 @@ fn summarize_tool_result(tool_name: &str, result: &serde_json::Value) -> String 
             }
         }
         _ => "Result received".to_string(),
+    }
+}
+
+/// Produces a tool-specific timeout error message with actionable advice
+/// so the LLM can adjust its approach instead of blindly retrying.
+fn tool_timeout_message(tool_name: &str, timeout: Duration) -> String {
+    let secs = timeout.as_secs_f64();
+    match tool_name {
+        "rank_areas" => format!(
+            "Tool 'rank_areas' timed out after {secs:.0} seconds. This tool is \
+             computationally expensive for large cities. Try: (1) adding date filters \
+             to narrow the time window, (2) filtering by a specific category like \
+             VIOLENT or PROPERTY, (3) using count_incidents or top_crime_types instead \
+             which are faster, or (4) using a placeGeoid for a smaller geographic area."
+        ),
+        "compare_periods" => format!(
+            "Tool 'compare_periods' timed out after {secs:.0} seconds. This tool runs \
+             two count queries internally. Try shorter time periods or add a category \
+             filter to reduce the data scanned."
+        ),
+        _ => format!(
+            "Tool '{tool_name}' timed out after {secs:.0} seconds. Try adding more \
+             filters (date range, category, state) to narrow the query scope."
+        ),
     }
 }

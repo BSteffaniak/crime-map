@@ -38,7 +38,7 @@ fn build_common_filters(
     let mut idx = start_idx;
 
     if let Some(city) = city {
-        frags.push(format!("i.city ILIKE ${idx}"));
+        frags.push(format!("lower(i.city) = lower(${idx})"));
         params.push(DatabaseValue::String(city.to_string()));
         idx += 1;
     }
@@ -64,13 +64,13 @@ fn build_common_filters(
     }
 
     if let Some(from) = date_from {
-        frags.push(format!("i.occurred_at >= ${idx}::timestamptz"));
+        frags.push(format!("i.occurred_at >= CAST(${idx} AS timestamptz)"));
         params.push(DatabaseValue::String(from.to_string()));
         idx += 1;
     }
 
     if let Some(to) = date_to {
-        frags.push(format!("i.occurred_at <= ${idx}::timestamptz"));
+        frags.push(format!("i.occurred_at <= CAST(${idx} AS timestamptz)"));
         params.push(DatabaseValue::String(to.to_string()));
         idx += 1;
     }
@@ -238,7 +238,7 @@ pub async fn rank_areas(
         db_params.push(DatabaseValue::String(place_geoid.clone()));
         idx += 1;
     } else if let Some(ref city) = params.city {
-        frags.push(format!("i.city ILIKE ${idx}"));
+        frags.push(format!("lower(i.city) = lower(${idx})"));
         db_params.push(DatabaseValue::String(city.clone()));
         idx += 1;
     } else {
@@ -254,13 +254,13 @@ pub async fn rank_areas(
     }
 
     if let Some(ref from) = params.date_from {
-        frags.push(format!("i.occurred_at >= ${idx}::timestamptz"));
+        frags.push(format!("i.occurred_at >= CAST(${idx} AS timestamptz)"));
         db_params.push(DatabaseValue::String(from.clone()));
         idx += 1;
     }
 
     if let Some(ref to) = params.date_to {
-        frags.push(format!("i.occurred_at <= ${idx}::timestamptz"));
+        frags.push(format!("i.occurred_at <= CAST(${idx} AS timestamptz)"));
         db_params.push(DatabaseValue::String(to.clone()));
         idx += 1;
     }
@@ -285,10 +285,11 @@ pub async fn rank_areas(
          FROM crime_incidents i
          JOIN crime_categories c ON i.category_id = c.id
          LEFT JOIN crime_categories pc ON c.parent_id = pc.id
-         JOIN census_tracts ct ON ST_Covers(ct.boundary, i.location)
+         JOIN census_tracts ct ON ct.geoid = i.census_tract_geoid
          LEFT JOIN tract_neighborhoods tn ON ct.geoid = tn.geoid
          LEFT JOIN neighborhoods n ON tn.neighborhood_id = n.id
          {wc}
+         AND i.census_tract_geoid IS NOT NULL
          GROUP BY ct.geoid, COALESCE(n.name, ct.geoid), COALESCE(n.name, ct.name),
                   ct.population, ct.land_area_sq_mi, pc.name"
     );

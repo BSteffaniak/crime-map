@@ -366,18 +366,42 @@ pub async fn delete_conversation(
 // Formatting helpers
 // ---------------------------------------------------------------------------
 
+/// Prefix used for injected system advisory messages in the conversation.
+const SYSTEM_MSG_PREFIX: &str = "[SYSTEM: ";
+
+/// Returns `true` if the text is an injected system advisory message
+/// (e.g. budget/timeout warnings), not a real user message.
+fn is_system_advisory(text: &str) -> bool {
+    text.starts_with(SYSTEM_MSG_PREFIX)
+}
+
 /// Formats a conversation for human-readable display.
 ///
 /// Shows user questions, tool calls (name + params), tool results (summary),
 /// and assistant answers in a structured format.
+///
+/// When `show_system` is `false`, injected system advisory messages (budget
+/// and timeout warnings) are hidden from the output.
 #[must_use]
-pub fn format_conversation(messages: &[StoredMessage]) -> String {
+pub fn format_conversation(messages: &[StoredMessage], show_system: bool) -> String {
     let mut output = String::new();
 
     for msg in messages {
         let content: Result<MessageContent, _> = serde_json::from_str(&msg.content);
 
         match (&*msg.role, content) {
+            ("user", Ok(MessageContent::Text(ref text))) if is_system_advisory(text) => {
+                if show_system {
+                    writeln!(output, "--- SYSTEM ---").unwrap();
+                    // Strip the [SYSTEM: ...] wrapper for cleaner display
+                    let inner = text
+                        .strip_prefix(SYSTEM_MSG_PREFIX)
+                        .and_then(|s| s.strip_suffix(']'))
+                        .unwrap_or(text);
+                    writeln!(output, "{inner}").unwrap();
+                    writeln!(output).unwrap();
+                }
+            }
             ("user", Ok(MessageContent::Text(text))) => {
                 writeln!(output, "--- USER ---").unwrap();
                 writeln!(output, "{text}").unwrap();

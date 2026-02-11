@@ -43,6 +43,9 @@ enum Commands {
     Show {
         /// Conversation ID (UUID or prefix)
         id: String,
+        /// Include internal system advisory messages (budget/timeout warnings)
+        #[arg(long)]
+        show_system: bool,
     },
     /// Export a conversation as JSON
     Export {
@@ -96,13 +99,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("\n{} conversation(s)", conversations.len());
         }
-        Commands::Show { id } => {
+        Commands::Show { id, show_system } => {
             let resolved = resolve_id(db.as_ref(), &id).await?;
             let messages = get_conversation_messages(db.as_ref(), &resolved).await?;
 
             if let Some(msgs) = messages {
                 println!("Conversation: {resolved}\n");
-                print!("{}", format_conversation(&msgs));
+                print!("{}", format_conversation(&msgs, show_system));
             } else {
                 eprintln!("Conversation not found: {id}");
                 std::process::exit(1);
