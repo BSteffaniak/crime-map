@@ -19,9 +19,11 @@ static XX_MASK_RE: LazyLock<Regex> =
 static BLOCK_OF_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\s+BLOCK\s+OF\s+|\s+BLK\s+OF\s+").expect("valid regex"));
 
-/// Regex for standalone "BLOCK" after a house number.
+/// Regex for standalone "BLOCK" / "BL" / "BLK" after a house number,
+/// with or without a space between the number and the keyword.
+/// Matches: "100 BLOCK", "100BLOCK", "300BL", "300 BL", "100BLK", "100 BLK".
 static BLOCK_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^(\d+)\s+BLOCK\s+").expect("valid regex"));
+    LazyLock::new(|| Regex::new(r"(?i)^(\d+)\s*(?:BLOCK|BLK|BL)\s+").expect("valid regex"));
 
 /// Regex for direction abbreviations that should be expanded (at end of
 /// address fragments like "EB", "WB", "NB", "SB").
@@ -198,5 +200,37 @@ mod tests {
     #[test]
     fn skips_na() {
         assert_eq!(clean_block_address("N/A"), CleanedAddress::NotGeocodable);
+    }
+
+    #[test]
+    fn handles_number_bl_no_space() {
+        assert_eq!(
+            clean_block_address("300BL CEDARLEAF AVE"),
+            CleanedAddress::Street("300 CEDARLEAF AVE".to_string())
+        );
+    }
+
+    #[test]
+    fn handles_number_block_no_space() {
+        assert_eq!(
+            clean_block_address("5900BLOCK FISHER RD"),
+            CleanedAddress::Street("5900 FISHER RD".to_string())
+        );
+    }
+
+    #[test]
+    fn handles_number_blk_no_space() {
+        assert_eq!(
+            clean_block_address("100BLK MAIN ST"),
+            CleanedAddress::Street("100 MAIN ST".to_string())
+        );
+    }
+
+    #[test]
+    fn handles_number_bl_with_space() {
+        assert_eq!(
+            clean_block_address("300 BL CEDARLEAF AVE"),
+            CleanedAddress::Street("300 CEDARLEAF AVE".to_string())
+        );
     }
 }
