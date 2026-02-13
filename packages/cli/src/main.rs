@@ -9,7 +9,7 @@
 //! discover, conversations) and guides them through the configuration
 //! for each.
 //!
-//! Uses `indicatif-log-bridge` (via [`crime_map_ingest::progress::init_logger`])
+//! Uses `indicatif-log-bridge` (via [`crime_map_cli_utils::init_logger`])
 //! to route `log` output through `indicatif::MultiProgress` so that log
 //! lines and progress bars never fight for the terminal.
 
@@ -52,7 +52,7 @@ impl Tool {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let multi = crime_map_ingest::progress::init_logger();
+    let multi = crime_map_cli_utils::init_logger();
 
     println!("Crime Map Toolchain");
     println!();

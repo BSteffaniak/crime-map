@@ -1,0 +1,20 @@
+[package]
+authors = { workspace = true }
+description = "Shared CLI utilities (progress bars, logger integration) for the crime map toolchain"
+edition = { workspace = true }
+license = { workspace = true }
+name = "crime_map_cli_utils"
+repository = { workspace = true }
+version = "0.1.0"
+
+[dependencies]
+crime_map_source = { workspace = true }
+
+indicatif = { workspace = true }
+indicatif-log-bridge = { workspace = true }
+log = { workspace = true }
+pretty_env_logger = { workspace = true }
+
+[features]
+default = []
+fail-on-warnings = ["crime_map_source/fail-on-warnings"]

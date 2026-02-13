@@ -25,6 +25,7 @@ crime_map_geography = { workspace = true }
 crime_map_geocoder = { workspace = true }
 crime_map_neighborhood = { workspace = true }
 crime_map_ingest_models = { workspace = true }
+crime_map_cli_utils = { workspace = true }
 switchy_database = { workspace = true, features = ["postgres-raw"] }
 moosicbox_json_utils = { workspace = true, features = ["database"] }
 
@@ -32,10 +33,7 @@ chrono = { workspace = true }
 clap = { workspace = true }
 csv = { workspace = true }
 futures = { workspace = true, features = ["std"] }
-indicatif = { workspace = true }
-indicatif-log-bridge = { workspace = true }
 log = { workspace = true }
-pretty_env_logger = { workspace = true }
 reqwest = { workspace = true, features = ["stream"] }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
@@ -46,6 +44,7 @@ dialoguer = { workspace = true }
 [features]
 default = []
 fail-on-warnings = [
+  "crime_map_cli_utils/fail-on-warnings",
   "crime_map_crime_models/fail-on-warnings",
   "crime_map_database/fail-on-warnings",
   "crime_map_database_models/fail-on-warnings",

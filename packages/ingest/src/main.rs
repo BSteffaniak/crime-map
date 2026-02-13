@@ -7,8 +7,8 @@
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
+use crime_map_cli_utils::IndicatifProgress;
 use crime_map_database::{db, queries, run_migrations};
-use crime_map_ingest::progress::IndicatifProgress;
 use crime_map_ingest::{
     all_sources, enabled_sources, geocode_missing, re_geocode_source,
     resolve_re_geocode_source_ids, sync_source,
@@ -114,7 +114,7 @@ enum Commands {
 #[allow(clippy::too_many_lines)]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let multi = crime_map_ingest::progress::init_logger();
+    let multi = crime_map_cli_utils::init_logger();
     let cli = Cli::parse();
 
     let Some(command) = cli.command else {

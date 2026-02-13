@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-use crime_map_ingest::progress::{IndicatifProgress, MultiProgress};
+use crime_map_cli_utils::{IndicatifProgress, MultiProgress};
 use dialoguer::{Confirm, Input, MultiSelect, Select};
 
 /// Steps available in the pipeline.

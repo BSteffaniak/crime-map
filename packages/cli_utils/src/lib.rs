@@ -1,12 +1,14 @@
-//! `indicatif`-backed progress bar implementation and logger integration.
+#![cfg_attr(feature = "fail-on-warnings", deny(warnings))]
+#![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
+#![allow(clippy::multiple_crate_versions, clippy::cargo_common_metadata)]
+
+//! Shared CLI utilities for the crime map toolchain.
 //!
-//! Wraps [`indicatif::ProgressBar`] behind the [`ProgressCallback`] trait
-//! so that progress reporting stays decoupled from the rendering backend
-//! throughout the pipeline.
+//! Provides `indicatif`-backed progress bars behind the [`ProgressCallback`]
+//! trait, plus [`init_logger`] which sets up `indicatif-log-bridge` so that
+//! `log::info!` and friends are suspended while progress bars redraw.
 //!
-//! Also provides [`init_logger`] which sets up `indicatif-log-bridge` so
-//! that `log::info!` and friends are suspended while progress bars redraw.
-//! Any binary that calls `init_logger()` at startup gets full progress bar
+//! Any binary that calls [`init_logger()`] at startup gets full progress bar
 //! support for free.
 
 use std::sync::Arc;

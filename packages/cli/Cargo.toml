@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 crime_map_conversations = { workspace = true }
+crime_map_cli_utils = { workspace = true }
 crime_map_database = { workspace = true }
 crime_map_ingest = { workspace = true }
 crime_map_generate = { workspace = true }
@@ -31,6 +32,7 @@ default = ["bedrock"]
 bedrock = ["crime_map_server/bedrock"]
 duckdb-bundled = ["crime_map_generate/duckdb-bundled"]
 fail-on-warnings = [
+  "crime_map_cli_utils/fail-on-warnings",
   "crime_map_conversations/fail-on-warnings",
   "crime_map_database/fail-on-warnings",
   "crime_map_discover/fail-on-warnings",

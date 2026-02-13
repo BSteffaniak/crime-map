@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use dialoguer::{Confirm, Input, MultiSelect, Select};
 
-use crate::progress::{IndicatifProgress, MultiProgress};
+use crime_map_cli_utils::{IndicatifProgress, MultiProgress};
 
 /// Top-level actions available in the ingest interactive menu.
 enum IngestAction {
