@@ -56,4 +56,15 @@ uuid = { workspace = true }
 default = ["bedrock"]
 bedrock = ["crime_map_ai/bedrock"]
 duckdb-bundled = ["duckdb/bundled"]
-fail-on-warnings = []
+fail-on-warnings = [
+  "crime_map_ai/fail-on-warnings",
+  "crime_map_analytics/fail-on-warnings",
+  "crime_map_analytics_models/fail-on-warnings",
+  "crime_map_conversations/fail-on-warnings",
+  "crime_map_crime_models/fail-on-warnings",
+  "crime_map_database/fail-on-warnings",
+  "crime_map_database_models/fail-on-warnings",
+  "crime_map_geography/fail-on-warnings",
+  "crime_map_geography_models/fail-on-warnings",
+  "crime_map_server_models/fail-on-warnings",
+]

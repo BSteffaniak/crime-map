@@ -22,4 +22,7 @@ thiserror = { workspace = true }
 
 [features]
 default = []
-fail-on-warnings = []
+fail-on-warnings = [
+  "crime_map_analytics_models/fail-on-warnings",
+  "crime_map_geography_models/fail-on-warnings",
+]

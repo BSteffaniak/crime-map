@@ -43,4 +43,14 @@ dialoguer = { workspace = true }
 
 [features]
 default = []
-fail-on-warnings = []
+fail-on-warnings = [
+  "crime_map_crime_models/fail-on-warnings",
+  "crime_map_database/fail-on-warnings",
+  "crime_map_database_models/fail-on-warnings",
+  "crime_map_geocoder/fail-on-warnings",
+  "crime_map_geography/fail-on-warnings",
+  "crime_map_ingest_models/fail-on-warnings",
+  "crime_map_neighborhood/fail-on-warnings",
+  "crime_map_source/fail-on-warnings",
+  "crime_map_source_models/fail-on-warnings",
+]

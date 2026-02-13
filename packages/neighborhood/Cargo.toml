@@ -21,4 +21,4 @@ toml = { workspace = true }
 
 [features]
 default = []
-fail-on-warnings = []
+fail-on-warnings = ["crime_map_neighborhood_models/fail-on-warnings"]

@@ -30,4 +30,8 @@ tokio = { workspace = true, features = ["full"] }
 
 [features]
 default = []
-fail-on-warnings = []
+fail-on-warnings = [
+  "crime_map_discover_models/fail-on-warnings",
+  "crime_map_scraper/fail-on-warnings",
+  "crime_map_source/fail-on-warnings",
+]

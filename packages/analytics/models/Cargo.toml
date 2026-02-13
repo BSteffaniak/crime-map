@@ -15,4 +15,4 @@ serde_json = { workspace = true, features = ["std"] }
 
 [features]
 default = []
-fail-on-warnings = []
+fail-on-warnings = ["crime_map_geography_models/fail-on-warnings"]

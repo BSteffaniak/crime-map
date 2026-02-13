@@ -31,4 +31,12 @@ tokio = { workspace = true, features = ["full"] }
 default = ["bedrock"]
 bedrock = ["crime_map_server/bedrock"]
 duckdb-bundled = ["crime_map_generate/duckdb-bundled"]
-fail-on-warnings = []
+fail-on-warnings = [
+  "crime_map_conversations/fail-on-warnings",
+  "crime_map_database/fail-on-warnings",
+  "crime_map_discover/fail-on-warnings",
+  "crime_map_generate/fail-on-warnings",
+  "crime_map_ingest/fail-on-warnings",
+  "crime_map_server/fail-on-warnings",
+  "crime_map_source/fail-on-warnings",
+]
