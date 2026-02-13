@@ -11,19 +11,61 @@
 //! Any binary that calls [`init_logger()`] at startup gets full progress bar
 //! support for free.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crime_map_source::progress::ProgressCallback;
 use indicatif::{ProgressBar, ProgressStyle};
 
 pub use indicatif::MultiProgress;
 
+/// Formats a duration in seconds into a compact human-readable string.
+///
+/// Examples: `"45s"`, `"12m30s"`, `"2h15m"`, `"1d3h"`.
+fn format_eta(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        let m = secs / 60;
+        let s = secs % 60;
+        if s == 0 {
+            format!("{m}m")
+        } else {
+            format!("{m}m{s:02}s")
+        }
+    } else if secs < 86400 {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        if m == 0 {
+            format!("{h}h")
+        } else {
+            format!("{h}h{m:02}m")
+        }
+    } else {
+        let d = secs / 86400;
+        let h = (secs % 86400) / 3600;
+        if h == 0 {
+            format!("{d}d")
+        } else {
+            format!("{d}d{h}h")
+        }
+    }
+}
+
 /// An `indicatif` [`ProgressBar`] that implements [`ProgressCallback`].
+///
+/// Uses a simple linear ETA projection (`elapsed * remaining / completed`)
+/// instead of `indicatif`'s built-in exponential weighted moving average,
+/// which produces wildly unstable estimates for slow paginated API fetches.
 pub struct IndicatifProgress {
     bar: ProgressBar,
     /// Style to switch to once `set_total()` provides a known length.
     bar_style: ProgressStyle,
+    /// When real progress started (set on `set_total()`).
+    start: Mutex<Option<Instant>>,
+    /// The original message (without ETA suffix), so we can re-append ETA
+    /// on each `inc()` without accumulating suffixes.
+    base_message: Mutex<String>,
 }
 
 impl IndicatifProgress {
@@ -41,12 +83,17 @@ impl IndicatifProgress {
         bar.set_message(message.to_string());
 
         let bar_style = ProgressStyle::with_template(
-            "  {msg} {wide_bar:.cyan/dim} {pos}/{len} {percent}% [{eta}]",
+            "  {msg} {wide_bar:.cyan/dim} {pos}/{len} {percent}% [{elapsed_precise}]",
         )
         .unwrap_or_else(|_| ProgressStyle::default_bar())
         .progress_chars("##-");
 
-        Arc::new(Self { bar, bar_style })
+        Arc::new(Self {
+            bar,
+            bar_style,
+            start: Mutex::new(None),
+            base_message: Mutex::new(message.to_string()),
+        })
     }
 
     /// Creates a progress bar for step-level progress (e.g., sources 1/7).
@@ -69,7 +116,12 @@ impl IndicatifProgress {
 
         let bar_style = bar.style();
 
-        Arc::new(Self { bar, bar_style })
+        Arc::new(Self {
+            bar,
+            bar_style,
+            start: Mutex::new(Some(Instant::now())),
+            base_message: Mutex::new(message.to_string()),
+        })
     }
 
     /// Creates a progress bar for batch operations where total may or may
@@ -86,32 +138,69 @@ impl IndicatifProgress {
         bar.set_message(message.to_string());
 
         let bar_style = ProgressStyle::with_template(
-            "  {msg} {wide_bar:.yellow/dim} {pos}/{len} {percent}% [{eta}]",
+            "  {msg} {wide_bar:.yellow/dim} {pos}/{len} {percent}% [{elapsed_precise}]",
         )
         .unwrap_or_else(|_| ProgressStyle::default_bar())
         .progress_chars("##-");
 
-        Arc::new(Self { bar, bar_style })
+        Arc::new(Self {
+            bar,
+            bar_style,
+            start: Mutex::new(None),
+            base_message: Mutex::new(message.to_string()),
+        })
+    }
+
+    /// Computes a linear ETA and appends it to the bar's message.
+    fn update_eta(&self) {
+        let start = *self.start.lock().unwrap();
+        let Some(start) = start else { return };
+
+        let pos = self.bar.position();
+        let len = self.bar.length().unwrap_or(0);
+        if pos == 0 || len == 0 {
+            return;
+        }
+
+        let elapsed = start.elapsed().as_secs_f64();
+        #[allow(clippy::cast_precision_loss)]
+        let rate = pos as f64 / elapsed;
+        let remaining = len.saturating_sub(pos);
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let eta_secs = (remaining as f64 / rate) as u64;
+        let eta_str = format_eta(eta_secs);
+
+        let base = self.base_message.lock().unwrap().clone();
+        self.bar
+            .set_message(format!("{base} [~{eta_str} remaining]"));
     }
 }
 
 impl ProgressCallback for IndicatifProgress {
     fn set_total(&self, total: u64) {
         self.bar.set_length(total);
-        self.bar.set_position(0);
+        self.bar.reset();
+        *self.start.lock().unwrap() = Some(Instant::now());
         // Switch from spinner to bar style now that we know the total.
         self.bar.set_style(self.bar_style.clone());
     }
 
     fn set_position(&self, pos: u64) {
         self.bar.set_position(pos);
+        self.update_eta();
     }
 
     fn inc(&self, delta: u64) {
         self.bar.inc(delta);
+        self.update_eta();
     }
 
     fn set_message(&self, msg: String) {
+        self.base_message.lock().unwrap().clone_from(&msg);
         self.bar.set_message(msg);
     }
 
