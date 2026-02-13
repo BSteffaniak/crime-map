@@ -22,6 +22,7 @@ export default function IncidentSidebar({ bbox, filters }: IncidentSidebarProps)
   const scrollRef = useRef<HTMLDivElement>(null);
   const loadingMoreRef = useRef(false);
 
+  // eslint-disable-next-line react-hooks/incompatible-library
   const rowVirtualizer = useVirtualizer({
     count: features.length,
     getScrollElement: () => scrollRef.current,

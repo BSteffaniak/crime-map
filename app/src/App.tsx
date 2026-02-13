@@ -24,7 +24,7 @@ export default function App() {
   } = useFilters();
 
   const handleBoundsChange = useCallback(
-    (bounds: { getWest(): number; getSouth(): number; getEast(): number; getNorth(): number }, _zoom: number) => {
+    (bounds: { getWest(): number; getSouth(): number; getEast(): number; getNorth(): number }) => {
       setBbox([
         bounds.getWest(),
         bounds.getSouth(),
