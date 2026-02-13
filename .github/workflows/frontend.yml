@@ -1,0 +1,40 @@
+name: Frontend
+
+on:
+    push:
+        branches: ["master"]
+        paths:
+            - ".github/workflows/frontend.yml"
+            - "app/**"
+    pull_request:
+        branches: ["master"]
+        paths:
+            - "app/**"
+    workflow_dispatch:
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+    cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+    lint-and-build:
+        name: Lint & Build
+        runs-on: ubuntu-latest
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Setup Bun
+              uses: oven-sh/setup-bun@v2
+
+            - name: Install dependencies
+              working-directory: app
+              run: bun install --frozen-lockfile
+
+            - name: Lint
+              working-directory: app
+              run: bun run lint
+
+            - name: Type check and build
+              working-directory: app
+              run: bun run build
