@@ -31,6 +31,7 @@ moosicbox_json_utils = { workspace = true, features = ["database"] }
 chrono = { workspace = true }
 clap = { workspace = true }
 csv = { workspace = true }
+futures = { workspace = true, features = ["std"] }
 indicatif = { workspace = true }
 log = { workspace = true }
 pretty_env_logger = { workspace = true }

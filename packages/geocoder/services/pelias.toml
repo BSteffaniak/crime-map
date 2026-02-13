@@ -1,0 +1,10 @@
+id = "pelias"
+name = "Pelias (self-hosted)"
+enabled = true
+priority = 2
+
+[provider]
+type = "pelias"
+base_url = "http://localhost:4000"
+country_code = "US"
+concurrent_requests = 10

@@ -1,0 +1,9 @@
+id = "nominatim"
+name = "Nominatim / OpenStreetMap"
+enabled = true
+priority = 3
+
+[provider]
+type = "nominatim"
+base_url = "https://nominatim.openstreetmap.org/search"
+rate_limit_ms = 1100

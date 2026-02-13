@@ -19,12 +19,6 @@ use crate::{
 /// Maximum number of addresses per batch request (Census Bureau limit).
 pub const MAX_BATCH_SIZE: usize = 10_000;
 
-/// Census Bureau geocoder base URL.
-const BASE_URL: &str = "https://geocoding.geo.census.gov/geocoder";
-
-/// Default benchmark for the geocoder.
-const BENCHMARK: &str = "Public_AR_Current";
-
 /// Geocodes a single address using the Census Bureau structured endpoint.
 ///
 /// # Errors
@@ -32,17 +26,19 @@ const BENCHMARK: &str = "Public_AR_Current";
 /// Returns [`GeocodeError`] if the HTTP request or response parsing fails.
 pub async fn geocode_single(
     client: &reqwest::Client,
+    base_url: &str,
+    benchmark: &str,
     street: &str,
     city: &str,
     state: &str,
     zip: Option<&str>,
 ) -> Result<Option<GeocodedAddress>, GeocodeError> {
     let mut url = format!(
-        "{BASE_URL}/locations/address\
+        "{base_url}/locations/address\
          ?street={street}\
          &city={city}\
          &state={state}\
-         &benchmark={BENCHMARK}\
+         &benchmark={benchmark}\
          &format=json",
         street = urlencoding(street),
         city = urlencoding(city),
@@ -69,6 +65,8 @@ pub async fn geocode_single(
 /// Returns [`GeocodeError`] if the HTTP request or response parsing fails.
 pub async fn geocode_batch(
     client: &reqwest::Client,
+    base_url: &str,
+    benchmark: &str,
     addresses: &[AddressInput],
 ) -> Result<BatchResult, GeocodeError> {
     if addresses.is_empty() {
@@ -95,7 +93,7 @@ pub async fn geocode_batch(
     }
 
     let form = multipart::Form::new()
-        .text("benchmark", BENCHMARK.to_string())
+        .text("benchmark", benchmark.to_string())
         .part(
             "addressFile",
             multipart::Part::text(csv_content)
@@ -106,7 +104,7 @@ pub async fn geocode_batch(
                 })?,
         );
 
-    let url = format!("{BASE_URL}/locations/addressbatch");
+    let url = format!("{base_url}/locations/addressbatch");
     let resp = client
         .post(&url)
         .multipart(form)

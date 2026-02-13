@@ -7,24 +7,24 @@
 
 use crate::{GeocodeError, GeocodedAddress, GeocodingProvider, MatchQuality};
 
-/// Nominatim API base URL.
-const NOMINATIM_URL: &str = "https://nominatim.openstreetmap.org/search";
-
 /// Geocodes a single address using the Nominatim structured search endpoint.
 ///
-/// The caller is responsible for rate limiting (max 1 request per second).
+/// The caller is responsible for rate limiting (typically 1 request per
+/// second for the public instance; see `rate_limit_ms` in the service
+/// TOML configuration).
 ///
 /// # Errors
 ///
 /// Returns [`GeocodeError`] if the HTTP request or response parsing fails.
 pub async fn geocode_single(
     client: &reqwest::Client,
+    base_url: &str,
     street: &str,
     city: &str,
     state: &str,
 ) -> Result<Option<GeocodedAddress>, GeocodeError> {
     let resp = client
-        .get(NOMINATIM_URL)
+        .get(base_url)
         .query(&[
             ("street", street),
             ("city", city),
@@ -46,17 +46,19 @@ pub async fn geocode_single(
 
 /// Geocodes a free-form query (e.g., intersection) using Nominatim.
 ///
-/// The caller is responsible for rate limiting (max 1 request per second).
+/// The caller is responsible for rate limiting (see `rate_limit_ms` in the
+/// service TOML configuration).
 ///
 /// # Errors
 ///
 /// Returns [`GeocodeError`] if the HTTP request or response parsing fails.
 pub async fn geocode_freeform(
     client: &reqwest::Client,
+    base_url: &str,
     query: &str,
 ) -> Result<Option<GeocodedAddress>, GeocodeError> {
     let resp = client
-        .get(NOMINATIM_URL)
+        .get(base_url)
         .query(&[
             ("q", query),
             ("countrycodes", "us"),

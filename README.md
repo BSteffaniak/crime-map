@@ -193,6 +193,25 @@ GET /api/sidebar                  Paginated sidebar incidents (bbox, filters, co
 GET /api/ai/ask?q=...             AI chat (SSE streaming, natural language crime queries)
 ```
 
+## Geocoding
+
+Addresses without coordinates are geocoded through a priority-based provider chain defined in TOML config files (`packages/geocoder/services/*.toml`). Each provider is tried in order; addresses resolved by an earlier provider are skipped by later ones.
+
+| Priority | Provider | Strategy | Speed |
+| -------- | -------- | -------- | ----- |
+| 1 | **Census Bureau** | Batch API (up to 10K addresses/request), exact match | ~10K/batch |
+| 2 | **Pelias** (self-hosted) | Concurrent fuzzy search against OpenAddresses + OSM | ~100 req/s |
+| 3 | **Nominatim** | Public OSM API, strict rate limit | ~0.9 req/s |
+
+Pelias is optional -- if unreachable, the pipeline skips it and falls through to Nominatim. See [`infra/README.md`](infra/README.md) for deploying Pelias on Oracle Cloud's Always Free tier ($0/month).
+
+### Adding a new geocoding provider
+
+1. Create `packages/geocoder/services/<provider>.toml` with `id`, `name`, `enabled`, `priority`, and a `[provider]` section
+2. Add a new variant to `ProviderConfig` in `packages/geocoder/src/service_registry.rs`
+3. Implement the client in `packages/geocoder/src/<provider>.rs`
+4. Add the provider match arm in `resolve_addresses()` in `packages/ingest/src/lib.rs`
+
 ## Project Structure
 
 ```
@@ -202,13 +221,14 @@ packages/
   source/             CrimeSource trait, shared fetchers (Socrata, ArcGIS, Carto, CKAN, OData), 42 TOML source configs
   database/models/    Query types (BoundingBox, IncidentQuery, IncidentRow)
   database/           PostGIS migrations and spatial queries
+  geocoder/           Geocoding clients (Census Bureau, Pelias, Nominatim) and TOML service registry
   geography/models/   Census tract and area statistics types
   geography/          Census tract boundary ingestion (TIGERweb API), spatial queries
   analytics/models/   AI tool parameter/result types, JSON Schema tool definitions
   analytics/          Analytical query engine (count, rank, compare, trend, top types, list cities)
   ai/                 LLM agent loop with provider abstraction (Anthropic, OpenAI, Bedrock)
   ingest/models/      Ingestion types (FetchConfig, ImportResult)
-  ingest/             CLI binary for data ingestion (migrate, sync, sync-all)
+  ingest/             CLI binary for data ingestion (migrate, sync, sync-all, geocode)
   generate/           Tile and database generation via tippecanoe (PMTiles, SQLite, DuckDB)
   server/models/      API request/response types
   server/             Actix-Web HTTP server

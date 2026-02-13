@@ -5,11 +5,18 @@
 //! Geocoding service for crime map data.
 //!
 //! Converts street addresses to latitude/longitude coordinates using a
-//! multi-provider strategy:
+//! multi-provider strategy configured via TOML files in `services/`:
 //!
-//! 1. **US Census Bureau Batch Geocoder** (primary) — free, no API key,
+//! 1. **US Census Bureau Batch Geocoder** (priority 1) — free, no API key,
 //!    up to 10,000 addresses per batch request.
-//! 2. **Nominatim / OpenStreetMap** (fallback) — free, 1 req/sec rate limit.
+//! 2. **Pelias** (priority 2) — self-hosted, no rate limit, concurrent
+//!    requests. Requires a running Pelias instance.
+//! 3. **Nominatim / OpenStreetMap** (priority 3) — free, 1 req/sec rate
+//!    limit.
+//!
+//! Providers are loaded from the [`service_registry`] and executed in
+//! priority order.  Unreachable providers (e.g., Pelias when no instance
+//! is running) are skipped automatically.
 //!
 //! Also provides address cleaning utilities for normalizing block-level
 //! addresses from crime data sources.
@@ -17,6 +24,8 @@
 pub mod address;
 pub mod census;
 pub mod nominatim;
+pub mod pelias;
+pub mod service_registry;
 
 use thiserror::Error;
 
@@ -40,6 +49,8 @@ pub struct GeocodedAddress {
 pub enum GeocodingProvider {
     /// US Census Bureau Geocoder.
     Census,
+    /// Self-hosted Pelias geocoder.
+    Pelias,
     /// Nominatim / OpenStreetMap.
     Nominatim,
 }

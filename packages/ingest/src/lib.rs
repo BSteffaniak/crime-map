@@ -552,9 +552,9 @@ pub async fn cache_insert(
 ///
 /// For each unique address in `addr_groups`:
 /// 1. Check the geocode cache for existing results (hits or known misses)
-/// 2. Send uncached addresses to Census Bureau batch geocoder
-/// 3. Send remaining uncached to Nominatim (1 req/sec)
-/// 4. Write all results (hits and misses) to cache
+/// 2. Iterate enabled geocoding services (from the TOML registry) in
+///    priority order, sending unresolved addresses to each provider
+/// 3. Write all results (hits and misses) to cache
 ///
 /// Returns `(updates, all_incident_ids)` where `updates` are `(id, lng, lat)`
 /// tuples for successfully geocoded incidents, and `all_incident_ids` is every
@@ -571,13 +571,12 @@ pub async fn resolve_addresses(
     nominatim_only: bool,
     progress: &Option<Arc<dyn ProgressCallback>>,
 ) -> Result<(Vec<(i64, f64, f64)>, Vec<i64>), Box<dyn std::error::Error>> {
-    use crime_map_geocoder::AddressInput;
     use crime_map_geocoder::address::build_one_line_address;
-    use std::collections::BTreeSet;
+    use crime_map_geocoder::service_registry::{ProviderConfig, enabled_services};
 
     let mut pending_updates: Vec<(i64, f64, f64)> = Vec::new();
     let mut all_ids: Vec<i64> = Vec::new();
-    let mut cache_writes: Vec<CacheEntry> = Vec::new();
+    let cache_writes: Vec<CacheEntry> = Vec::new();
 
     // Collect all incident IDs
     for ids in addr_groups.values() {
@@ -598,7 +597,7 @@ pub async fn resolve_addresses(
     // --- Phase 0: Cache lookup ---
     let (cache_hits, cache_tried) = cache_lookup(db, &all_keys).await?;
 
-    let mut resolved_keys: BTreeSet<String> = BTreeSet::new();
+    let mut resolved_keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     // Apply cache hits
     let mut cache_resolved_incidents = 0u64;
@@ -613,7 +612,7 @@ pub async fn resolve_addresses(
     }
 
     // Also count incidents whose addresses were already tried (and failed)
-    // by all providers — they won't be sent to Census or Nominatim either
+    // by all providers — they won't be sent to any provider
     let mut cache_tried_incidents = 0u64;
     for (address_key, _, ids) in &keys_and_groups {
         if !resolved_keys.contains(address_key) && cache_tried.contains(address_key) {
@@ -633,160 +632,339 @@ pub async fn resolve_addresses(
         );
     }
 
-    // Filter to addresses not yet resolved and not already tried by all providers
-    let uncached_for_census: Vec<AddressGroup<'_>> = keys_and_groups
-        .iter()
-        .filter(|(key, _, _)| !resolved_keys.contains(key) && !cache_tried.contains(key))
-        .cloned()
-        .collect();
+    // --- Provider pipeline: iterate services in priority order ---
+    let services = enabled_services();
+    let filtered_services: Vec<_> = if nominatim_only {
+        services
+            .into_iter()
+            .filter(|s| s.id == "nominatim")
+            .collect()
+    } else {
+        services
+    };
 
-    // --- Phase 1: Census Bureau batch ---
-    if !nominatim_only && !uncached_for_census.is_empty() {
-        let inputs: Vec<(AddressInput, &str, &Vec<i64>)> = uncached_for_census
+    let mut state = ResolveState {
+        resolved_keys,
+        pending_updates,
+        cache_writes,
+    };
+
+    for service in &filtered_services {
+        // Collect unresolved addresses for this provider
+        let unresolved: Vec<AddressGroup<'_>> = keys_and_groups
             .iter()
-            .enumerate()
-            .map(|(i, (address_key, (street, city, state), ids))| {
-                (
-                    AddressInput {
-                        id: i.to_string(),
-                        street: street.clone(),
-                        city: city.clone(),
-                        state: state.clone(),
-                        zip: None,
-                    },
-                    address_key.as_str(),
-                    *ids,
-                )
-            })
+            .filter(|(key, _, _)| !state.resolved_keys.contains(key) && !cache_tried.contains(key))
+            .cloned()
             .collect();
 
-        for chunk in inputs.chunks(crime_map_geocoder::census::MAX_BATCH_SIZE) {
-            let batch_inputs: Vec<AddressInput> =
-                chunk.iter().map(|(input, _, _)| input.clone()).collect();
-
-            log::info!(
-                "Sending batch of {} addresses to Census geocoder...",
-                batch_inputs.len()
-            );
-
-            let mut matched_keys: BTreeSet<String> = BTreeSet::new();
-
-            match crime_map_geocoder::census::geocode_batch(client, &batch_inputs).await {
-                Ok(result) => {
-                    log::info!(
-                        "Census batch: {} matched, {} unmatched",
-                        result.matched.len(),
-                        result.unmatched.len()
-                    );
-
-                    for (id_str, geocoded) in &result.matched {
-                        let idx: usize = id_str.parse().unwrap_or(usize::MAX);
-                        if let Some(&(_, address_key, ids)) = chunk.get(idx) {
-                            matched_keys.insert(address_key.to_string());
-                            resolved_keys.insert(address_key.to_string());
-
-                            cache_writes.push((
-                                address_key.to_string(),
-                                "census".to_string(),
-                                Some(geocoded.latitude),
-                                Some(geocoded.longitude),
-                                geocoded.matched_address.clone(),
-                            ));
-
-                            for &id in ids {
-                                pending_updates.push((id, geocoded.longitude, geocoded.latitude));
-                            }
-
-                            if let Some(p) = progress {
-                                p.inc(ids.len() as u64);
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::error!("Census batch geocoding failed: {e}");
-                }
-            }
-
-            // Cache misses for Census
-            for &(_, address_key, _) in chunk {
-                if !matched_keys.contains(address_key) {
-                    cache_writes.push((
-                        address_key.to_string(),
-                        "census".to_string(),
-                        None,
-                        None,
-                        None,
-                    ));
-                }
-            }
+        if unresolved.is_empty() {
+            break;
         }
-    }
 
-    // --- Phase 2: Nominatim fallback ---
-    let uncached_for_nominatim: Vec<(&str, &Vec<i64>)> = keys_and_groups
-        .iter()
-        .filter(|(key, _, _)| !resolved_keys.contains(key) && !cache_tried.contains(key))
-        .map(|(key, _, ids)| (key.as_str(), *ids))
-        .collect();
-
-    if !uncached_for_nominatim.is_empty() {
-        log::info!(
-            "Attempting Nominatim fallback for {} remaining addresses...",
-            uncached_for_nominatim.len()
-        );
-
-        for &(address_key, ids) in &uncached_for_nominatim {
-            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-
-            match crime_map_geocoder::nominatim::geocode_freeform(client, address_key).await {
-                Ok(Some(geocoded)) => {
-                    cache_writes.push((
-                        address_key.to_string(),
-                        "nominatim".to_string(),
-                        Some(geocoded.latitude),
-                        Some(geocoded.longitude),
-                        geocoded.matched_address.clone(),
-                    ));
-
-                    for &id in ids {
-                        pending_updates.push((id, geocoded.longitude, geocoded.latitude));
-                    }
-                }
-                Ok(None) => {
-                    log::debug!("Nominatim: no match for '{address_key}'");
-                    cache_writes.push((
-                        address_key.to_string(),
-                        "nominatim".to_string(),
-                        None,
-                        None,
-                        None,
-                    ));
-                }
-                Err(e) => {
-                    log::warn!("Nominatim error for '{address_key}': {e}");
-                    if matches!(e, crime_map_geocoder::GeocodeError::RateLimited) {
-                        log::warn!("Rate limited by Nominatim, waiting 60s...");
-                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                    }
-                    // Don't cache errors — we'll retry next time
-                }
+        match &service.provider {
+            ProviderConfig::Census {
+                base_url,
+                benchmark,
+                max_batch_size,
+            } => {
+                resolve_via_census(
+                    client,
+                    base_url,
+                    benchmark,
+                    *max_batch_size,
+                    &unresolved,
+                    &mut state,
+                    progress.as_ref(),
+                )
+                .await?;
             }
-
-            // Progress: each address attempt (hit, miss, or error) advances the bar
-            if let Some(p) = progress {
-                p.inc(ids.len() as u64);
+            ProviderConfig::Pelias {
+                base_url,
+                country_code,
+                concurrent_requests,
+            } => {
+                // Health check — skip if the instance is unreachable
+                if !crime_map_geocoder::pelias::is_available(client, base_url).await {
+                    log::info!("Pelias at {base_url} is not reachable, skipping");
+                    continue;
+                }
+                resolve_via_pelias(
+                    client,
+                    base_url,
+                    country_code,
+                    *concurrent_requests,
+                    &unresolved,
+                    &mut state,
+                    progress.as_ref(),
+                )
+                .await?;
+            }
+            ProviderConfig::Nominatim {
+                base_url,
+                rate_limit_ms,
+            } => {
+                resolve_via_nominatim(
+                    client,
+                    base_url,
+                    *rate_limit_ms,
+                    &unresolved,
+                    &mut state,
+                    progress.as_ref(),
+                )
+                .await?;
             }
         }
     }
 
     // --- Flush cache writes ---
-    if !cache_writes.is_empty() {
-        log::info!("Writing {} entries to geocode cache...", cache_writes.len());
-        cache_insert(db, &cache_writes).await?;
+    if !state.cache_writes.is_empty() {
+        log::info!(
+            "Writing {} entries to geocode cache...",
+            state.cache_writes.len()
+        );
+        cache_insert(db, &state.cache_writes).await?;
     }
 
-    Ok((pending_updates, all_ids))
+    Ok((state.pending_updates, all_ids))
+}
+
+/// Shared mutable state threaded through provider-specific resolve functions.
+struct ResolveState {
+    resolved_keys: std::collections::BTreeSet<String>,
+    pending_updates: Vec<(i64, f64, f64)>,
+    cache_writes: Vec<CacheEntry>,
+}
+
+/// Resolves addresses via the US Census Bureau batch geocoder.
+#[allow(clippy::too_many_lines)]
+async fn resolve_via_census(
+    client: &reqwest::Client,
+    base_url: &str,
+    benchmark: &str,
+    max_batch_size: usize,
+    unresolved: &[AddressGroup<'_>],
+    state: &mut ResolveState,
+    progress: Option<&Arc<dyn ProgressCallback>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crime_map_geocoder::AddressInput;
+    use std::collections::BTreeSet;
+
+    let inputs: Vec<(AddressInput, &str, &Vec<i64>)> = unresolved
+        .iter()
+        .enumerate()
+        .map(|(i, (address_key, (street, city, addr_state), ids))| {
+            (
+                AddressInput {
+                    id: i.to_string(),
+                    street: street.clone(),
+                    city: city.clone(),
+                    state: addr_state.clone(),
+                    zip: None,
+                },
+                address_key.as_str(),
+                *ids,
+            )
+        })
+        .collect();
+
+    for chunk in inputs.chunks(max_batch_size) {
+        let batch_inputs: Vec<AddressInput> =
+            chunk.iter().map(|(input, _, _)| input.clone()).collect();
+
+        log::info!(
+            "Sending batch of {} addresses to Census geocoder...",
+            batch_inputs.len()
+        );
+
+        let mut matched_keys: BTreeSet<String> = BTreeSet::new();
+
+        match crime_map_geocoder::census::geocode_batch(client, base_url, benchmark, &batch_inputs)
+            .await
+        {
+            Ok(result) => {
+                log::info!(
+                    "Census batch: {} matched, {} unmatched",
+                    result.matched.len(),
+                    result.unmatched.len()
+                );
+
+                for (id_str, geocoded) in &result.matched {
+                    let idx: usize = id_str.parse().unwrap_or(usize::MAX);
+                    if let Some(&(_, address_key, ids)) = chunk.get(idx) {
+                        matched_keys.insert(address_key.to_string());
+                        state.resolved_keys.insert(address_key.to_string());
+
+                        state.cache_writes.push((
+                            address_key.to_string(),
+                            "census".to_string(),
+                            Some(geocoded.latitude),
+                            Some(geocoded.longitude),
+                            geocoded.matched_address.clone(),
+                        ));
+
+                        for &id in ids {
+                            state
+                                .pending_updates
+                                .push((id, geocoded.longitude, geocoded.latitude));
+                        }
+
+                        if let Some(p) = progress {
+                            p.inc(ids.len() as u64);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("Census batch geocoding failed: {e}");
+            }
+        }
+
+        // Cache misses for Census
+        for &(_, address_key, _) in chunk {
+            if !matched_keys.contains(address_key) {
+                state.cache_writes.push((
+                    address_key.to_string(),
+                    "census".to_string(),
+                    None,
+                    None,
+                    None,
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Resolves addresses via a self-hosted Pelias instance.
+async fn resolve_via_pelias(
+    client: &reqwest::Client,
+    base_url: &str,
+    country_code: &str,
+    concurrent_requests: usize,
+    unresolved: &[AddressGroup<'_>],
+    state: &mut ResolveState,
+    progress: Option<&Arc<dyn ProgressCallback>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use futures::stream::{self, StreamExt as _};
+
+    log::info!(
+        "Sending {} addresses to Pelias (concurrency={concurrent_requests})...",
+        unresolved.len()
+    );
+
+    // Fire concurrent requests via buffered stream
+    let results: Vec<_> = stream::iter(unresolved.iter().map(|(address_key, _, ids)| {
+        let key = address_key.clone();
+        let ids_clone = (*ids).clone();
+        async move {
+            let result =
+                crime_map_geocoder::pelias::geocode_freeform(client, base_url, country_code, &key)
+                    .await;
+            (key, ids_clone, result)
+        }
+    }))
+    .buffer_unordered(concurrent_requests)
+    .collect()
+    .await;
+
+    for (address_key, ids, result) in results {
+        match result {
+            Ok(Some(geocoded)) => {
+                state.resolved_keys.insert(address_key.clone());
+                state.cache_writes.push((
+                    address_key,
+                    "pelias".to_string(),
+                    Some(geocoded.latitude),
+                    Some(geocoded.longitude),
+                    geocoded.matched_address.clone(),
+                ));
+                for &id in &ids {
+                    state
+                        .pending_updates
+                        .push((id, geocoded.longitude, geocoded.latitude));
+                }
+            }
+            Ok(None) => {
+                log::debug!("Pelias: no match for '{address_key}'");
+                state
+                    .cache_writes
+                    .push((address_key, "pelias".to_string(), None, None, None));
+            }
+            Err(e) => {
+                log::warn!("Pelias error for '{address_key}': {e}");
+            }
+        }
+
+        if let Some(p) = progress {
+            p.inc(ids.len() as u64);
+        }
+    }
+
+    Ok(())
+}
+
+/// Resolves addresses via Nominatim (rate-limited, one at a time).
+async fn resolve_via_nominatim(
+    client: &reqwest::Client,
+    base_url: &str,
+    rate_limit_ms: u64,
+    unresolved: &[AddressGroup<'_>],
+    state: &mut ResolveState,
+    progress: Option<&Arc<dyn ProgressCallback>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    log::info!(
+        "Attempting Nominatim fallback for {} remaining addresses...",
+        unresolved.len()
+    );
+
+    for (address_key, _, ids) in unresolved {
+        tokio::time::sleep(std::time::Duration::from_millis(rate_limit_ms)).await;
+
+        match crime_map_geocoder::nominatim::geocode_freeform(client, base_url, address_key).await {
+            Ok(Some(geocoded)) => {
+                state.resolved_keys.insert(address_key.clone());
+                state.cache_writes.push((
+                    address_key.clone(),
+                    "nominatim".to_string(),
+                    Some(geocoded.latitude),
+                    Some(geocoded.longitude),
+                    geocoded.matched_address.clone(),
+                ));
+
+                for &id in *ids {
+                    state
+                        .pending_updates
+                        .push((id, geocoded.longitude, geocoded.latitude));
+                }
+            }
+            Ok(None) => {
+                log::debug!("Nominatim: no match for '{address_key}'");
+                state.cache_writes.push((
+                    address_key.clone(),
+                    "nominatim".to_string(),
+                    None,
+                    None,
+                    None,
+                ));
+            }
+            Err(e) => {
+                log::warn!("Nominatim error for '{address_key}': {e}");
+                if matches!(e, crime_map_geocoder::GeocodeError::RateLimited) {
+                    log::warn!("Rate limited by Nominatim, waiting 60s...");
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                }
+                // Don't cache errors — we'll retry next time
+            }
+        }
+
+        // Progress: each address attempt (hit, miss, or error) advances the bar
+        if let Some(p) = progress {
+            p.inc(ids.len() as u64);
+        }
+    }
+
+    Ok(())
 }
 
 /// Geocodes incidents that have block addresses but no coordinates.

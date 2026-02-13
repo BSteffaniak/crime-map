@@ -1,0 +1,10 @@
+id = "census"
+name = "US Census Bureau Geocoder"
+enabled = true
+priority = 1
+
+[provider]
+type = "census"
+base_url = "https://geocoding.geo.census.gov/geocoder"
+benchmark = "Public_AR_Current"
+max_batch_size = 10000
