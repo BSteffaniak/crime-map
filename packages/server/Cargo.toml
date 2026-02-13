@@ -21,9 +21,6 @@ crime_map_database_models = { workspace = true }
 crime_map_database = { workspace = true }
 crime_map_server_models = { workspace = true }
 crime_map_geography = { workspace = true }
-crime_map_geography_models = { workspace = true }
-crime_map_analytics = { workspace = true }
-crime_map_analytics_models = { workspace = true }
 crime_map_ai = { workspace = true }
 crime_map_conversations = { workspace = true }
 moosicbox_json_utils = { workspace = true, features = ["database"] }
@@ -38,17 +35,14 @@ switchy_database_connection = { workspace = true, features = [
 actix-web = { workspace = true, features = ["macros"] }
 actix-cors = { workspace = true }
 actix-files = { workspace = true }
-actix-rt = { workspace = true }
 async-stream = { workspace = true }
 
-chrono = { workspace = true }
 dialoguer = { workspace = true }
 duckdb = { workspace = true }
 log = { workspace = true }
 pretty_env_logger = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
-thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 uuid = { workspace = true }
 
@@ -58,13 +52,10 @@ bedrock = ["crime_map_ai/bedrock"]
 duckdb-bundled = ["duckdb/bundled"]
 fail-on-warnings = [
   "crime_map_ai/fail-on-warnings",
-  "crime_map_analytics/fail-on-warnings",
-  "crime_map_analytics_models/fail-on-warnings",
   "crime_map_conversations/fail-on-warnings",
   "crime_map_crime_models/fail-on-warnings",
   "crime_map_database/fail-on-warnings",
   "crime_map_database_models/fail-on-warnings",
   "crime_map_geography/fail-on-warnings",
-  "crime_map_geography_models/fail-on-warnings",
   "crime_map_server_models/fail-on-warnings",
 ]

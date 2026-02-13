@@ -16,28 +16,20 @@ name = "crime_map_ingest"
 path = "src/main.rs"
 
 [dependencies]
-crime_map_crime_models = { workspace = true }
-crime_map_source_models = { workspace = true }
 crime_map_source = { workspace = true }
-crime_map_database_models = { workspace = true }
 crime_map_database = { workspace = true }
 crime_map_geography = { workspace = true }
 crime_map_geocoder = { workspace = true }
 crime_map_neighborhood = { workspace = true }
-crime_map_ingest_models = { workspace = true }
 crime_map_cli_utils = { workspace = true }
 switchy_database = { workspace = true, features = ["postgres-raw"] }
 moosicbox_json_utils = { workspace = true, features = ["database"] }
 
 chrono = { workspace = true }
 clap = { workspace = true }
-csv = { workspace = true }
 futures = { workspace = true, features = ["std"] }
 log = { workspace = true }
 reqwest = { workspace = true, features = ["stream"] }
-serde = { workspace = true }
-serde_json = { workspace = true, features = ["std"] }
-thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 dialoguer = { workspace = true }
 
@@ -45,13 +37,9 @@ dialoguer = { workspace = true }
 default = []
 fail-on-warnings = [
   "crime_map_cli_utils/fail-on-warnings",
-  "crime_map_crime_models/fail-on-warnings",
   "crime_map_database/fail-on-warnings",
-  "crime_map_database_models/fail-on-warnings",
   "crime_map_geocoder/fail-on-warnings",
   "crime_map_geography/fail-on-warnings",
-  "crime_map_ingest_models/fail-on-warnings",
   "crime_map_neighborhood/fail-on-warnings",
   "crime_map_source/fail-on-warnings",
-  "crime_map_source_models/fail-on-warnings",
 ]

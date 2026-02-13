@@ -9,18 +9,13 @@ version = "0.1.0"
 
 [dependencies]
 crime_map_discover_models = { workspace = true }
-crime_map_scraper = { workspace = true }
 crime_map_source = { workspace = true }
 
 chrono = { workspace = true }
 clap = { workspace = true }
 dialoguer = { workspace = true }
-log = { workspace = true }
 moosicbox_json_utils = { workspace = true, features = ["database", "rusqlite"] }
 pretty_env_logger = { workspace = true }
-reqwest = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true, features = ["std"] }
 switchy_database = { workspace = true, features = ["sqlite-rusqlite"] }
 switchy_database_connection = { workspace = true, features = [
   "sqlite-rusqlite",
@@ -32,6 +27,5 @@ tokio = { workspace = true, features = ["full"] }
 default = []
 fail-on-warnings = [
   "crime_map_discover_models/fail-on-warnings",
-  "crime_map_scraper/fail-on-warnings",
   "crime_map_source/fail-on-warnings",
 ]

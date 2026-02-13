@@ -18,17 +18,16 @@ switchy_database_connection = { workspace = true, features = ["postgres-raw"] }
 switchy_schema = { workspace = true, features = ["embedded"] }
 moosicbox_json_utils = { workspace = true, features = ["database"] }
 
-async-trait = { workspace = true }
 chrono = { workspace = true }
 include_dir = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
 
 [features]
 default = []
 fail-on-warnings = [
   "crime_map_crime_models/fail-on-warnings",
   "crime_map_database_models/fail-on-warnings",
+  "crime_map_source/fail-on-warnings",
   "crime_map_source_models/fail-on-warnings",
 ]

@@ -8,8 +8,9 @@ repository = { workspace = true }
 version = "0.1.0"
 
 [dependencies]
-chrono = { workspace = true }
 serde = { workspace = true }
+
+[dev-dependencies]
 serde_json = { workspace = true, features = ["std"] }
 
 [features]

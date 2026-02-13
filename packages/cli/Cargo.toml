@@ -22,7 +22,6 @@ crime_map_server = { workspace = true }
 crime_map_source = { workspace = true }
 
 actix-web = { workspace = true }
-actix-rt = { workspace = true }
 dialoguer = { workspace = true }
 log = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

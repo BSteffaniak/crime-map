@@ -16,8 +16,6 @@ name = "crime_map_generate"
 path = "src/lib.rs"
 
 [dependencies]
-crime_map_crime_models = { workspace = true }
-crime_map_database_models = { workspace = true }
 crime_map_database = { workspace = true }
 crime_map_source = { workspace = true }
 moosicbox_json_utils = { workspace = true, features = ["database"] }
@@ -37,15 +35,12 @@ log = { workspace = true }
 pretty_env_logger = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
-thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 
 [features]
 default = []
 duckdb-bundled = ["duckdb/bundled"]
 fail-on-warnings = [
-  "crime_map_crime_models/fail-on-warnings",
   "crime_map_database/fail-on-warnings",
-  "crime_map_database_models/fail-on-warnings",
   "crime_map_source/fail-on-warnings",
 ]
