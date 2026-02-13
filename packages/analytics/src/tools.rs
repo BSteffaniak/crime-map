@@ -72,9 +72,7 @@ fn build_common_filters(
     }
 
     if let Some(geoid) = geoid {
-        frags.push(format!(
-            "ST_Covers((SELECT boundary FROM census_tracts WHERE geoid = ${idx}), i.location)"
-        ));
+        frags.push(format!("i.census_tract_geoid = ${idx}"));
         params.push(DatabaseValue::String(geoid.to_string()));
         idx += 1;
     }
@@ -101,7 +99,7 @@ fn build_common_filters(
 
     if let Some(cat) = category {
         frags.push(format!(
-            "c.parent_id = (SELECT id FROM crime_categories WHERE name = ${idx} AND parent_id IS NULL)"
+            "i.parent_category_id = (SELECT id FROM crime_categories WHERE name = ${idx} AND parent_id IS NULL)"
         ));
         params.push(DatabaseValue::String(cat.to_uppercase()));
         idx += 1;
@@ -124,14 +122,13 @@ fn build_common_filters(
     Ok((frags, params, idx))
 }
 
-/// Returns `true` if any category-related filter is active, meaning
-/// queries need to JOIN `crime_categories`.
-fn needs_category_join(
-    category: Option<&str>,
-    subcategory: Option<&str>,
-    severity_min: Option<u8>,
-) -> bool {
-    category.is_some() || subcategory.is_some() || severity_min.is_some_and(|s| s > 1)
+/// Returns `true` if any filter is active that requires a JOIN to
+/// `crime_categories`. Since `parent_category_id` is denormalized onto
+/// `crime_incidents`, the top-level category filter no longer needs
+/// the join — only subcategory and severity filters still reference
+/// columns on the `crime_categories` table.
+fn needs_category_join(subcategory: Option<&str>, severity_min: Option<u8>) -> bool {
+    subcategory.is_some() || severity_min.is_some_and(|s| s > 1)
 }
 
 fn where_clause(frags: &[String]) -> String {
@@ -198,11 +195,7 @@ pub async fn count_incidents(
     )?;
 
     let wc = where_clause(&frags);
-    let has_cat_filter = needs_category_join(
-        params.category.as_deref(),
-        params.subcategory.as_deref(),
-        params.severity_min,
-    );
+    let has_cat_filter = needs_category_join(params.subcategory.as_deref(), params.severity_min);
 
     // Total count — skip the category join when no category filters are
     // active, which lets Postgres use a much faster index-only scan.
@@ -224,12 +217,11 @@ pub async fn count_incidents(
     let rows = db.query_raw_params(&count_sql, &db_params).await?;
     let total: i64 = rows.first().map_or(0, |r| r.to_value("total").unwrap_or(0));
 
-    // Category breakdown
+    // Category breakdown — join only to resolve parent category name
     let cat_sql = format!(
         "SELECT pc.name as category, COUNT(*) as cnt
          FROM crime_incidents i
-         JOIN crime_categories c ON i.category_id = c.id
-         LEFT JOIN crime_categories pc ON c.parent_id = pc.id
+         JOIN crime_categories pc ON i.parent_category_id = pc.id
          {wc}
          GROUP BY pc.name
          ORDER BY cnt DESC"
@@ -317,7 +309,7 @@ pub async fn rank_areas(
 
     if let Some(ref cat) = params.category {
         frags.push(format!(
-            "c.parent_id = (SELECT id FROM crime_categories WHERE name = ${idx} AND parent_id IS NULL)"
+            "i.parent_category_id = (SELECT id FROM crime_categories WHERE name = ${idx} AND parent_id IS NULL)"
         ));
         db_params.push(DatabaseValue::String(cat.to_uppercase()));
         idx += 1;
@@ -326,6 +318,35 @@ pub async fn rank_areas(
     let _ = idx; // suppress unused-after-increment; kept for safety if filters are added
     let wc = where_clause(&frags);
 
+    // Fast pre-check: bail out immediately if no matching incidents have
+    // census tract attribution.  Without this, the main query scans
+    // millions of rows (e.g. 8.4 M for Chicago) only to join against
+    // census_tracts and return zero results.
+    let check_sql = format!(
+        "SELECT EXISTS(SELECT 1 FROM crime_incidents i {wc} AND i.census_tract_geoid IS NOT NULL LIMIT 1)"
+    );
+    let check_rows = db.query_raw_params(&check_sql, &db_params).await?;
+    let has_tract_data: bool = check_rows
+        .first()
+        .and_then(|r| r.to_value("exists").ok())
+        .unwrap_or(false);
+
+    if !has_tract_data {
+        let area_name = params
+            .city
+            .as_deref()
+            .or(params.place_geoid.as_deref())
+            .unwrap_or("this area");
+        return Ok(RankAreaResult {
+            description: format!(
+                "No census tract attribution data available for {area_name}. \
+                 Tract-level ranking requires geocoded incidents with census tract \
+                 assignments. Use count_incidents or trend instead for city-level analysis."
+            ),
+            areas: vec![],
+        });
+    }
+
     let sql = format!(
         "SELECT ct.geoid,
                 COALESCE(n.name, ct.geoid) as area_id,
@@ -333,8 +354,7 @@ pub async fn rank_areas(
                 ct.population, ct.land_area_sq_mi,
                 pc.name as category, COUNT(*) as cat_cnt
          FROM crime_incidents i
-         JOIN crime_categories c ON i.category_id = c.id
-         LEFT JOIN crime_categories pc ON c.parent_id = pc.id
+         JOIN crime_categories pc ON i.parent_category_id = pc.id
          JOIN census_tracts ct ON ct.geoid = i.census_tract_geoid
          LEFT JOIN tract_neighborhoods tn ON ct.geoid = tn.geoid
          LEFT JOIN neighborhoods n ON tn.neighborhood_id = n.id
@@ -481,46 +501,112 @@ pub async fn rank_areas(
 
 /// Compares crime between two time periods.
 ///
+/// Uses conditional aggregation (`COUNT FILTER`) to compare both periods
+/// in a single table scan instead of running separate queries per period.
+///
 /// # Errors
 ///
 /// Returns [`AnalyticsError`] if the database query fails.
+#[allow(clippy::too_many_lines)]
 pub async fn compare_periods(
     db: &dyn Database,
     params: &ComparePeriodParams,
 ) -> Result<ComparePeriodResult, AnalyticsError> {
-    // Count for period A
-    let count_a = count_incidents(
-        db,
-        &CountIncidentsParams {
-            city: params.city.clone(),
-            state: params.state.clone(),
-            geoid: params.geoid.clone(),
-            place_geoid: params.place_geoid.clone(),
-            date_from: Some(params.period_a_from.clone()),
-            date_to: Some(params.period_a_to.clone()),
-            category: params.category.clone(),
-            subcategory: None,
-            severity_min: None,
-        },
-    )
-    .await?;
+    // Parse all four date boundaries
+    let a_from = parse_date(&params.period_a_from)?;
+    let a_to = parse_date(&params.period_a_to)?;
+    let b_from = parse_date(&params.period_b_from)?;
+    let b_to = parse_date(&params.period_b_to)?;
 
-    // Count for period B
-    let count_b = count_incidents(
-        db,
-        &CountIncidentsParams {
-            city: params.city.clone(),
-            state: params.state.clone(),
-            geoid: params.geoid.clone(),
-            place_geoid: params.place_geoid.clone(),
-            date_from: Some(params.period_b_from.clone()),
-            date_to: Some(params.period_b_to.clone()),
-            category: params.category.clone(),
-            subcategory: None,
-            severity_min: None,
-        },
-    )
-    .await?;
+    // Build location + category filters (shared across both periods)
+    let mut frags = Vec::new();
+    let mut db_params: Vec<DatabaseValue> = Vec::new();
+    let mut idx = 1u32;
+
+    if let Some(ref city) = params.city {
+        frags.push(format!("i.city ILIKE ${idx}"));
+        db_params.push(DatabaseValue::String(city.clone()));
+        idx += 1;
+    }
+    if let Some(ref state) = params.state {
+        frags.push(format!("i.state = ${idx}"));
+        db_params.push(DatabaseValue::String(state.to_uppercase()));
+        idx += 1;
+    }
+    if let Some(ref geoid) = params.geoid {
+        frags.push(format!("i.census_tract_geoid = ${idx}"));
+        db_params.push(DatabaseValue::String(geoid.clone()));
+        idx += 1;
+    }
+    if let Some(ref place_geoid) = params.place_geoid {
+        frags.push(format!("i.census_place_geoid = ${idx}"));
+        db_params.push(DatabaseValue::String(place_geoid.clone()));
+        idx += 1;
+    }
+    if let Some(ref cat) = params.category {
+        frags.push(format!(
+            "i.parent_category_id = (SELECT id FROM crime_categories WHERE name = ${idx} AND parent_id IS NULL)"
+        ));
+        db_params.push(DatabaseValue::String(cat.to_uppercase()));
+        idx += 1;
+    }
+
+    // Date range covering both periods so the planner can use
+    // the composite index on (place_geoid, occurred_at, ...).
+    let date_lo_idx = idx;
+    let date_hi_idx = idx + 1;
+    frags.push(format!("i.occurred_at >= ${date_lo_idx}"));
+    frags.push(format!("i.occurred_at <= ${date_hi_idx}"));
+    let date_lo = a_from.min(b_from);
+    let date_hi = a_to.max(b_to);
+    db_params.push(DatabaseValue::DateTime(date_lo));
+    db_params.push(DatabaseValue::DateTime(date_hi));
+    idx += 2;
+
+    // Period boundary params for FILTER clauses
+    let a_from_idx = idx;
+    let a_to_idx = idx + 1;
+    let b_from_idx = idx + 2;
+    let b_to_idx = idx + 3;
+    db_params.push(DatabaseValue::DateTime(a_from));
+    db_params.push(DatabaseValue::DateTime(a_to));
+    db_params.push(DatabaseValue::DateTime(b_from));
+    db_params.push(DatabaseValue::DateTime(b_to));
+
+    let wc = where_clause(&frags);
+
+    // ── Overall totals (single scan) ──────────────────────────────────
+    // No category join needed — parent_category_id filter is on the
+    // incidents table directly.
+    let totals_sql = format!(
+        "SELECT
+           COUNT(*) FILTER (WHERE i.occurred_at >= ${a_from_idx} AND i.occurred_at <= ${a_to_idx}) as a_total,
+           COUNT(*) FILTER (WHERE i.occurred_at >= ${b_from_idx} AND i.occurred_at <= ${b_to_idx}) as b_total
+         FROM crime_incidents i
+         {wc}"
+    );
+
+    let totals_rows = db.query_raw_params(&totals_sql, &db_params).await?;
+    let (a_total, b_total): (i64, i64) = totals_rows.first().map_or((0, 0), |r| {
+        (
+            r.to_value("a_total").unwrap_or(0),
+            r.to_value("b_total").unwrap_or(0),
+        )
+    });
+
+    // ── Per-category breakdown (single scan) ──────────────────────────
+    let cat_sql = format!(
+        "SELECT pc.name as category,
+                COUNT(*) FILTER (WHERE i.occurred_at >= ${a_from_idx} AND i.occurred_at <= ${a_to_idx}) as a_cnt,
+                COUNT(*) FILTER (WHERE i.occurred_at >= ${b_from_idx} AND i.occurred_at <= ${b_to_idx}) as b_cnt
+         FROM crime_incidents i
+         JOIN crime_categories pc ON i.parent_category_id = pc.id
+         {wc}
+         GROUP BY pc.name
+         ORDER BY a_cnt DESC"
+    );
+
+    let cat_rows = db.query_raw_params(&cat_sql, &db_params).await?;
 
     let area_desc = describe_area(
         params.city.as_deref(),
@@ -529,46 +615,45 @@ pub async fn compare_periods(
         params.place_geoid.as_deref(),
     );
 
-    #[allow(clippy::cast_precision_loss)]
-    let percent_change = if count_a.total > 0 {
-        ((count_b.total as f64 - count_a.total as f64) / count_a.total as f64) * 100.0
-    } else if count_b.total > 0 {
+    #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+    let percent_change = if a_total > 0 {
+        ((b_total as f64 - a_total as f64) / a_total as f64) * 100.0
+    } else if b_total > 0 {
         100.0
     } else {
         0.0
     };
 
+    #[allow(clippy::cast_sign_loss)]
     let overall = PeriodComparison {
         area_id: area_desc.clone(),
         area_name: area_desc.clone(),
-        period_a_count: count_a.total,
-        period_b_count: count_b.total,
+        period_a_count: a_total as u64,
+        period_b_count: b_total as u64,
         percent_change,
     };
 
-    // Per-category comparison
     let mut by_category = Vec::new();
-    for cat_a in &count_a.by_category {
-        let cat_b_count = count_b
-            .by_category
-            .iter()
-            .find(|c| c.category == cat_a.category)
-            .map_or(0, |c| c.count);
+    for row in &cat_rows {
+        let cat_name: String = row.to_value("category").unwrap_or_default();
+        let a_cnt: i64 = row.to_value("a_cnt").unwrap_or(0);
+        let b_cnt: i64 = row.to_value("b_cnt").unwrap_or(0);
 
         #[allow(clippy::cast_precision_loss)]
-        let pct = if cat_a.count > 0 {
-            ((cat_b_count as f64 - cat_a.count as f64) / cat_a.count as f64) * 100.0
-        } else if cat_b_count > 0 {
+        let pct = if a_cnt > 0 {
+            ((b_cnt as f64 - a_cnt as f64) / a_cnt as f64) * 100.0
+        } else if b_cnt > 0 {
             100.0
         } else {
             0.0
         };
 
+        #[allow(clippy::cast_sign_loss)]
         by_category.push(PeriodComparison {
-            area_id: cat_a.category.clone(),
-            area_name: cat_a.category.clone(),
-            period_a_count: cat_a.count,
-            period_b_count: cat_b_count,
+            area_id: cat_name.clone(),
+            area_name: cat_name,
+            period_a_count: a_cnt as u64,
+            period_b_count: b_cnt as u64,
             percent_change: pct,
         });
     }
@@ -613,7 +698,7 @@ pub async fn get_trend(
     )?;
 
     let wc = where_clause(&frags);
-    let cat_join = if needs_category_join(params.category.as_deref(), None, None) {
+    let cat_join = if needs_category_join(None, None) {
         "JOIN crime_categories c ON i.category_id = c.id"
     } else {
         ""
@@ -710,12 +795,11 @@ pub async fn top_crime_types(
         })
         .collect();
 
-    // By category
+    // By category — use denormalized parent_category_id
     let cat_sql = format!(
         "SELECT pc.name as category, COUNT(*) as cnt
          FROM crime_incidents i
-         JOIN crime_categories c ON i.category_id = c.id
-         LEFT JOIN crime_categories pc ON c.parent_id = pc.id
+         JOIN crime_categories pc ON i.parent_category_id = pc.id
          {wc}
          GROUP BY pc.name
          ORDER BY cnt DESC"

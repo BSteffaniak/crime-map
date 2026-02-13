@@ -18,6 +18,8 @@
 use std::fmt::Write;
 use std::time::{Duration, Instant};
 
+use chrono::Datelike as _;
+
 use crime_map_analytics::tools;
 use crime_map_analytics_models::{
     ComparePeriodParams, CountIncidentsParams, ListCitiesParams, RankAreaParams,
@@ -114,16 +116,19 @@ fn build_system_prompt(context: &AgentContext) -> String {
 6. Provide specific numbers and percentages in your answers.
 7. If the user asks about a location not directly in the dataset, use search_locations to find matching jurisdictions AND Census places. If search_locations returns a Census place with a placeGeoid, use that placeGeoid in subsequent tool calls (count_incidents, rank_areas, etc.) for precise geographic filtering within that city/town boundary. This is especially important for small cities within large counties (e.g., Capitol Heights within Prince George's County) — using placeGeoid filters to just the incidents within the city limits rather than the entire county. The placeGeoid filter uses pre-computed spatial attribution with a buffer to handle coordinate imprecision, so it captures all nearby incidents.
 8. Format your final answer in clear markdown with key statistics bolded.
-9. Today's date is {today}. When users say "2025", "this year", "last year", etc., interpret relative to today.
+9. Today's date is {today}. The current year is {current_year}. The most recent complete year of data is {last_year}. When users ask about "year over year", "recent trends", or don't specify years, compare {last_year} vs {two_years_ago}. "This year" means {current_year}, "last year" means {last_year}. Do NOT default to years from your training data — always use these values.
 10. Use category names in SCREAMING_SNAKE_CASE when calling tools (e.g., "VIOLENT", "PROPERTY").
 11. State abbreviations should be uppercase 2-letter codes (e.g., "IL", "DC", "CA").
-12. Tool performance: rank_areas is the most expensive tool — it joins incidents to census tracts and aggregates by neighborhood. For large cities, always include date filters or a category filter. If rank_areas times out, fall back to count_incidents or top_crime_types which are much faster. compare_periods runs two count queries internally, so it can also be slow without filters.
+12. Tool performance: rank_areas is the most expensive tool — it joins incidents to census tracts and aggregates by neighborhood. For large cities, always include date filters or a category filter. If rank_areas times out, fall back to count_incidents or top_crime_types which are much faster.
 13. If a tool result contains a DATA TRUNCATED warning, the data is INCOMPLETE. Do NOT estimate, extrapolate, or fabricate totals from partial results. Instead, call the tool again with narrower filters (shorter date range, specific category, etc.) to get complete results. Never present numbers you did not directly receive from a tool.
 
 Be concise but thorough. Always cite the actual numbers from tool results."#,
         cities = cities,
         date_range = date_range,
         today = chrono::Utc::now().format("%Y-%m-%d"),
+        current_year = chrono::Utc::now().format("%Y"),
+        last_year = chrono::Utc::now().year() - 1,
+        two_years_ago = chrono::Utc::now().year() - 2,
     )
 }
 

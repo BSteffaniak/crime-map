@@ -117,8 +117,9 @@ pub async fn get_category_id(
 /// Inserts a batch of normalized incidents into the database.
 ///
 /// Uses multi-row `INSERT ... VALUES (...), (...), ...` statements chunked
-/// to stay within the 65,535 bind-parameter limit. Each row uses 16
-/// parameters, giving ~4,095 rows per chunk.
+/// to stay within the 65,535 bind-parameter limit. Each row uses 16 bind
+/// parameters (plus a subquery for `parent_category_id` derived from
+/// `category_id`), giving ~4,095 rows per chunk.
 ///
 /// Uses `ON CONFLICT` to skip duplicates based on
 /// `(source_id, source_incident_id)`.
@@ -140,6 +141,9 @@ pub async fn insert_incidents(
     use std::fmt::Write as _;
 
     /// Number of `$N` placeholders per row in the VALUES clause.
+    ///
+    /// `parent_category_id` is derived via subquery from the same
+    /// `category_id` bind param, so it does not add an extra placeholder.
     const PARAMS_PER_ROW: u32 = 16;
     /// Maximum number of bind parameters per statement.
     const PG_MAX_PARAMS: u32 = 65_535;
@@ -173,7 +177,7 @@ pub async fn insert_incidents(
     for chunk in valid.chunks(CHUNK_SIZE) {
         let mut sql = String::from(
             "INSERT INTO crime_incidents (\
-                source_id, source_incident_id, category_id, location, \
+                source_id, source_incident_id, category_id, parent_category_id, location, \
                 occurred_at, reported_at, description, block_address, \
                 city, state, arrest_made, domestic, location_type, \
                 has_coordinates, geocoded\
@@ -190,6 +194,7 @@ pub async fn insert_incidents(
             write!(
                 sql,
                 "(${p1}, ${p2}, ${p3}, \
+                 (SELECT COALESCE(parent_id, id) FROM crime_categories WHERE id = ${p3}), \
                  ST_SetSRID(ST_MakePoint(${p4}, ${p5}), 4326)::geography, \
                  ${p6}, ${p7}, ${p8}, ${p9}, ${p10}, ${p11}, ${p12}, ${p13}, ${p14}, ${p15}, ${p16})",
                 p1 = idx,
