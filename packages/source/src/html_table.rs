@@ -73,6 +73,10 @@ pub async fn fetch_html_table(
     }
 
     log::info!("[{}] Fetched {count} records from HTML table", config.label);
+    progress.finish(format!(
+        "[{}] download complete -- {count} records",
+        config.label
+    ));
 
     Ok(count)
 }

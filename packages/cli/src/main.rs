@@ -9,16 +9,13 @@
 //! discover, conversations) and guides them through the configuration
 //! for each.
 //!
-//! Uses `indicatif-log-bridge` to route `log` output through
-//! `indicatif::MultiProgress` so that log lines and progress bars
-//! never fight for the terminal.
+//! Uses `indicatif-log-bridge` (via [`crime_map_ingest::progress::init_logger`])
+//! to route `log` output through `indicatif::MultiProgress` so that log
+//! lines and progress bars never fight for the terminal.
 
 mod pipeline;
-mod progress;
 
 use dialoguer::Select;
-use indicatif::MultiProgress;
-use indicatif_log_bridge::LogWrapper;
 
 /// Top-level tool selection for the crime map toolchain.
 enum Tool {
@@ -53,29 +50,9 @@ impl Tool {
     }
 }
 
-/// Initializes the global logger wrapped in `indicatif-log-bridge` so that
-/// `log::info!` and friends are suspended while progress bars redraw.
-///
-/// Returns the [`MultiProgress`] that all progress bars must be added to.
-fn init_logger() -> MultiProgress {
-    let multi = MultiProgress::new();
-
-    // Build the pretty-env-logger logger manually so we can wrap it.
-    let logger = pretty_env_logger::formatted_builder()
-        .parse_env("RUST_LOG")
-        .build();
-    let level = logger.filter();
-
-    LogWrapper::new(multi.clone(), logger).try_init().ok(); // Ignore error if logger was already set (e.g., in tests)
-
-    log::set_max_level(level);
-
-    multi
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let multi = init_logger();
+    let multi = crime_map_ingest::progress::init_logger();
 
     println!("Crime Map Toolchain");
     println!();
@@ -90,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match Tool::ALL[idx] {
         Tool::RunPipeline => pipeline::run(&multi).await?,
-        Tool::Ingest => crime_map_ingest::interactive::run().await?,
+        Tool::Ingest => crime_map_ingest::interactive::run(&multi).await?,
         Tool::Generate => crime_map_generate::interactive::run().await?,
         Tool::Conversations => crime_map_conversations::interactive::run().await?,
         Tool::Server => {

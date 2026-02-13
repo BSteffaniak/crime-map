@@ -9,6 +9,8 @@ use std::time::Instant;
 
 use dialoguer::{Confirm, Input, MultiSelect, Select};
 
+use crate::progress::{IndicatifProgress, MultiProgress};
+
 /// Top-level actions available in the ingest interactive menu.
 enum IngestAction {
     SyncSources,
@@ -51,12 +53,16 @@ impl IngestAction {
 /// Runs the interactive menu loop, prompting the user to select and
 /// configure ingest operations.
 ///
+/// The `multi` parameter is the shared [`MultiProgress`] that is also
+/// registered with the log bridge, so all `log::info!` output is
+/// automatically suspended while progress bars redraw.
+///
 /// # Errors
 ///
 /// Returns an error if database connection, migrations, or any selected
 /// operation fails.
 #[allow(clippy::too_many_lines)]
-pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>> {
     let db = crime_map_database::db::connect_from_env().await?;
     crime_map_database::run_migrations(db.as_ref()).await?;
 
@@ -69,10 +75,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .interact()?;
 
     match IngestAction::ALL[idx] {
-        IngestAction::SyncSources => sync_sources(db.as_ref()).await?,
+        IngestAction::SyncSources => sync_sources(db.as_ref(), multi).await?,
         IngestAction::ListSources => list_sources(),
-        IngestAction::Geocode => geocode_missing_interactive(db.as_ref()).await?,
-        IngestAction::Attribute => attribute_census_data(db.as_ref()).await?,
+        IngestAction::Geocode => geocode_missing_interactive(db.as_ref(), multi).await?,
+        IngestAction::Attribute => attribute_census_data(db.as_ref(), multi).await?,
         IngestAction::IngestTracts => ingest_census_tracts(db.as_ref()).await?,
         IngestAction::IngestPlaces => ingest_census_places(db.as_ref()).await?,
         IngestAction::IngestNeighborhoods => ingest_neighborhoods(db.as_ref()).await?,
@@ -90,6 +96,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// syncs each selected source.
 async fn sync_sources(
     db: &dyn switchy_database::Database,
+    multi: &MultiProgress,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let sources = crate::all_sources();
     if sources.is_empty() {
@@ -119,9 +126,10 @@ async fn sync_sources(
         .default(false)
         .interact()?;
 
+    let num_sources = selected.len();
     log::info!(
         "Syncing {} source(s): {}",
-        selected.len(),
+        num_sources,
         selected
             .iter()
             .map(|&i| sources[i].id())
@@ -129,11 +137,24 @@ async fn sync_sources(
             .join(", ")
     );
 
-    for &idx in &selected {
-        if let Err(e) = crate::sync_source(db, &sources[idx], limit, force, None).await {
-            log::error!("Failed to sync {}: {e}", sources[idx].id());
+    let source_bar = IndicatifProgress::steps_bar(multi, "Sources", num_sources as u64);
+
+    for (i, &idx) in selected.iter().enumerate() {
+        let src = &sources[idx];
+        let fetch_bar = IndicatifProgress::records_bar(multi, src.name());
+        source_bar.set_message(format!("Source {}/{num_sources}: {}", i + 1, src.name()));
+
+        let result = crate::sync_source(db, src, limit, force, Some(fetch_bar.clone())).await;
+        fetch_bar.finish_and_clear();
+
+        if let Err(e) = result {
+            log::error!("Failed to sync {}: {e}", src.id());
         }
+
+        source_bar.inc(1);
     }
+
+    source_bar.finish(format!("Synced {num_sources} source(s)"));
 
     Ok(())
 }
@@ -152,6 +173,7 @@ fn list_sources() {
 #[allow(clippy::too_many_lines)]
 async fn geocode_missing_interactive(
     db: &dyn switchy_database::Database,
+    multi: &MultiProgress,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let limit = prompt_optional_u64("Total limit (empty for no limit)")?;
 
@@ -200,14 +222,31 @@ async fn geocode_missing_interactive(
 
     let start = Instant::now();
 
+    let geocode_bar = IndicatifProgress::batch_bar(multi, "Geocoding");
+
     // Phase 1: Geocode incidents that have no coordinates
     let missing_count = if all_selected {
-        crate::geocode_missing(db, batch_size, limit, nominatim_only, None, None).await?
+        crate::geocode_missing(
+            db,
+            batch_size,
+            limit,
+            nominatim_only,
+            None,
+            Some(geocode_bar.clone()),
+        )
+        .await?
     } else {
         let mut count = 0u64;
         for &sid in &source_db_ids {
-            count += crate::geocode_missing(db, batch_size, limit, nominatim_only, Some(sid), None)
-                .await?;
+            count += crate::geocode_missing(
+                db,
+                batch_size,
+                limit,
+                nominatim_only,
+                Some(sid),
+                Some(geocode_bar.clone()),
+            )
+            .await?;
         }
         count
     };
@@ -230,7 +269,7 @@ async fn geocode_missing_interactive(
                         remaining_limit,
                         nominatim_only,
                         Some(*sid),
-                        None,
+                        Some(geocode_bar.clone()),
                     )
                     .await?;
                     re_geocode_count += count;
@@ -251,7 +290,7 @@ async fn geocode_missing_interactive(
                             remaining_limit,
                             nominatim_only,
                             Some(*sid),
-                            None,
+                            Some(geocode_bar.clone()),
                         )
                         .await?;
                         re_geocode_count += count;
@@ -260,6 +299,8 @@ async fn geocode_missing_interactive(
             }
         }
     }
+
+    geocode_bar.finish("Geocoding complete".to_string());
 
     let total = missing_count + re_geocode_count;
     let elapsed = start.elapsed();
@@ -274,6 +315,7 @@ async fn geocode_missing_interactive(
 /// Prompts for attribution parameters and runs place/tract attribution.
 async fn attribute_census_data(
     db: &dyn switchy_database::Database,
+    multi: &MultiProgress,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let buffer_str: String = Input::new()
         .with_prompt("Buffer distance in meters")
@@ -306,15 +348,18 @@ async fn attribute_census_data(
         log::info!(
             "Attributing incidents to census places (buffer={buffer}m, batch={batch_size})..."
         );
+        let places_bar = IndicatifProgress::batch_bar(multi, "Place attribution");
         let place_count =
-            crime_map_database::queries::attribute_places(db, buffer, batch_size, None).await?;
+            crime_map_database::queries::attribute_places(db, buffer, batch_size, Some(places_bar))
+                .await?;
         log::info!("Attributed {place_count} incidents to census places");
     }
 
     if !places_only {
         log::info!("Attributing incidents to census tracts (batch={batch_size})...");
+        let tracts_bar = IndicatifProgress::batch_bar(multi, "Tract attribution");
         let tract_count =
-            crime_map_database::queries::attribute_tracts(db, batch_size, None).await?;
+            crime_map_database::queries::attribute_tracts(db, batch_size, Some(tracts_bar)).await?;
         log::info!("Attributed {tract_count} incidents to census tracts");
     }
 

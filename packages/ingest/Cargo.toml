@@ -33,6 +33,7 @@ clap = { workspace = true }
 csv = { workspace = true }
 futures = { workspace = true, features = ["std"] }
 indicatif = { workspace = true }
+indicatif-log-bridge = { workspace = true }
 log = { workspace = true }
 pretty_env_logger = { workspace = true }
 reqwest = { workspace = true, features = ["stream"] }

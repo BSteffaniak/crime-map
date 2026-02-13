@@ -113,5 +113,14 @@ pub async fn fetch_pdf_extract(
         }
     }
 
+    log::info!(
+        "[{}] PDF extraction complete — {total} records",
+        config.label
+    );
+    progress.finish(format!(
+        "[{}] download complete -- {total} records",
+        config.label
+    ));
+
     Ok(total)
 }

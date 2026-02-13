@@ -102,5 +102,11 @@ pub async fn fetch_csv_download(
         }
     }
 
+    log::info!("[{}] CSV download complete — {total} records", config.label);
+    progress.finish(format!(
+        "[{}] download complete -- {total} records",
+        config.label
+    ));
+
     Ok(total)
 }

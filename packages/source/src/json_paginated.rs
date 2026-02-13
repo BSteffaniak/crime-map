@@ -135,5 +135,14 @@ pub async fn fetch_json_paginated(
         page_num += 1;
     }
 
+    log::info!(
+        "[{}] JSON paginated download complete — {total} records",
+        config.label
+    );
+    progress.finish(format!(
+        "[{}] download complete -- {total} records",
+        config.label
+    ));
+
     Ok(total)
 }

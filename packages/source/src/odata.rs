@@ -65,7 +65,7 @@ pub async fn fetch_odata(
     let total_available = query_odata_count(&client, config, options).await;
 
     if let Some(total) = total_available {
-        progress.set_total(fetch_limit.min(total));
+        progress.set_total(fetch_limit.min(total).saturating_sub(options.resume_offset));
         if offset > 0 {
             log::info!(
                 "{}: {total} records available (resuming from offset {offset}, page size {})",

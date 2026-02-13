@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use crime_map_database::{db, queries, run_migrations};
+use crime_map_ingest::progress::IndicatifProgress;
 use crime_map_ingest::{
     all_sources, enabled_sources, geocode_missing, re_geocode_source,
     resolve_re_geocode_source_ids, sync_source,
@@ -113,11 +114,11 @@ enum Commands {
 #[allow(clippy::too_many_lines)]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    pretty_env_logger::init();
+    let multi = crime_map_ingest::progress::init_logger();
     let cli = Cli::parse();
 
     let Some(command) = cli.command else {
-        return crime_map_ingest::interactive::run().await;
+        return crime_map_ingest::interactive::run(&multi).await;
     };
 
     match command {
@@ -147,7 +148,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .iter()
                 .find(|s| s.id() == source)
                 .ok_or_else(|| format!("Unknown source: {source}"))?;
-            sync_source(db.as_ref(), src, limit, force, None).await?;
+
+            let fetch_bar = IndicatifProgress::records_bar(&multi, src.name());
+            let result = sync_source(db.as_ref(), src, limit, force, Some(fetch_bar.clone())).await;
+            fetch_bar.finish_and_clear();
+            result?;
         }
         Commands::SyncAll {
             limit,
@@ -157,20 +162,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let db = db::connect_from_env().await?;
             run_migrations(db.as_ref()).await?;
             let sources = enabled_sources(sources);
+            let num_sources = sources.len();
             log::info!(
                 "Syncing {} source(s): {}",
-                sources.len(),
+                num_sources,
                 sources
                     .iter()
                     .map(SourceDefinition::id)
                     .collect::<Vec<_>>()
                     .join(", ")
             );
-            for src in &sources {
-                if let Err(e) = sync_source(db.as_ref(), src, limit, force, None).await {
+
+            let source_bar = IndicatifProgress::steps_bar(&multi, "Sources", num_sources as u64);
+
+            for (i, src) in sources.iter().enumerate() {
+                let fetch_bar = IndicatifProgress::records_bar(&multi, src.name());
+                source_bar.set_message(format!("Source {}/{num_sources}: {}", i + 1, src.name()));
+
+                let result =
+                    sync_source(db.as_ref(), src, limit, force, Some(fetch_bar.clone())).await;
+                fetch_bar.finish_and_clear();
+
+                if let Err(e) = result {
                     log::error!("Failed to sync {}: {e}", src.id());
                 }
+
+                source_bar.inc(1);
             }
+
+            source_bar.finish(format!("Synced {num_sources} source(s)"));
         }
         Commands::Tracts { states } => {
             let db = db::connect_from_env().await?;
@@ -278,14 +298,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 log::info!(
                     "Attributing incidents to census places (buffer={buffer}m, batch={batch_size})..."
                 );
+                let places_bar = IndicatifProgress::batch_bar(&multi, "Place attribution");
                 let place_count =
-                    queries::attribute_places(db.as_ref(), buffer, batch_size, None).await?;
+                    queries::attribute_places(db.as_ref(), buffer, batch_size, Some(places_bar))
+                        .await?;
                 log::info!("Attributed {place_count} incidents to census places");
             }
 
             if !places_only {
                 log::info!("Attributing incidents to census tracts (batch={batch_size})...");
-                let tract_count = queries::attribute_tracts(db.as_ref(), batch_size, None).await?;
+                let tracts_bar = IndicatifProgress::batch_bar(&multi, "Tract attribution");
+                let tract_count =
+                    queries::attribute_tracts(db.as_ref(), batch_size, Some(tracts_bar)).await?;
                 log::info!("Attributed {tract_count} incidents to census tracts");
             }
 
@@ -316,6 +340,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let start = Instant::now();
 
+            let geocode_bar = IndicatifProgress::batch_bar(&multi, "Geocoding");
+
             // Phase 1: Geocode incidents that have no coordinates
             let missing_count = geocode_missing(
                 db.as_ref(),
@@ -323,7 +349,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 limit,
                 nominatim_only,
                 source_id,
-                None,
+                Some(geocode_bar.clone()),
             )
             .await?;
 
@@ -346,13 +372,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             remaining_limit,
                             nominatim_only,
                             Some(*sid),
-                            None,
+                            Some(geocode_bar.clone()),
                         )
                         .await?;
                         re_geocode_count += count;
                     }
                 }
             }
+
+            geocode_bar.finish("Geocoding complete".to_string());
 
             let total = missing_count + re_geocode_count;
             let elapsed = start.elapsed();

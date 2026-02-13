@@ -1,13 +1,21 @@
-//! `indicatif`-backed progress bar implementation.
+//! `indicatif`-backed progress bar implementation and logger integration.
 //!
 //! Wraps [`indicatif::ProgressBar`] behind the [`ProgressCallback`] trait
 //! so that progress reporting stays decoupled from the rendering backend
 //! throughout the pipeline.
+//!
+//! Also provides [`init_logger`] which sets up `indicatif-log-bridge` so
+//! that `log::info!` and friends are suspended while progress bars redraw.
+//! Any binary that calls `init_logger()` at startup gets full progress bar
+//! support for free.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crime_map_source::progress::ProgressCallback;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle};
+
+pub use indicatif::MultiProgress;
 
 /// An `indicatif` [`ProgressBar`] that implements [`ProgressCallback`].
 pub struct IndicatifProgress {
@@ -23,6 +31,7 @@ impl IndicatifProgress {
     #[must_use]
     pub fn records_bar(multi: &MultiProgress, message: &str) -> Arc<dyn ProgressCallback> {
         let bar = multi.add(ProgressBar::new_spinner());
+        bar.enable_steady_tick(Duration::from_millis(100));
         bar.set_style(
             ProgressStyle::with_template("{spinner:.cyan} {msg}")
                 .unwrap_or_else(|_| ProgressStyle::default_spinner()),
@@ -67,6 +76,7 @@ impl IndicatifProgress {
     #[must_use]
     pub fn batch_bar(multi: &MultiProgress, message: &str) -> Arc<dyn ProgressCallback> {
         let bar = multi.add(ProgressBar::new_spinner());
+        bar.enable_steady_tick(Duration::from_millis(100));
         bar.set_style(
             ProgressStyle::with_template("{spinner:.yellow} {msg}")
                 .unwrap_or_else(|_| ProgressStyle::default_spinner()),
@@ -110,4 +120,27 @@ impl ProgressCallback for IndicatifProgress {
     fn finish_and_clear(&self) {
         self.bar.finish_and_clear();
     }
+}
+
+/// Initializes the global logger wrapped in `indicatif-log-bridge` so that
+/// `log::info!` and friends are suspended while progress bars redraw.
+///
+/// Returns the [`MultiProgress`] that all progress bars must be added to.
+#[must_use]
+pub fn init_logger() -> MultiProgress {
+    let multi = MultiProgress::new();
+
+    // Build the pretty-env-logger logger manually so we can wrap it.
+    let logger = pretty_env_logger::formatted_builder()
+        .parse_env("RUST_LOG")
+        .build();
+    let level = logger.filter();
+
+    indicatif_log_bridge::LogWrapper::new(multi.clone(), logger)
+        .try_init()
+        .ok(); // Ignore error if logger was already set (e.g., in tests)
+
+    log::set_max_level(level);
+
+    multi
 }

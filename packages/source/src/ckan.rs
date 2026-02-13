@@ -118,7 +118,11 @@ async fn fetch_ckan_standard(
         );
     }
 
-    progress.set_total(fetch_limit.min(total_available));
+    progress.set_total(
+        fetch_limit
+            .min(total_available)
+            .saturating_sub(options.resume_offset),
+    );
 
     let mut grand_total: u64 = 0;
     let mut skipped: u64 = 0;
@@ -291,7 +295,11 @@ async fn fetch_ckan_sql(
         );
     }
 
-    progress.set_total(fetch_limit.min(total_available));
+    progress.set_total(
+        fetch_limit
+            .min(total_available)
+            .saturating_sub(options.resume_offset),
+    );
 
     let mut grand_total: u64 = 0;
     let mut skipped: u64 = 0;

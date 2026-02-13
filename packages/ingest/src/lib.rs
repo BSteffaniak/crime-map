@@ -6,6 +6,7 @@
 //! database.
 
 pub mod interactive;
+pub mod progress;
 
 use std::sync::Arc;
 use std::time::Instant;

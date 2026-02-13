@@ -111,7 +111,7 @@ pub async fn fetch_arcgis(
     let total_available = query_arcgis_counts(&client, config, &where_clause).await;
 
     if let Some(total) = total_available {
-        progress.set_total(fetch_limit.min(total));
+        progress.set_total(fetch_limit.min(total).saturating_sub(options.resume_offset));
         let layers_str = if num_layers > 1 {
             format!(" across {num_layers} layers")
         } else {
