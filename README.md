@@ -234,6 +234,7 @@ packages/
   server/             Actix-Web HTTP server
   scraper/            HTML table scraping and CSV download utilities
 app/                  Vite + React + TypeScript + TailwindCSS + MapLibre GL JS frontend
+infra/                OpenTofu configs for self-hosted Pelias on Oracle Cloud Always Free
 ```
 
 ## Environment Variables

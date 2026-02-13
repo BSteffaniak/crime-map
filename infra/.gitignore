@@ -1,0 +1,17 @@
+# OpenTofu / Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+*.tfplan
+
+# Variables with secrets
+*.tfvars
+*.tfvars.json
+!terraform.tfvars.example
+
+# OCI keys
+*.pem
+
+# OS
+.DS_Store
