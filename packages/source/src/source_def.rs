@@ -650,6 +650,7 @@ impl SourceDefinition {
     pub fn fetch_pages(
         &self,
         options: &FetchOptions,
+        progress: std::sync::Arc<dyn crate::progress::ProgressCallback>,
     ) -> (
         mpsc::Receiver<Vec<serde_json::Value>>,
         tokio::task::JoinHandle<Result<u64, SourceError>>,
@@ -675,6 +676,7 @@ impl SourceDefinition {
                         },
                         &options,
                         &tx,
+                        &progress,
                     )
                     .await
                 }
@@ -694,6 +696,7 @@ impl SourceDefinition {
                         },
                         &options,
                         &tx,
+                        &progress,
                     )
                     .await
                 }
@@ -713,6 +716,7 @@ impl SourceDefinition {
                         },
                         &options,
                         &tx,
+                        &progress,
                     )
                     .await
                 }
@@ -732,6 +736,7 @@ impl SourceDefinition {
                         },
                         &options,
                         &tx,
+                        &progress,
                     )
                     .await
                 }
@@ -749,6 +754,7 @@ impl SourceDefinition {
                         },
                         &options,
                         &tx,
+                        &progress,
                     )
                     .await
                 }
@@ -774,6 +780,7 @@ impl SourceDefinition {
                         },
                         &options,
                         &tx,
+                        &progress,
                     )
                     .await
                 }
@@ -795,6 +802,7 @@ impl SourceDefinition {
                         },
                         &options,
                         &tx,
+                        &progress,
                     )
                     .await
                 }
@@ -824,6 +832,7 @@ impl SourceDefinition {
                         },
                         &options,
                         &tx,
+                        &progress,
                     )
                     .await
                 }
@@ -849,6 +858,7 @@ impl SourceDefinition {
                         },
                         &options,
                         &tx,
+                        &progress,
                     )
                     .await
                 }

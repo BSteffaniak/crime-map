@@ -4,11 +4,13 @@
 //! pages through the ingest pipeline's [`tokio::sync::mpsc`] channel.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crime_map_scraper::Scraper;
 use crime_map_scraper::html_table::HtmlTableScraper;
 use tokio::sync::mpsc;
 
+use crate::progress::ProgressCallback;
 use crate::{FetchOptions, SourceError};
 
 /// Configuration for the HTML table fetcher.
@@ -40,6 +42,7 @@ pub async fn fetch_html_table(
     config: &HtmlTableConfig<'_>,
     _options: &FetchOptions,
     tx: &mpsc::Sender<Vec<serde_json::Value>>,
+    progress: &Arc<dyn ProgressCallback>,
 ) -> Result<u64, SourceError> {
     let mut scraper = HtmlTableScraper::new(config.url);
 
@@ -63,6 +66,7 @@ pub async fn fetch_html_table(
 
     let page = scraper.fetch_page(0).await?;
     let count = page.records.len() as u64;
+    progress.inc(count);
 
     if !page.records.is_empty() {
         tx.send(page.records).await.ok();

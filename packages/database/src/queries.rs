@@ -5,9 +5,11 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use crime_map_crime_models::{CrimeSeverity, CrimeSubcategory};
 use crime_map_database_models::{IncidentQuery, IncidentRow};
+use crime_map_source::progress::ProgressCallback;
 use crime_map_source_models::NormalizedIncident;
 use moosicbox_json_utils::database::ToValue as _;
 use switchy_database::{Database, DatabaseValue};
@@ -578,8 +580,24 @@ pub async fn attribute_places(
     db: &dyn Database,
     buffer_meters: f64,
     batch_size: u32,
+    progress: Option<Arc<dyn ProgressCallback>>,
 ) -> Result<u64, DbError> {
     let mut total = 0u64;
+
+    // Query unattributed count for progress reporting
+    if let Some(ref p) = progress {
+        let rows = db
+            .query_raw_params(
+                "SELECT COUNT(*) as cnt FROM crime_incidents WHERE census_place_geoid IS NULL AND has_coordinates = TRUE",
+                &[],
+            )
+            .await?;
+        if let Some(row) = rows.first() {
+            let count: i64 = row.to_value("cnt").unwrap_or(0);
+            #[allow(clippy::cast_sign_loss)]
+            p.set_total(count as u64);
+        }
+    }
 
     // Pass 1: Exact containment (ST_Covers).
     // DISTINCT ON (i2.id) + ORDER BY ST_Area picks the smallest containing
@@ -611,6 +629,9 @@ pub async fn attribute_places(
 
         total += updated;
         log::info!("  exact: {updated} incidents attributed ({total} total)");
+        if let Some(ref p) = progress {
+            p.inc(updated);
+        }
     }
 
     // Pass 2: Nearest place within buffer distance.
@@ -647,6 +668,13 @@ pub async fn attribute_places(
 
         total += updated;
         log::info!("  buffer: {updated} incidents attributed ({total} total)");
+        if let Some(ref p) = progress {
+            p.inc(updated);
+        }
+    }
+
+    if let Some(ref p) = progress {
+        p.finish(format!("Place attribution complete: {total} incidents"));
     }
 
     Ok(total)
@@ -658,8 +686,27 @@ pub async fn attribute_places(
 /// # Errors
 ///
 /// Returns [`DbError`] if the database operation fails.
-pub async fn attribute_tracts(db: &dyn Database, batch_size: u32) -> Result<u64, DbError> {
+pub async fn attribute_tracts(
+    db: &dyn Database,
+    batch_size: u32,
+    progress: Option<Arc<dyn ProgressCallback>>,
+) -> Result<u64, DbError> {
     let mut total = 0u64;
+
+    // Query unattributed count for progress reporting
+    if let Some(ref p) = progress {
+        let rows = db
+            .query_raw_params(
+                "SELECT COUNT(*) as cnt FROM crime_incidents WHERE census_tract_geoid IS NULL AND has_coordinates = TRUE",
+                &[],
+            )
+            .await?;
+        if let Some(row) = rows.first() {
+            let count: i64 = row.to_value("cnt").unwrap_or(0);
+            #[allow(clippy::cast_sign_loss)]
+            p.set_total(count as u64);
+        }
+    }
 
     loop {
         let updated = db
@@ -686,6 +733,13 @@ pub async fn attribute_tracts(db: &dyn Database, batch_size: u32) -> Result<u64,
 
         total += updated;
         log::info!("Attributed {updated} incidents to census tracts ({total} total)");
+        if let Some(ref p) = progress {
+            p.inc(updated);
+        }
+    }
+
+    if let Some(ref p) = progress {
+        p.finish(format!("Tract attribution complete: {total} incidents"));
     }
 
     Ok(total)

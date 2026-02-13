@@ -147,7 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .iter()
                 .find(|s| s.id() == source)
                 .ok_or_else(|| format!("Unknown source: {source}"))?;
-            sync_source(db.as_ref(), src, limit, force).await?;
+            sync_source(db.as_ref(), src, limit, force, None).await?;
         }
         Commands::SyncAll {
             limit,
@@ -167,7 +167,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .join(", ")
             );
             for src in &sources {
-                if let Err(e) = sync_source(db.as_ref(), src, limit, force).await {
+                if let Err(e) = sync_source(db.as_ref(), src, limit, force, None).await {
                     log::error!("Failed to sync {}: {e}", src.id());
                 }
             }
@@ -279,13 +279,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "Attributing incidents to census places (buffer={buffer}m, batch={batch_size})..."
                 );
                 let place_count =
-                    queries::attribute_places(db.as_ref(), buffer, batch_size).await?;
+                    queries::attribute_places(db.as_ref(), buffer, batch_size, None).await?;
                 log::info!("Attributed {place_count} incidents to census places");
             }
 
             if !places_only {
                 log::info!("Attributing incidents to census tracts (batch={batch_size})...");
-                let tract_count = queries::attribute_tracts(db.as_ref(), batch_size).await?;
+                let tract_count = queries::attribute_tracts(db.as_ref(), batch_size, None).await?;
                 log::info!("Attributed {tract_count} incidents to census tracts");
             }
 
@@ -317,8 +317,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let start = Instant::now();
 
             // Phase 1: Geocode incidents that have no coordinates
-            let missing_count =
-                geocode_missing(db.as_ref(), batch_size, limit, nominatim_only, source_id).await?;
+            let missing_count = geocode_missing(
+                db.as_ref(),
+                batch_size,
+                limit,
+                nominatim_only,
+                source_id,
+                None,
+            )
+            .await?;
 
             // Phase 2: Re-geocode sources with imprecise coords (re_geocode = true)
             let re_geocode_ids =
@@ -339,6 +346,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             remaining_limit,
                             nominatim_only,
                             Some(*sid),
+                            None,
                         )
                         .await?;
                         re_geocode_count += count;

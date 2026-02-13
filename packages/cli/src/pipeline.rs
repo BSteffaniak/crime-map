@@ -1,11 +1,15 @@
 //! Full pipeline orchestrator for the crime map toolchain.
 //!
-//! Chains sync → geocode → attribute → generate in a single interactive
+//! Chains sync -> geocode -> attribute -> generate in a single interactive
 //! flow, prompting for sources, outputs, and optional advanced parameters.
+//! Uses `indicatif` progress bars for real-time visual feedback.
 
 use std::time::Instant;
 
 use dialoguer::{Confirm, Input, MultiSelect, Select};
+use indicatif::MultiProgress;
+
+use crate::progress::IndicatifProgress;
 
 /// Steps available in the pipeline.
 enum PipelineStep {
@@ -94,12 +98,16 @@ impl Default for PipelineConfig {
 /// and optional advanced configuration, then executes each step
 /// sequentially.
 ///
+/// The `multi` parameter is the shared [`MultiProgress`] that is also
+/// registered with the log bridge, so all `log::info!` output is
+/// automatically suspended while progress bars redraw.
+///
 /// # Errors
 ///
 /// Returns an error if database connection, user prompts, or any pipeline
 /// step fails.
 #[allow(clippy::too_many_lines, clippy::future_not_send)]
-pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>> {
     let pipeline_start = Instant::now();
 
     // --- 1. Select pipeline steps ---
@@ -273,33 +281,63 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // --- Sync ---
     if has_sync {
         current_step += 1;
-        log::info!(
-            "[{current_step}/{total_steps}] Syncing {} source(s)...",
-            selected_source_indices.len()
+        let num_sources = selected_source_indices.len();
+
+        let source_bar = IndicatifProgress::steps_bar(
+            multi,
+            &format!("[{current_step}/{total_steps}] Sources"),
+            num_sources as u64,
         );
 
-        for &idx in &selected_source_indices {
+        for (i, &idx) in selected_source_indices.iter().enumerate() {
             let src = &all_sources[idx];
-            if let Err(e) = crime_map_ingest::sync_source(
+
+            // Create a per-source fetch bar -- this will be cleared when
+            // the source finishes so completed bars don't accumulate.
+            let fetch_bar = IndicatifProgress::records_bar(multi, src.name());
+
+            source_bar.set_message(format!(
+                "[{current_step}/{total_steps}] Source {}/{num_sources}: {}",
+                i + 1,
+                src.name()
+            ));
+
+            let result = crime_map_ingest::sync_source(
                 db.as_ref(),
                 src,
                 config.sync_limit,
                 config.sync_force,
+                Some(fetch_bar.clone()),
             )
-            .await
-            {
+            .await;
+
+            // Always clear the per-source bar so it doesn't linger
+            fetch_bar.finish_and_clear();
+
+            if let Err(e) = result {
                 log::error!("Failed to sync {}: {e}", src.id());
                 if !ask_continue()? {
                     return Ok(());
                 }
             }
+
+            source_bar.inc(1);
         }
+
+        source_bar.finish(format!(
+            "[{current_step}/{total_steps}] Synced {num_sources} source(s)"
+        ));
     }
 
     // --- Geocode ---
     if has_geocode {
         current_step += 1;
         log::info!("[{current_step}/{total_steps}] Geocoding...");
+
+        let geocode_bar = IndicatifProgress::batch_bar(
+            multi,
+            &format!("[{current_step}/{total_steps}] Geocoding"),
+        );
 
         // Phase 1: Geocode missing coordinates
         if let Err(e) = crime_map_ingest::geocode_missing(
@@ -308,6 +346,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             None,
             config.geocode_nominatim_only,
             None,
+            Some(geocode_bar.clone()),
         )
         .await
         {
@@ -332,6 +371,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                             None,
                             config.geocode_nominatim_only,
                             Some(*sid),
+                            Some(geocode_bar.clone()),
                         )
                         .await
                         {
@@ -350,6 +390,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+
+        geocode_bar.finish(format!("[{current_step}/{total_steps}] Geocoding complete"));
     }
 
     // --- Attribute ---
@@ -363,30 +405,42 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             AttributeMode::TractsOnly => (false, true),
         };
 
-        if !tracts_only
-            && let Err(e) = crime_map_database::queries::attribute_places(
+        if !tracts_only {
+            let places_bar = IndicatifProgress::batch_bar(
+                multi,
+                &format!("[{current_step}/{total_steps}] Place attribution"),
+            );
+            if let Err(e) = crime_map_database::queries::attribute_places(
                 db.as_ref(),
                 config.attribute_buffer,
                 config.attribute_batch_size,
+                Some(places_bar),
             )
             .await
-        {
-            log::error!("Place attribution failed: {e}");
-            if !ask_continue()? {
-                return Ok(());
+            {
+                log::error!("Place attribution failed: {e}");
+                if !ask_continue()? {
+                    return Ok(());
+                }
             }
         }
 
-        if !places_only
-            && let Err(e) = crime_map_database::queries::attribute_tracts(
+        if !places_only {
+            let tracts_bar = IndicatifProgress::batch_bar(
+                multi,
+                &format!("[{current_step}/{total_steps}] Tract attribution"),
+            );
+            if let Err(e) = crime_map_database::queries::attribute_tracts(
                 db.as_ref(),
                 config.attribute_batch_size,
+                Some(tracts_bar),
             )
             .await
-        {
-            log::error!("Tract attribution failed: {e}");
-            if !ask_continue()? {
-                return Ok(());
+            {
+                log::error!("Tract attribution failed: {e}");
+                if !ask_continue()? {
+                    return Ok(());
+                }
             }
         }
     }
@@ -406,12 +460,23 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             force: config.generate_force,
         };
 
+        let generate_bar = IndicatifProgress::batch_bar(
+            multi,
+            &format!("[{current_step}/{total_steps}] Generating"),
+        );
+
         let source_ids = crime_map_generate::resolve_source_ids(db.as_ref(), &args).await?;
         let output_refs: Vec<&str> = generate_outputs.iter().map(String::as_str).collect();
 
-        if let Err(e) =
-            crime_map_generate::run_with_cache(db.as_ref(), &args, &source_ids, &dir, &output_refs)
-                .await
+        if let Err(e) = crime_map_generate::run_with_cache(
+            db.as_ref(),
+            &args,
+            &source_ids,
+            &dir,
+            &output_refs,
+            Some(generate_bar),
+        )
+        .await
         {
             log::error!("Generation failed: {e}");
             if !ask_continue()? {

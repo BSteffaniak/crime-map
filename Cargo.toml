@@ -138,6 +138,7 @@ hex = { version = "0.4.3", default-features = false }
 csv = { version = "1.4.0", default-features = false }
 duckdb = { version = "1.4.4", default-features = false }
 indicatif = { version = "0.17.11", default-features = false }
+indicatif-log-bridge = { version = "0.2.3", default-features = false }
 scraper = { version = "0.25.0", default-features = false }
 flate2 = { version = "1.1.9", default-features = false, features = ["default"] }
 console = { version = "0.16.2", default-features = false }

@@ -7,10 +7,12 @@
 
 pub mod interactive;
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use crime_map_database::queries;
 use crime_map_source::FetchOptions;
+use crime_map_source::progress::ProgressCallback;
 use crime_map_source::source_def::SourceDefinition;
 
 /// Safety buffer (in days) for incremental syncs.
@@ -88,6 +90,7 @@ pub async fn sync_source(
     source: &SourceDefinition,
     limit: Option<u64>,
     force: bool,
+    progress: Option<Arc<dyn ProgressCallback>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     log::info!("Syncing source: {} ({})", source.name(), source.id());
@@ -165,7 +168,8 @@ pub async fn sync_source(
         resume_offset,
     };
 
-    let (mut rx, fetch_handle) = source.fetch_pages(&options);
+    let fetch_progress = progress.unwrap_or_else(crime_map_source::progress::null_progress);
+    let (mut rx, fetch_handle) = source.fetch_pages(&options, fetch_progress);
 
     let mut total_raw: u64 = 0;
     let mut total_normalized: u64 = 0;
@@ -565,6 +569,7 @@ pub async fn resolve_addresses(
     client: &reqwest::Client,
     addr_groups: &std::collections::BTreeMap<(String, String, String), Vec<i64>>,
     nominatim_only: bool,
+    progress: &Option<Arc<dyn ProgressCallback>>,
 ) -> Result<(Vec<(i64, f64, f64)>, Vec<i64>), Box<dyn std::error::Error>> {
     use crime_map_geocoder::AddressInput;
     use crime_map_geocoder::address::build_one_line_address;
@@ -596,13 +601,28 @@ pub async fn resolve_addresses(
     let mut resolved_keys: BTreeSet<String> = BTreeSet::new();
 
     // Apply cache hits
+    let mut cache_resolved_incidents = 0u64;
     for (address_key, _, ids) in &keys_and_groups {
         if let Some(&(lat, lng)) = cache_hits.get(address_key) {
             for &id in *ids {
                 pending_updates.push((id, lng, lat));
             }
+            cache_resolved_incidents += ids.len() as u64;
             resolved_keys.insert(address_key.clone());
         }
+    }
+
+    // Also count incidents whose addresses were already tried (and failed)
+    // by all providers — they won't be sent to Census or Nominatim either
+    let mut cache_tried_incidents = 0u64;
+    for (address_key, _, ids) in &keys_and_groups {
+        if !resolved_keys.contains(address_key) && cache_tried.contains(address_key) {
+            cache_tried_incidents += ids.len() as u64;
+        }
+    }
+
+    if let Some(p) = progress {
+        p.inc(cache_resolved_incidents + cache_tried_incidents);
     }
 
     if !cache_hits.is_empty() {
@@ -676,6 +696,10 @@ pub async fn resolve_addresses(
                             for &id in ids {
                                 pending_updates.push((id, geocoded.longitude, geocoded.latitude));
                             }
+
+                            if let Some(p) = progress {
+                                p.inc(ids.len() as u64);
+                            }
                         }
                     }
                 }
@@ -748,6 +772,11 @@ pub async fn resolve_addresses(
                     // Don't cache errors — we'll retry next time
                 }
             }
+
+            // Progress: each address attempt (hit, miss, or error) advances the bar
+            if let Some(p) = progress {
+                p.inc(ids.len() as u64);
+            }
         }
     }
 
@@ -777,12 +806,39 @@ pub async fn geocode_missing(
     limit: Option<u64>,
     nominatim_only: bool,
     source_id: Option<i32>,
+    progress: Option<Arc<dyn ProgressCallback>>,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     use crime_map_geocoder::address::{CleanedAddress, clean_block_address};
     use moosicbox_json_utils::database::ToValue as _;
     use std::collections::BTreeMap;
 
     let (source_clause, _) = source_filter_params(batch_size, source_id);
+
+    // Query total un-geocoded count for progress reporting
+    if let Some(ref p) = progress {
+        let (count_clause, count_params) = source_id.map_or_else(
+            || ("", vec![]),
+            |sid| {
+                (
+                    " AND source_id = $1",
+                    vec![switchy_database::DatabaseValue::Int32(sid)],
+                )
+            },
+        );
+        let count_query = format!(
+            "SELECT COUNT(*) as cnt FROM crime_incidents
+             WHERE has_coordinates = FALSE
+               AND block_address IS NOT NULL
+               AND block_address != ''
+               AND geocoded = FALSE{count_clause}"
+        );
+        let rows = db.query_raw_params(&count_query, &count_params).await?;
+        if let Some(row) = rows.first() {
+            let count: i64 = row.to_value("cnt").unwrap_or(0);
+            #[allow(clippy::cast_sign_loss)]
+            p.set_total(count as u64);
+        }
+    }
 
     let client = reqwest::Client::builder()
         .user_agent("crime-map/1.0 (https://github.com/BSteffaniak/crime-map)")
@@ -824,6 +880,7 @@ pub async fn geocode_missing(
         );
 
         let mut addr_groups: BTreeMap<(String, String, String), Vec<i64>> = BTreeMap::new();
+        let mut skipped_count = 0u64;
 
         for row in &rows {
             let id: i64 = row.to_value("id").unwrap_or(0);
@@ -837,13 +894,23 @@ pub async fn geocode_missing(
                 CleanedAddress::Intersection { street1, street2 } => {
                     format!("{street1} and {street2}")
                 }
-                CleanedAddress::NotGeocodable => continue,
+                CleanedAddress::NotGeocodable => {
+                    skipped_count += 1;
+                    continue;
+                }
             };
 
             addr_groups
                 .entry((street, city, state))
                 .or_default()
                 .push(id);
+        }
+
+        // Progress: count incidents with un-geocodable addresses
+        if let Some(ref p) = progress
+            && skipped_count > 0
+        {
+            p.inc(skipped_count);
         }
 
         log::info!(
@@ -853,7 +920,7 @@ pub async fn geocode_missing(
         );
 
         let (pending_updates, all_ids) =
-            resolve_addresses(db, &client, &addr_groups, nominatim_only).await?;
+            resolve_addresses(db, &client, &addr_groups, nominatim_only, &progress).await?;
 
         let mut batch_geocoded = 0u64;
 
@@ -915,12 +982,39 @@ pub async fn re_geocode_source(
     limit: Option<u64>,
     nominatim_only: bool,
     source_id: Option<i32>,
+    progress: Option<Arc<dyn ProgressCallback>>,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     use crime_map_geocoder::address::{CleanedAddress, clean_block_address};
     use moosicbox_json_utils::database::ToValue as _;
     use std::collections::BTreeMap;
 
     let (source_clause, _) = source_filter_params(batch_size, source_id);
+
+    // Query total eligible count for progress reporting
+    if let Some(ref p) = progress {
+        let (count_clause, count_params) = source_id.map_or_else(
+            || ("", vec![]),
+            |sid| {
+                (
+                    " AND source_id = $1",
+                    vec![switchy_database::DatabaseValue::Int32(sid)],
+                )
+            },
+        );
+        let count_query = format!(
+            "SELECT COUNT(*) as cnt FROM crime_incidents
+             WHERE has_coordinates = TRUE
+               AND geocoded = FALSE
+               AND block_address IS NOT NULL
+               AND block_address != ''{count_clause}"
+        );
+        let rows = db.query_raw_params(&count_query, &count_params).await?;
+        if let Some(row) = rows.first() {
+            let count: i64 = row.to_value("cnt").unwrap_or(0);
+            #[allow(clippy::cast_sign_loss)]
+            p.set_total(count as u64);
+        }
+    }
 
     let client = reqwest::Client::builder()
         .user_agent("crime-map/1.0 (https://github.com/BSteffaniak/crime-map)")
@@ -963,6 +1057,7 @@ pub async fn re_geocode_source(
         );
 
         let mut addr_groups: BTreeMap<(String, String, String), Vec<i64>> = BTreeMap::new();
+        let mut skipped_count = 0u64;
 
         for row in &rows {
             let id: i64 = row.to_value("id").unwrap_or(0);
@@ -976,13 +1071,23 @@ pub async fn re_geocode_source(
                 CleanedAddress::Intersection { street1, street2 } => {
                     format!("{street1} and {street2}")
                 }
-                CleanedAddress::NotGeocodable => continue,
+                CleanedAddress::NotGeocodable => {
+                    skipped_count += 1;
+                    continue;
+                }
             };
 
             addr_groups
                 .entry((street, city, state))
                 .or_default()
                 .push(id);
+        }
+
+        // Progress: count incidents with un-geocodable addresses
+        if let Some(ref p) = progress
+            && skipped_count > 0
+        {
+            p.inc(skipped_count);
         }
 
         log::info!(
@@ -992,7 +1097,7 @@ pub async fn re_geocode_source(
         );
 
         let (pending_updates, all_ids) =
-            resolve_addresses(db, &client, &addr_groups, nominatim_only).await?;
+            resolve_addresses(db, &client, &addr_groups, nominatim_only, &progress).await?;
 
         let mut batch_geocoded = 0u64;
 

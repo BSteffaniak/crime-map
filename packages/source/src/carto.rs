@@ -4,9 +4,11 @@
 //! records are sent through a channel for immediate processing.
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use crate::progress::ProgressCallback;
 use crate::{FetchOptions, SourceError};
 
 /// Configuration for a Carto SQL fetch operation.
@@ -66,6 +68,7 @@ pub async fn fetch_carto(
     config: &CartoConfig<'_>,
     options: &FetchOptions,
     tx: &mpsc::Sender<Vec<serde_json::Value>>,
+    progress: &Arc<dyn ProgressCallback>,
 ) -> Result<u64, SourceError> {
     let client = reqwest::Client::new();
     let mut offset: u64 = options.resume_offset;
@@ -75,6 +78,7 @@ pub async fn fetch_carto(
     let total_available = query_carto_count(&client, config, options).await;
 
     if let Some(total) = total_available {
+        progress.set_total(fetch_limit.min(total));
         if offset > 0 {
             log::info!(
                 "{}: {total} records available (resuming from offset {offset}, page size {})",
@@ -158,6 +162,7 @@ pub async fn fetch_carto(
         }
 
         offset += count;
+        progress.inc(count);
 
         tx.send(rows)
             .await
@@ -171,5 +176,9 @@ pub async fn fetch_carto(
     }
 
     log::info!("{}: download complete — {offset} records", config.label);
+    progress.finish(format!(
+        "{}: download complete -- {offset} records",
+        config.label
+    ));
     Ok(offset)
 }

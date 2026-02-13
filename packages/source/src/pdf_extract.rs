@@ -3,10 +3,13 @@
 //! Wraps [`crime_map_pdf::PdfScraper`] to stream pages through the ingest
 //! pipeline's [`tokio::sync::mpsc`] channel.
 
+use std::sync::Arc;
+
 use crime_map_pdf::{ExtractionStrategy, PdfScraper};
 use crime_map_scraper::Scraper;
 use tokio::sync::mpsc;
 
+use crate::progress::ProgressCallback;
 use crate::{FetchOptions, SourceError};
 
 /// Configuration for the PDF extraction fetcher.
@@ -39,6 +42,7 @@ pub async fn fetch_pdf_extract(
     config: &PdfExtractConfig<'_>,
     options: &FetchOptions,
     tx: &mpsc::Sender<Vec<serde_json::Value>>,
+    progress: &Arc<dyn ProgressCallback>,
 ) -> Result<u64, SourceError> {
     let strategy = match config.extraction_strategy {
         "regex_rows" => ExtractionStrategy::RegexRows {
@@ -87,6 +91,7 @@ pub async fn fetch_pdf_extract(
             .await?;
         let count = page.records.len() as u64;
         total += count;
+        progress.inc(count);
 
         if !page.records.is_empty() {
             tx.send(page.records).await.ok();

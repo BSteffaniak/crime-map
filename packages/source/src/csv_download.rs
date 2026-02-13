@@ -4,11 +4,13 @@
 //! pages through the ingest pipeline's [`tokio::sync::mpsc`] channel.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crime_map_scraper::Scraper;
 use crime_map_scraper::csv_download::CsvDownloadScraper;
 use tokio::sync::mpsc;
 
+use crate::progress::ProgressCallback;
 use crate::{FetchOptions, SourceError};
 
 /// Configuration for the CSV download fetcher.
@@ -37,6 +39,7 @@ pub async fn fetch_csv_download(
     config: &CsvDownloadConfig<'_>,
     options: &FetchOptions,
     tx: &mpsc::Sender<Vec<serde_json::Value>>,
+    progress: &Arc<dyn ProgressCallback>,
 ) -> Result<u64, SourceError> {
     let mut total: u64 = 0;
 
@@ -77,6 +80,7 @@ pub async fn fetch_csv_download(
         let page = scraper.fetch_page(0).await?;
         let count = page.records.len() as u64;
         total += count;
+        progress.inc(count);
 
         if !page.records.is_empty() {
             tx.send(page.records).await.ok();

@@ -8,9 +8,11 @@
 //! `datastore_search_sql` for server-side date filtering.
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use crate::progress::ProgressCallback;
 use crate::{FetchOptions, SourceError};
 
 /// Configuration for a CKAN fetch operation.
@@ -52,13 +54,14 @@ pub async fn fetch_ckan(
     config: &CkanConfig<'_>,
     options: &FetchOptions,
     tx: &mpsc::Sender<Vec<serde_json::Value>>,
+    progress: &Arc<dyn ProgressCallback>,
 ) -> Result<u64, SourceError> {
     let use_sql = config.date_column.is_some() && options.since.is_some();
 
     if use_sql {
-        fetch_ckan_sql(config, options, tx).await
+        fetch_ckan_sql(config, options, tx, progress).await
     } else {
-        fetch_ckan_standard(config, options, tx).await
+        fetch_ckan_standard(config, options, tx, progress).await
     }
 }
 
@@ -68,6 +71,7 @@ async fn fetch_ckan_standard(
     config: &CkanConfig<'_>,
     options: &FetchOptions,
     tx: &mpsc::Sender<Vec<serde_json::Value>>,
+    progress: &Arc<dyn ProgressCallback>,
 ) -> Result<u64, SourceError> {
     let client = reqwest::Client::new();
     let fetch_limit = options.limit.unwrap_or(u64::MAX);
@@ -113,6 +117,8 @@ async fn fetch_ckan_standard(
             config.page_size
         );
     }
+
+    progress.set_total(fetch_limit.min(total_available));
 
     let mut grand_total: u64 = 0;
     let mut skipped: u64 = 0;
@@ -190,6 +196,7 @@ async fn fetch_ckan_standard(
             }
 
             offset += count;
+            progress.inc(count);
 
             tx.send(records)
                 .await
@@ -209,6 +216,10 @@ async fn fetch_ckan_standard(
         "{}: download complete — {grand_total} records",
         config.label
     );
+    progress.finish(format!(
+        "{}: download complete -- {grand_total} records",
+        config.label
+    ));
     Ok(grand_total)
 }
 
@@ -218,6 +229,7 @@ async fn fetch_ckan_sql(
     config: &CkanConfig<'_>,
     options: &FetchOptions,
     tx: &mpsc::Sender<Vec<serde_json::Value>>,
+    progress: &Arc<dyn ProgressCallback>,
 ) -> Result<u64, SourceError> {
     let client = reqwest::Client::new();
     let fetch_limit = options.limit.unwrap_or(u64::MAX);
@@ -278,6 +290,8 @@ async fn fetch_ckan_sql(
             config.page_size
         );
     }
+
+    progress.set_total(fetch_limit.min(total_available));
 
     let mut grand_total: u64 = 0;
     let mut skipped: u64 = 0;
@@ -357,6 +371,7 @@ async fn fetch_ckan_sql(
             }
 
             offset += count;
+            progress.inc(count);
 
             tx.send(records)
                 .await
@@ -376,5 +391,9 @@ async fn fetch_ckan_sql(
         "{}: download complete — {grand_total} records",
         config.label
     );
+    progress.finish(format!(
+        "{}: download complete -- {grand_total} records",
+        config.label
+    ));
     Ok(grand_total)
 }

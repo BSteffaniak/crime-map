@@ -25,7 +25,9 @@ use std::fmt::Write as _;
 use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
+use crime_map_source::progress::ProgressCallback;
 use crime_map_source::registry::all_sources;
 use moosicbox_json_utils::database::ToValue as _;
 use serde::{Deserialize, Serialize};
@@ -133,14 +135,21 @@ pub async fn run_with_cache(
     source_ids: &[i32],
     dir: &Path,
     requested_outputs: &[&str],
+    progress: Option<Arc<dyn ProgressCallback>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Querying source fingerprints...");
     let fingerprints = query_fingerprints(db, source_ids).await?;
-    let total_records: i64 = fingerprints.iter().map(|f| f.record_count).sum();
+
+    // Count the actual exportable records (must match the export WHERE clause)
+    let total_records = count_exportable_records(db, source_ids).await?;
     log::info!(
-        "Found {} sources, {total_records} total records",
+        "Found {} sources, {total_records} exportable records",
         fingerprints.len()
     );
+
+    // Each output processes all records, so total work = outputs_needing_regen * total_records.
+    // But we use a single progress bar showing records for the current output being generated.
+    let progress = progress.unwrap_or_else(crime_map_source::progress::null_progress);
 
     let mut manifest = load_manifest(dir);
     let sources_filter = sorted_sources_filter(args);
@@ -187,25 +196,35 @@ pub async fn run_with_cache(
 
     // Run each output that needs it
     if needs.get(OUTPUT_INCIDENTS_PMTILES) == Some(&true) {
-        generate_pmtiles(db, args, source_ids, dir).await?;
+        progress.set_message("Generating PMTiles...".to_string());
+        progress.set_total(total_records);
+        progress.set_position(0);
+        generate_pmtiles(db, args, source_ids, dir, &progress).await?;
         record_output(manifest, OUTPUT_INCIDENTS_PMTILES);
         save_manifest(dir, manifest)?;
     }
 
     if needs.get(OUTPUT_CLUSTERS_PMTILES) == Some(&true) {
-        generate_cluster_tiles(db, args, source_ids, dir).await?;
+        progress.set_message("Generating cluster tiles...".to_string());
+        generate_cluster_tiles(db, args, source_ids, dir, &progress).await?;
         record_output(manifest, OUTPUT_CLUSTERS_PMTILES);
         save_manifest(dir, manifest)?;
     }
 
     if needs.get(OUTPUT_INCIDENTS_DB) == Some(&true) {
-        generate_sidebar_db(db, args, source_ids, dir).await?;
+        progress.set_message("Generating sidebar DB...".to_string());
+        progress.set_total(total_records);
+        progress.set_position(0);
+        generate_sidebar_db(db, args, source_ids, dir, &progress).await?;
         record_output(manifest, OUTPUT_INCIDENTS_DB);
         save_manifest(dir, manifest)?;
     }
 
     if needs.get(OUTPUT_COUNT_DB) == Some(&true) {
-        generate_count_db(db, args, source_ids, dir).await?;
+        progress.set_message("Generating count DB...".to_string());
+        progress.set_total(total_records);
+        progress.set_position(0);
+        generate_count_db(db, args, source_ids, dir, &progress).await?;
         record_output(manifest, OUTPUT_COUNT_DB);
         save_manifest(dir, manifest)?;
     }
@@ -295,6 +314,50 @@ async fn query_fingerprints(
         .collect();
 
     Ok(fingerprints)
+}
+
+/// Counts incidents that will actually be exported.
+///
+/// Uses the same `has_coordinates = TRUE` filter as [`build_batch_query`] so
+/// the progress bar total matches the real feature count.
+///
+/// # Errors
+///
+/// Returns an error if the database query fails.
+async fn count_exportable_records(
+    db: &dyn Database,
+    source_ids: &[i32],
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let (query, params) = if source_ids.is_empty() {
+        (
+            "SELECT COUNT(*) as cnt FROM crime_incidents WHERE has_coordinates = TRUE".to_string(),
+            Vec::new(),
+        )
+    } else {
+        let mut params: Vec<DatabaseValue> = Vec::new();
+        let placeholders: Vec<String> = source_ids
+            .iter()
+            .enumerate()
+            .map(|(i, &sid)| {
+                params.push(DatabaseValue::Int32(sid));
+                format!("${}", i + 1)
+            })
+            .collect();
+        let query = format!(
+            "SELECT COUNT(*) as cnt FROM crime_incidents
+             WHERE has_coordinates = TRUE AND source_id IN ({})",
+            placeholders.join(", ")
+        );
+        (query, params)
+    };
+
+    let rows = db.query_raw_params(&query, &params).await?;
+    let count: i64 = rows
+        .first()
+        .map_or(0, |row| row.to_value("cnt").unwrap_or(0));
+
+    #[allow(clippy::cast_sign_loss)]
+    Ok(count as u64)
 }
 
 /// Loads the generation manifest from `dir/manifest.json`.
@@ -494,11 +557,12 @@ async fn generate_pmtiles(
     args: &GenerateArgs,
     source_ids: &[i32],
     dir: &Path,
+    progress: &Arc<dyn ProgressCallback>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let geojsonseq_path = dir.join("incidents.geojsonseq");
 
     log::info!("Exporting incidents to GeoJSONSeq...");
-    export_geojsonseq(db, &geojsonseq_path, args.limit, source_ids).await?;
+    export_geojsonseq(db, &geojsonseq_path, args.limit, source_ids, progress).await?;
 
     log::info!("Running tippecanoe to generate PMTiles...");
 
@@ -545,13 +609,14 @@ async fn generate_cluster_tiles(
     args: &GenerateArgs,
     source_ids: &[i32],
     dir: &Path,
+    progress: &Arc<dyn ProgressCallback>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let geojsonseq_path = dir.join("incidents.geojsonseq");
 
     // Ensure GeoJSONSeq exists
     if !geojsonseq_path.exists() {
         log::info!("GeoJSONSeq not found, exporting...");
-        export_geojsonseq(db, &geojsonseq_path, args.limit, source_ids).await?;
+        export_geojsonseq(db, &geojsonseq_path, args.limit, source_ids, progress).await?;
     }
 
     log::info!("Running tippecanoe to generate cluster tiles...");
@@ -662,6 +727,7 @@ async fn generate_sidebar_db(
     args: &GenerateArgs,
     source_ids: &[i32],
     dir: &Path,
+    progress: &Arc<dyn ProgressCallback>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db_path = dir.join("incidents.db");
 
@@ -741,6 +807,7 @@ async fn generate_sidebar_db(
             *r = r.saturating_sub(batch_len);
         }
 
+        progress.inc(batch_len);
         log::info!("Inserted {total_count} rows into sidebar DB...");
 
         #[allow(clippy::cast_sign_loss)]
@@ -856,6 +923,7 @@ async fn generate_count_db(
     args: &GenerateArgs,
     source_ids: &[i32],
     dir: &Path,
+    progress: &Arc<dyn ProgressCallback>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db_path = dir.join("counts.duckdb");
 
@@ -890,7 +958,7 @@ async fn generate_count_db(
     // Drop the connection before the async loop; we'll reopen per batch
     drop(duck);
 
-    let total_count = populate_duckdb_incidents(db, args, source_ids, &db_path).await?;
+    let total_count = populate_duckdb_incidents(db, args, source_ids, &db_path, progress).await?;
 
     // Reopen for aggregation
     let duck = duckdb::Connection::open(&db_path)?;
@@ -946,6 +1014,7 @@ async fn populate_duckdb_incidents(
     args: &GenerateArgs,
     source_ids: &[i32],
     duck_path: &Path,
+    progress: &Arc<dyn ProgressCallback>,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let mut last_id: i64 = 0;
     let mut total_count: u64 = 0;
@@ -992,6 +1061,7 @@ async fn populate_duckdb_incidents(
             *r = r.saturating_sub(batch_len);
         }
 
+        progress.inc(batch_len);
         log::info!("Inserted {total_count} rows into DuckDB...");
 
         #[allow(clippy::cast_sign_loss)]
@@ -1049,6 +1119,7 @@ async fn export_geojsonseq(
     output_path: &Path,
     limit: Option<u64>,
     source_ids: &[i32],
+    progress: &Arc<dyn ProgressCallback>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let file = std::fs::File::create(output_path)?;
     let mut writer = BufWriter::new(file);
@@ -1131,6 +1202,7 @@ async fn export_geojsonseq(
             *r = r.saturating_sub(batch_len);
         }
 
+        progress.inc(batch_len);
         log::info!("Exported {total_count} features so far...");
 
         #[allow(clippy::cast_sign_loss)]

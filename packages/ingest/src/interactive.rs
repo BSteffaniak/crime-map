@@ -130,7 +130,7 @@ async fn sync_sources(
     );
 
     for &idx in &selected {
-        if let Err(e) = crate::sync_source(db, &sources[idx], limit, force).await {
+        if let Err(e) = crate::sync_source(db, &sources[idx], limit, force, None).await {
             log::error!("Failed to sync {}: {e}", sources[idx].id());
         }
     }
@@ -202,12 +202,12 @@ async fn geocode_missing_interactive(
 
     // Phase 1: Geocode incidents that have no coordinates
     let missing_count = if all_selected {
-        crate::geocode_missing(db, batch_size, limit, nominatim_only, None).await?
+        crate::geocode_missing(db, batch_size, limit, nominatim_only, None, None).await?
     } else {
         let mut count = 0u64;
         for &sid in &source_db_ids {
-            count +=
-                crate::geocode_missing(db, batch_size, limit, nominatim_only, Some(sid)).await?;
+            count += crate::geocode_missing(db, batch_size, limit, nominatim_only, Some(sid), None)
+                .await?;
         }
         count
     };
@@ -230,6 +230,7 @@ async fn geocode_missing_interactive(
                         remaining_limit,
                         nominatim_only,
                         Some(*sid),
+                        None,
                     )
                     .await?;
                     re_geocode_count += count;
@@ -250,6 +251,7 @@ async fn geocode_missing_interactive(
                             remaining_limit,
                             nominatim_only,
                             Some(*sid),
+                            None,
                         )
                         .await?;
                         re_geocode_count += count;
@@ -305,13 +307,14 @@ async fn attribute_census_data(
             "Attributing incidents to census places (buffer={buffer}m, batch={batch_size})..."
         );
         let place_count =
-            crime_map_database::queries::attribute_places(db, buffer, batch_size).await?;
+            crime_map_database::queries::attribute_places(db, buffer, batch_size, None).await?;
         log::info!("Attributed {place_count} incidents to census places");
     }
 
     if !places_only {
         log::info!("Attributing incidents to census tracts (batch={batch_size})...");
-        let tract_count = crime_map_database::queries::attribute_tracts(db, batch_size).await?;
+        let tract_count =
+            crime_map_database::queries::attribute_tracts(db, batch_size, None).await?;
         log::info!("Attributed {tract_count} incidents to census tracts");
     }
 

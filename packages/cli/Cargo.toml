@@ -23,6 +23,8 @@ crime_map_source = { workspace = true }
 actix-web = { workspace = true }
 actix-rt = { workspace = true }
 dialoguer = { workspace = true }
+indicatif = { workspace = true }
+indicatif-log-bridge = { workspace = true }
 log = { workspace = true }
 pretty_env_logger = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

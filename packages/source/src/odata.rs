@@ -7,9 +7,11 @@
 //! Currently used for Arlington County, VA police incident data.
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use crate::progress::ProgressCallback;
 use crate::{FetchOptions, SourceError};
 
 /// Configuration for an OData-style fetch operation.
@@ -53,6 +55,7 @@ pub async fn fetch_odata(
     config: &ODataConfig<'_>,
     options: &FetchOptions,
     tx: &mpsc::Sender<Vec<serde_json::Value>>,
+    progress: &Arc<dyn ProgressCallback>,
 ) -> Result<u64, SourceError> {
     let client = reqwest::Client::new();
     let mut offset: u64 = options.resume_offset;
@@ -62,6 +65,7 @@ pub async fn fetch_odata(
     let total_available = query_odata_count(&client, config, options).await;
 
     if let Some(total) = total_available {
+        progress.set_total(fetch_limit.min(total));
         if offset > 0 {
             log::info!(
                 "{}: {total} records available (resuming from offset {offset}, page size {})",
@@ -122,6 +126,7 @@ pub async fn fetch_odata(
         }
 
         offset += count;
+        progress.inc(count);
 
         // Send page for immediate processing
         tx.send(records)
@@ -136,5 +141,9 @@ pub async fn fetch_odata(
     }
 
     log::info!("{}: download complete — {offset} records", config.label);
+    progress.finish(format!(
+        "{}: download complete -- {offset} records",
+        config.label
+    ));
     Ok(offset)
 }

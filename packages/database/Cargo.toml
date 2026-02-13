@@ -11,6 +11,7 @@ version = "0.1.0"
 crime_map_crime_models = { workspace = true }
 crime_map_source_models = { workspace = true }
 crime_map_database_models = { workspace = true }
+crime_map_source = { workspace = true }
 
 switchy_database = { workspace = true, features = ["postgres-raw", "schema"] }
 switchy_database_connection = { workspace = true, features = ["postgres-raw"] }

@@ -21,6 +21,7 @@ pub mod json_paginated;
 pub mod odata;
 pub mod parsing;
 pub mod pdf_extract;
+pub mod progress;
 pub mod registry;
 pub mod socrata;
 pub mod source_def;

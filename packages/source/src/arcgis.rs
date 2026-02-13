@@ -4,8 +4,11 @@
 //! endpoints. Supports multiple query URLs (e.g., one per year/layer) and
 //! sends each page through a channel for immediate processing.
 
+use std::sync::Arc;
+
 use tokio::sync::mpsc;
 
+use crate::progress::ProgressCallback;
 use crate::{FetchOptions, SourceError};
 
 /// Configuration for an `ArcGIS` fetch operation.
@@ -95,6 +98,7 @@ pub async fn fetch_arcgis(
     config: &ArcGisConfig<'_>,
     options: &FetchOptions,
     tx: &mpsc::Sender<Vec<serde_json::Value>>,
+    progress: &Arc<dyn ProgressCallback>,
 ) -> Result<u64, SourceError> {
     let client = reqwest::Client::new();
     let fetch_limit = options.limit.unwrap_or(u64::MAX);
@@ -107,6 +111,7 @@ pub async fn fetch_arcgis(
     let total_available = query_arcgis_counts(&client, config, &where_clause).await;
 
     if let Some(total) = total_available {
+        progress.set_total(fetch_limit.min(total));
         let layers_str = if num_layers > 1 {
             format!(" across {num_layers} layers")
         } else {
@@ -227,6 +232,7 @@ pub async fn fetch_arcgis(
 
             total_fetched += page.len() as u64;
             offset += count;
+            progress.inc(page.len() as u64);
 
             tx.send(page)
                 .await
@@ -250,5 +256,9 @@ pub async fn fetch_arcgis(
         "{}: download complete — {total_fetched} records",
         config.label,
     );
+    progress.finish(format!(
+        "{}: download complete -- {total_fetched} records",
+        config.label
+    ));
     Ok(total_fetched)
 }

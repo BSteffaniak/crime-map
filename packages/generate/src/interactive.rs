@@ -116,7 +116,15 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
-    run_with_cache(db.as_ref(), &args, &source_ids, &dir, &requested_outputs).await?;
+    run_with_cache(
+        db.as_ref(),
+        &args,
+        &source_ids,
+        &dir,
+        &requested_outputs,
+        None,
+    )
+    .await?;
 
     Ok(())
 }

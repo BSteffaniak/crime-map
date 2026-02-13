@@ -5,11 +5,13 @@
 //! channel.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crime_map_scraper::Scraper;
 use crime_map_scraper::json_paginated::{JsonPaginatedScraper, PaginationType, ResponseFormat};
 use tokio::sync::mpsc;
 
+use crate::progress::ProgressCallback;
 use crate::{FetchOptions, SourceError};
 
 /// Configuration for the generic paginated JSON fetcher.
@@ -46,6 +48,7 @@ pub async fn fetch_json_paginated(
     config: &JsonPaginatedConfig<'_>,
     options: &FetchOptions,
     tx: &mpsc::Sender<Vec<serde_json::Value>>,
+    progress: &Arc<dyn ProgressCallback>,
 ) -> Result<u64, SourceError> {
     let pagination_param = config.page_param.unwrap_or(match config.pagination {
         "page" => "page",
@@ -107,6 +110,7 @@ pub async fn fetch_json_paginated(
         let page = scraper.fetch_page(page_num).await?;
         let count = page.records.len() as u64;
         total += count;
+        progress.inc(count);
 
         if !page.records.is_empty() {
             tx.send(page.records).await.ok();

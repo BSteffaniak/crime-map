@@ -107,6 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &source_ids,
                 &dir,
                 &[OUTPUT_INCIDENTS_PMTILES],
+                None,
             )
             .await?;
         }
@@ -119,6 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &source_ids,
                 &dir,
                 &[OUTPUT_CLUSTERS_PMTILES],
+                None,
             )
             .await?;
         }
@@ -131,13 +133,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &source_ids,
                 &dir,
                 &[OUTPUT_INCIDENTS_DB],
+                None,
             )
             .await?;
         }
         Commands::CountDb { args } => {
             let args = GenerateArgs::from(args);
             let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
-            run_with_cache(db.as_ref(), &args, &source_ids, &dir, &[OUTPUT_COUNT_DB]).await?;
+            run_with_cache(
+                db.as_ref(),
+                &args,
+                &source_ids,
+                &dir,
+                &[OUTPUT_COUNT_DB],
+                None,
+            )
+            .await?;
         }
         Commands::All { args } => {
             let args = GenerateArgs::from(args);
@@ -153,6 +164,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     OUTPUT_INCIDENTS_DB,
                     OUTPUT_COUNT_DB,
                 ],
+                None,
             )
             .await?;
         }
