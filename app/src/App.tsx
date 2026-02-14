@@ -17,7 +17,7 @@ export default function App() {
   const [bbox, setBbox] = useState<BBox | null>(null);
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
   const settledRef = useRef(true);
-  const { mapTheme, cycleMapTheme } = useTheme();
+  const { mapTheme, setMapTheme } = useTheme();
 
   const {
     filters,
@@ -113,7 +113,7 @@ export default function App() {
       {/* Map */}
       <div className="relative flex-1">
         <CrimeMap filters={filters} hexbins={hexbins} zoom={zoom} mapTheme={mapTheme} onBoundsChange={handleBoundsChange} />
-        <ThemeToggle mapTheme={mapTheme} onCycle={cycleMapTheme} />
+        <ThemeToggle mapTheme={mapTheme} onSelect={setMapTheme} />
       </div>
     </div>
   );
