@@ -427,21 +427,28 @@ function MapInteractions() {
     // Click hexbin to zoom in (expansion: zoom + 2)
     const onHexClick = (e: maplibregl.MapLayerMouseEvent) => {
       if (!e.features || e.features.length === 0) return;
-      const coords = e.lngLat;
+
+      // Don't zoom if the click also hit an incident point — let the
+      // point popup handler take priority.
+      if (map.getLayer("incidents-points")) {
+        const pointFeatures = map.queryRenderedFeatures(e.point, {
+          layers: ["incidents-points"],
+        });
+        if (pointFeatures.length > 0) return;
+      }
+
       const curZoom = map.getZoom();
+
+      // Don't zoom at high zoom — finest H3 resolution is already active
+      // and individual incident dots are visible.
+      if (curZoom >= POINTS_MIN_ZOOM + 1) return;
+
+      const coords = e.lngLat;
       map.easeTo({ center: [coords.lng, coords.lat], zoom: curZoom + 2 });
     };
 
     // Click individual point for popup
     const onPointClick = (e: maplibregl.MapLayerMouseEvent) => {
-      const hexFeatures = map.queryRenderedFeatures(e.point, {
-        layers: map.getLayer("hexbin-fill") ? ["hexbin-fill"] : [],
-      });
-      const denseHex = hexFeatures.find(
-        (f) => f.properties && f.properties.count >= 10,
-      );
-      if (denseHex) return;
-
       const feature = e.features?.[0];
       if (!feature || !feature.properties) return;
 
@@ -456,7 +463,7 @@ function MapInteractions() {
       popupRef.current = new maplibregl.Popup({ offset: 10, maxWidth: "320px" })
         .setLngLat(coords)
         .setHTML(
-          `<div class="text-sm">
+          `<div class="text-sm bg-white dark:bg-gray-900 rounded-lg shadow-lg p-3 border border-border">
             <div class="font-semibold">${props.subcategory ?? "Unknown"}</div>
             <div class="text-gray-600 dark:text-gray-400">${props.category ?? ""}</div>
             ${props.desc ? `<div class="text-gray-500 dark:text-gray-400 text-xs mt-1">${props.desc}</div>` : ""}
@@ -497,7 +504,7 @@ function MapInteractions() {
       hoverPopup
         .setLngLat(e.lngLat)
         .setHTML(
-          `<div class="text-xs font-medium px-1">${formatted} incident${count !== 1 ? "s" : ""}</div>`,
+          `<div class="text-xs font-medium px-2 py-1 bg-white dark:bg-gray-900 rounded-md shadow-md border border-border">${formatted} incident${count !== 1 ? "s" : ""}</div>`,
         )
         .addTo(map);
     };

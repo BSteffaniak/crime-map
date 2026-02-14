@@ -133,6 +133,11 @@ body,
   .maplibregl-popup-content {
     @apply bg-transparent! shadow-none! p-0! rounded-none!;
   }
+  .maplibregl-popup-close-button {
+    @apply text-gray-400 hover:text-gray-600 dark:hover:text-gray-300
+           text-lg leading-none w-6 h-6 flex items-center justify-center
+           top-2! right-2!;
+  }
   .maplibregl-popup-tip {
     @apply hidden!;
   }
