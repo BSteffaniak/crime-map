@@ -110,6 +110,20 @@ export const HEATMAP_MAX_ZOOM = 8;
 export const POINTS_MIN_ZOOM = 13;
 
 /**
+ * Debounce delay (ms) for viewport-driven data fetches (hexbins, sidebar).
+ * Applied when the map is panning within the same hex resolution bracket.
+ * Skipped on `moveend` (settled) and on hex resolution changes.
+ */
+export const VIEWPORT_DEBOUNCE_MS = 150;
+
+/**
+ * Throttle interval (ms) for emitting viewport updates during continuous
+ * map movement (`move` events). Controls how often mid-pan data fetches
+ * can be triggered. Lower = more frequent updates, higher network load.
+ */
+export const VIEWPORT_THROTTLE_MS = 300;
+
+/**
  * Returns the H3 resolution for a given zoom level using the shared
  * config from `config/hexbins.json`.
  */

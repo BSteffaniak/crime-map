@@ -10,9 +10,11 @@ import {
   HEX_MIN_COUNT,
   HEX_STROKE_OPACITY,
   HEX_OPACITY_RANGE,
+  VIEWPORT_THROTTLE_MS,
   hexFillColor,
   hexFillOpacity,
   hexOutlineColor,
+  hexbinResolution,
   pointStrokeColor,
   buildProtomapsStyle,
   baseUiTheme,
@@ -27,7 +29,7 @@ interface CrimeMapProps {
   hexbins: HexbinEntry[];
   zoom: number;
   mapTheme: MapTheme;
-  onBoundsChange?: (bounds: maplibregl.LngLatBounds, zoom: number) => void;
+  onBoundsChange?: (bounds: maplibregl.LngLatBounds, zoom: number, options: { settled: boolean }) => void;
 }
 
 /** Converts HexbinEntry[] to a GeoJSON FeatureCollection of Polygons. */
@@ -547,11 +549,18 @@ function MapInteractions() {
   return null;
 }
 
-/** Fires moveend events to parent for bbox/zoom tracking. */
+/**
+ * Emits viewport updates for bbox/zoom tracking with smart throttling.
+ *
+ * - `moveend`: always fires immediately with `settled: true`
+ * - `move` (continuous): throttled to VIEWPORT_THROTTLE_MS intervals with
+ *   `settled: false`. If the H3 resolution changes (zoom crosses a bracket
+ *   boundary), fires immediately and resets the throttle timer.
+ */
 function BoundsTracker({
   onBoundsChange,
 }: {
-  onBoundsChange: (bounds: maplibregl.LngLatBounds, zoom: number) => void;
+  onBoundsChange: (bounds: maplibregl.LngLatBounds, zoom: number, options: { settled: boolean }) => void;
 }) {
   const { map, isLoaded } = useMap();
   const onBoundsChangeRef = useRef(onBoundsChange);
@@ -560,16 +569,65 @@ function BoundsTracker({
   useEffect(() => {
     if (!isLoaded || !map) return;
 
-    // Fire initial bounds
-    onBoundsChangeRef.current(map.getBounds(), map.getZoom());
+    let lastFireTime = 0;
+    let lastResolution = hexbinResolution(map.getZoom());
+    let throttleTimer: ReturnType<typeof setTimeout> | null = null;
 
-    const handler = () => {
-      onBoundsChangeRef.current(map.getBounds(), map.getZoom());
+    const fire = (settled: boolean) => {
+      lastFireTime = Date.now();
+      lastResolution = hexbinResolution(map.getZoom());
+      onBoundsChangeRef.current(map.getBounds(), map.getZoom(), { settled });
     };
-    map.on("moveend", handler);
+
+    // Fire initial bounds (settled — this is the starting position)
+    fire(true);
+
+    // Continuous move: throttled, with instant bypass on resolution change
+    const onMove = () => {
+      const currentResolution = hexbinResolution(map.getZoom());
+      const resolutionChanged = currentResolution !== lastResolution;
+      const elapsed = Date.now() - lastFireTime;
+
+      if (resolutionChanged) {
+        // Resolution changed — fire immediately and reset throttle
+        if (throttleTimer) {
+          clearTimeout(throttleTimer);
+          throttleTimer = null;
+        }
+        fire(false);
+        return;
+      }
+
+      // Same resolution — throttle to VIEWPORT_THROTTLE_MS
+      if (elapsed >= VIEWPORT_THROTTLE_MS) {
+        fire(false);
+      } else if (!throttleTimer) {
+        // Schedule a trailing fire for the remaining time
+        throttleTimer = setTimeout(() => {
+          throttleTimer = null;
+          fire(false);
+        }, VIEWPORT_THROTTLE_MS - elapsed);
+      }
+    };
+
+    // moveend: always fire immediately (settled)
+    const onMoveEnd = () => {
+      if (throttleTimer) {
+        clearTimeout(throttleTimer);
+        throttleTimer = null;
+      }
+      fire(true);
+    };
+
+    map.on("move", onMove);
+    map.on("moveend", onMoveEnd);
 
     return () => {
-      map.off("moveend", handler);
+      if (throttleTimer) {
+        clearTimeout(throttleTimer);
+      }
+      map.off("move", onMove);
+      map.off("moveend", onMoveEnd);
     };
   }, [isLoaded, map]);
 
@@ -587,8 +645,8 @@ export default function CrimeMap({ filters, hexbins, zoom, mapTheme, onBoundsCha
   const style = useMemo(() => buildProtomapsStyle(mapTheme), [mapTheme]);
 
   const handleBoundsChange = useCallback(
-    (bounds: maplibregl.LngLatBounds, z: number) => {
-      onBoundsChange?.(bounds, z);
+    (bounds: maplibregl.LngLatBounds, z: number, options: { settled: boolean }) => {
+      onBoundsChange?.(bounds, z, options);
     },
     [onBoundsChange],
   );

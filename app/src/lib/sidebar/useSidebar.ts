@@ -4,15 +4,17 @@
  * Replaces the old FlatGeobuf web worker approach with simple HTTP
  * requests to GET /api/sidebar. Supports debouncing, request
  * cancellation via AbortController, and infinite scroll pagination.
+ *
+ * Fetch scheduling:
+ * - On `moveend` (settled=true): fetches immediately, no debounce.
+ * - On mid-pan `move` (settled=false): debounced by VIEWPORT_DEBOUNCE_MS.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { type MutableRefObject, useCallback, useEffect, useRef, useState } from "react";
 import type { FilterState, CategoryId } from "../types";
 import { CRIME_CATEGORIES } from "../types";
 import type { BBox, SidebarIncident, SidebarResponse } from "./types";
-
-/** Debounce delay for sidebar requests (ms). */
-const DEBOUNCE_MS = 150;
+import { VIEWPORT_DEBOUNCE_MS } from "../map-config";
 
 /** Number of features per page. */
 const PAGE_SIZE = 50;
@@ -90,10 +92,14 @@ function buildQueryString(
  *
  * @param bbox - Current viewport bounding box (null if not yet known)
  * @param filters - Active filter state
+ * @param settledRef - ref indicating whether the most recent viewport
+ *   update was a `moveend` (true) or a mid-pan `move` (false). When
+ *   settled, the fetch fires immediately with no debounce.
  */
 export function useSidebar(
   bbox: BBox | null,
   filters: FilterState,
+  settledRef: MutableRefObject<boolean>,
 ): UseSidebarResult {
   const [features, setFeatures] = useState<SidebarIncident[]>([]);
   const [totalCount, setTotalCount] = useState(0);
@@ -107,13 +113,16 @@ export function useSidebar(
   // mix results from different bbox/filter combos.
   const genRef = useRef(0);
 
-  // Re-fetch when bbox or filters change (debounced)
+  // Re-fetch when bbox or filters change
   useEffect(() => {
     if (debounceRef.current) {
       clearTimeout(debounceRef.current);
+      debounceRef.current = null;
     }
 
-    debounceRef.current = setTimeout(() => {
+    const settled = settledRef.current;
+
+    const doFetch = () => {
       // Cancel any in-flight request
       abortRef.current?.abort();
 
@@ -151,14 +160,21 @@ export function useSidebar(
           if (gen !== genRef.current) return;
           setLoading(false);
         });
-    }, DEBOUNCE_MS);
+    };
+
+    if (settled) {
+      doFetch();
+    } else {
+      debounceRef.current = setTimeout(doFetch, VIEWPORT_DEBOUNCE_MS);
+    }
 
     return () => {
       if (debounceRef.current) {
         clearTimeout(debounceRef.current);
+        debounceRef.current = null;
       }
     };
-  }, [bbox, filters]);
+  }, [bbox, filters, settledRef]);
 
   // Cleanup on unmount
   useEffect(() => {

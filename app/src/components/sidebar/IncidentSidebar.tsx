@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { type MutableRefObject, useCallback, useEffect, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { categoryColor, type FilterState } from "@/lib/types";
 import { useSidebar } from "@/lib/sidebar/useSidebar";
@@ -13,11 +13,12 @@ const LOAD_MORE_THRESHOLD = 200;
 interface IncidentSidebarProps {
   bbox: BBox | null;
   filters: FilterState;
+  settledRef: MutableRefObject<boolean>;
 }
 
-export default function IncidentSidebar({ bbox, filters }: IncidentSidebarProps) {
+export default function IncidentSidebar({ bbox, filters, settledRef }: IncidentSidebarProps) {
   const { features, totalCount, hasMore, loading, loadMore } =
-    useSidebar(bbox, filters);
+    useSidebar(bbox, filters, settledRef);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const loadingMoreRef = useRef(false);

@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import CrimeMap from "@/components/map/CrimeMap";
 import ThemeToggle from "@/components/map/ThemeToggle";
 import FilterPanel from "@/components/filters/FilterPanel";
@@ -16,6 +16,7 @@ export default function App() {
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("filters");
   const [bbox, setBbox] = useState<BBox | null>(null);
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
+  const settledRef = useRef(true);
   const { mapTheme, cycleMapTheme } = useTheme();
 
   const {
@@ -30,7 +31,8 @@ export default function App() {
   } = useFilters();
 
   const handleBoundsChange = useCallback(
-    (bounds: { getWest(): number; getSouth(): number; getEast(): number; getNorth(): number }, newZoom: number) => {
+    (bounds: { getWest(): number; getSouth(): number; getEast(): number; getNorth(): number }, newZoom: number, options: { settled: boolean }) => {
+      settledRef.current = options.settled;
       setBbox([
         bounds.getWest(),
         bounds.getSouth(),
@@ -42,7 +44,7 @@ export default function App() {
     [],
   );
 
-  const { hexbins } = useHexbins(bbox, zoom, filters);
+  const { hexbins } = useHexbins(bbox, zoom, filters, settledRef);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground">
@@ -101,7 +103,7 @@ export default function App() {
               activeFilterCount={activeFilterCount}
             />
           ) : sidebarTab === "incidents" ? (
-            <IncidentSidebar bbox={bbox} filters={filters} />
+            <IncidentSidebar bbox={bbox} filters={filters} settledRef={settledRef} />
           ) : (
             <AiChat />
           )}

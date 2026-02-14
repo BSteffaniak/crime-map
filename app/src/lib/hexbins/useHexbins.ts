@@ -5,17 +5,22 @@
  * The response is MessagePack-encoded and decoded client-side. Hexbins
  * are fetched at every zoom level; the server picks the appropriate H3
  * resolution based on the zoom parameter via config/hexbins.json.
+ *
+ * Fetch scheduling:
+ * - On `moveend` (settled=true): fetches immediately, no debounce.
+ * - On `move` with H3 resolution change: fetches immediately (zoom
+ *   bracket crossing should feel instant).
+ * - On `move` within the same resolution: debounced by VIEWPORT_DEBOUNCE_MS
+ *   to batch rapid mid-pan updates.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { type MutableRefObject, useEffect, useRef, useState } from "react";
 import { decode } from "@msgpack/msgpack";
 import type { FilterState, CategoryId } from "../types";
 import { CRIME_CATEGORIES } from "../types";
 import type { BBox } from "../sidebar/types";
 import type { HexbinEntry } from "./types";
-
-/** Debounce delay for hexbin requests (ms). */
-const DEBOUNCE_MS = 150;
+import { VIEWPORT_DEBOUNCE_MS, hexbinResolution } from "../map-config";
 
 /**
  * Builds the query string for the hexbins API.
@@ -79,11 +84,16 @@ interface UseHexbinsResult {
  *
  * Active at any zoom >= HEATMAP_MAX_ZOOM. Returns an empty array below
  * that threshold (heatmap handles those zoom levels alone).
+ *
+ * @param settledRef - ref indicating whether the most recent viewport
+ *   update was a `moveend` (true) or a mid-pan `move` (false). When
+ *   settled, the fetch fires immediately with no debounce.
  */
 export function useHexbins(
   bbox: BBox | null,
   zoom: number,
   filters: FilterState,
+  settledRef: MutableRefObject<boolean>,
 ): UseHexbinsResult {
   const [hexbins, setHexbins] = useState<HexbinEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -91,13 +101,26 @@ export function useHexbins(
   const abortRef = useRef<AbortController | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const genRef = useRef(0);
+  const prevResolutionRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (debounceRef.current) {
       clearTimeout(debounceRef.current);
+      debounceRef.current = null;
     }
 
-    debounceRef.current = setTimeout(() => {
+    const currentResolution = hexbinResolution(zoom);
+    const resolutionChanged =
+      prevResolutionRef.current !== null &&
+      currentResolution !== prevResolutionRef.current;
+    const settled = settledRef.current;
+
+    // Determine whether to skip debounce:
+    // - settled (moveend): always fetch immediately
+    // - resolution changed: fetch immediately for instant zoom transitions
+    const immediate = settled || resolutionChanged;
+
+    const doFetch = () => {
       abortRef.current?.abort();
 
       const gen = ++genRef.current;
@@ -135,14 +158,23 @@ export function useHexbins(
           setHexbins([]);
           setLoading(false);
         });
-    }, DEBOUNCE_MS);
+    };
+
+    prevResolutionRef.current = currentResolution;
+
+    if (immediate) {
+      doFetch();
+    } else {
+      debounceRef.current = setTimeout(doFetch, VIEWPORT_DEBOUNCE_MS);
+    }
 
     return () => {
       if (debounceRef.current) {
         clearTimeout(debounceRef.current);
+        debounceRef.current = null;
       }
     };
-  }, [bbox, zoom, filters]);
+  }, [bbox, zoom, filters, settledRef]);
 
   // Cleanup on unmount
   useEffect(() => {
