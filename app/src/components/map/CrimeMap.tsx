@@ -362,42 +362,45 @@ function IncidentPointsLayer({
       });
     }
 
-    // Points go on top of everything (no beforeId)
-    map.addLayer({
-      id: "incidents-points",
-      type: "circle",
-      source: "incidents",
-      "source-layer": "incidents",
-      minzoom: POINTS_MIN_ZOOM,
-      paint: {
-        "circle-radius": [
-          "interpolate",
-          ["linear"],
-          ["zoom"],
-          POINTS_MIN_ZOOM, 3,
-          16, 6,
-          18, 10,
-        ],
-        "circle-color": [
-          "match",
-          ["get", "severity"],
-          5, severityColor(5),
-          4, severityColor(4),
-          3, severityColor(3),
-          2, severityColor(2),
-          severityColor(1),
-        ],
-        "circle-stroke-width": 0.5,
-        "circle-stroke-color": pointStrokeColor(uiTheme),
-        "circle-opacity": [
-          "interpolate",
-          ["linear"],
-          ["zoom"],
-          POINTS_MIN_ZOOM, 0.7,
-          16, 0.9,
-        ],
+    // Points below labels but above hexbins (data sandwich)
+    map.addLayer(
+      {
+        id: "incidents-points",
+        type: "circle",
+        source: "incidents",
+        "source-layer": "incidents",
+        minzoom: POINTS_MIN_ZOOM,
+        paint: {
+          "circle-radius": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            POINTS_MIN_ZOOM, 3,
+            16, 6,
+            18, 10,
+          ],
+          "circle-color": [
+            "match",
+            ["get", "severity"],
+            5, severityColor(5),
+            4, severityColor(4),
+            3, severityColor(3),
+            2, severityColor(2),
+            severityColor(1),
+          ],
+          "circle-stroke-width": 0.5,
+          "circle-stroke-color": pointStrokeColor(uiTheme),
+          "circle-opacity": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            POINTS_MIN_ZOOM, 0.7,
+            16, 0.9,
+          ],
+        },
       },
-    });
+      LABEL_BEFORE_ID,
+    );
 
     // Apply any active filters
     const filterExpr = buildIncidentFilter(filters);
