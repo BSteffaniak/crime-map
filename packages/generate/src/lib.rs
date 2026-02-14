@@ -49,6 +49,9 @@ pub const OUTPUT_INCIDENTS_DB: &str = "incidents_db";
 /// Output name constant for the count `DuckDB` database.
 pub const OUTPUT_COUNT_DB: &str = "count_duckdb";
 
+/// Output name constant for the H3 hexbin `DuckDB` database.
+pub const OUTPUT_H3_DB: &str = "h3_duckdb";
+
 /// Per-source fingerprint capturing the data state at generation time.
 ///
 /// Since `crime_incidents` is insert-only (`ON CONFLICT DO NOTHING`),
@@ -215,6 +218,15 @@ pub async fn run_with_cache(
         progress.set_position(0);
         generate_count_db(db, args, source_ids, dir, &progress).await?;
         record_output(manifest, OUTPUT_COUNT_DB);
+        save_manifest(dir, manifest)?;
+    }
+
+    if needs.get(OUTPUT_H3_DB) == Some(&true) {
+        progress.set_message("Generating H3 hexbin DB...".to_string());
+        progress.set_total(total_records);
+        progress.set_position(0);
+        generate_h3_db(db, args, source_ids, dir, &progress).await?;
+        record_output(manifest, OUTPUT_H3_DB);
         save_manifest(dir, manifest)?;
     }
 
@@ -402,6 +414,7 @@ fn output_file_path(dir: &Path, output_name: &str) -> PathBuf {
         OUTPUT_INCIDENTS_PMTILES => dir.join("incidents.pmtiles"),
         OUTPUT_INCIDENTS_DB => dir.join("incidents.db"),
         OUTPUT_COUNT_DB => dir.join("counts.duckdb"),
+        OUTPUT_H3_DB => dir.join("h3.duckdb"),
         _ => dir.join(output_name),
     }
 }
@@ -928,6 +941,235 @@ async fn generate_count_db(
 
     log::info!(
         "DuckDB count database generated: {} ({total_count} rows aggregated)",
+        db_path.display()
+    );
+    Ok(())
+}
+
+/// H3 resolutions to pre-compute during generation.
+///
+/// These cover zoom levels 8-18 per the `config/hexbins.json` mapping.
+/// Resolution 4 (~22km edge) through 9 (~200m edge).
+const H3_RESOLUTIONS: &[u8] = &[4, 5, 6, 7, 8, 9];
+
+/// Batch size for H3 generation (larger than the default for throughput).
+const H3_BATCH_SIZE: i64 = 50_000;
+
+/// Generates a `DuckDB` database with pre-aggregated H3 hexbin counts.
+///
+/// Creates `h3.duckdb` with an `h3_counts` table indexed by H3 cell,
+/// resolution, category, severity, arrest status, and day. Uses a staging
+/// table approach for performance: incidents are bulk-inserted with
+/// pre-computed H3 cell indices as extra columns, then a single SQL
+/// aggregation produces the final table.
+///
+/// # Errors
+///
+/// Returns an error if the `PostGIS` export, `DuckDB` creation, or
+/// aggregation fails.
+#[allow(clippy::too_many_lines)]
+async fn generate_h3_db(
+    db: &dyn Database,
+    args: &GenerateArgs,
+    source_ids: &[i32],
+    dir: &Path,
+    progress: &Arc<dyn ProgressCallback>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use h3o::{LatLng, Resolution};
+
+    let db_path = dir.join("h3.duckdb");
+
+    // Remove any existing file so we start fresh
+    if db_path.exists() {
+        std::fs::remove_file(&db_path)?;
+    }
+    let wal_path = dir.join("h3.duckdb.wal");
+    if wal_path.exists() {
+        std::fs::remove_file(&wal_path)?;
+    }
+
+    log::info!("Creating H3 hexbin DuckDB database...");
+
+    // Pre-resolve H3 Resolution objects (avoids repeated try_from in hot loop)
+    let resolutions: Vec<Resolution> = H3_RESOLUTIONS
+        .iter()
+        .filter_map(|&r| Resolution::try_from(r).ok())
+        .collect();
+
+    {
+        let duck = duckdb::Connection::open(&db_path)?;
+
+        // Create staging table: one row per incident with H3 indices as columns.
+        // This avoids string cloning per resolution and lets DuckDB aggregate.
+        duck.execute_batch(
+            "CREATE TABLE h3_staging (
+                category VARCHAR NOT NULL,
+                subcategory VARCHAR NOT NULL,
+                severity TINYINT NOT NULL,
+                arrest TINYINT NOT NULL,
+                day VARCHAR NOT NULL,
+                lng DOUBLE NOT NULL,
+                lat DOUBLE NOT NULL,
+                h3_r4 BIGINT NOT NULL,
+                h3_r5 BIGINT NOT NULL,
+                h3_r6 BIGINT NOT NULL,
+                h3_r7 BIGINT NOT NULL,
+                h3_r8 BIGINT NOT NULL,
+                h3_r9 BIGINT NOT NULL
+            )",
+        )?;
+    }
+
+    // Populate staging table from PostGIS
+    let mut last_id: i64 = 0;
+    let mut total_count: u64 = 0;
+    let mut remaining = args.limit;
+
+    loop {
+        #[allow(clippy::cast_sign_loss)]
+        let batch_limit = match remaining {
+            Some(0) => break,
+            Some(r) => i64::try_from(r.min(H3_BATCH_SIZE as u64))?,
+            None => H3_BATCH_SIZE,
+        };
+
+        let (query, params) = build_batch_query(last_id, batch_limit, source_ids);
+        let rows = db.query_raw_params(&query, &params).await?;
+
+        if rows.is_empty() {
+            break;
+        }
+
+        #[allow(clippy::cast_possible_truncation)]
+        let batch_len = rows.len() as u64;
+
+        // Open DuckDB per batch (avoids !Send across .await)
+        {
+            let duck = duckdb::Connection::open(&db_path)?;
+            duck.execute_batch("BEGIN TRANSACTION")?;
+
+            let mut stmt = duck.prepare(
+                "INSERT INTO h3_staging (category, subcategory, severity, arrest, day, lng, lat,
+                    h3_r4, h3_r5, h3_r6, h3_r7, h3_r8, h3_r9)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )?;
+
+            for row in &rows {
+                let id: i64 = row.to_value("id").unwrap_or(0);
+                let lng: f64 = row.to_value("longitude").unwrap_or(0.0);
+                let lat: f64 = row.to_value("latitude").unwrap_or(0.0);
+                let category: String = row.to_value("category").unwrap_or_default();
+                let subcategory: String = row.to_value("subcategory").unwrap_or_default();
+                let severity: i32 = row.to_value("severity").unwrap_or(1);
+                let arrest_made: Option<bool> = row.to_value("arrest_made").unwrap_or(None);
+                let occurred_at_naive: chrono::NaiveDateTime =
+                    row.to_value("occurred_at").unwrap_or_default();
+                let day = occurred_at_naive.format("%Y-%m-%d").to_string();
+
+                let arrest_int: i32 = match arrest_made {
+                    Some(true) => 1,
+                    Some(false) => 0,
+                    None => 2,
+                };
+
+                let Ok(coord) = LatLng::new(lat, lng) else {
+                    last_id = id;
+                    continue;
+                };
+
+                // Compute all 6 H3 cell indices (nanoseconds each)
+                let h3_cells: Vec<i64> = resolutions
+                    .iter()
+                    .map(|&res| {
+                        #[allow(clippy::cast_possible_wrap)]
+                        let idx = u64::from(coord.to_cell(res)) as i64;
+                        idx
+                    })
+                    .collect();
+
+                stmt.execute(duckdb::params![
+                    category,
+                    subcategory,
+                    severity,
+                    arrest_int,
+                    day,
+                    lng,
+                    lat,
+                    h3_cells[0],
+                    h3_cells[1],
+                    h3_cells[2],
+                    h3_cells[3],
+                    h3_cells[4],
+                    h3_cells[5],
+                ])?;
+
+                last_id = id;
+            }
+
+            duck.execute_batch("COMMIT")?;
+        }
+
+        total_count += batch_len;
+        if let Some(ref mut r) = remaining {
+            *r = r.saturating_sub(batch_len);
+        }
+
+        progress.inc(batch_len);
+        log::info!("Loaded {total_count} incidents into H3 staging table...");
+
+        #[allow(clippy::cast_sign_loss)]
+        let batch_limit_u64 = batch_limit as u64;
+        if batch_len < batch_limit_u64 {
+            break;
+        }
+    }
+
+    // Aggregate staging table into final h3_counts using UNION ALL
+    // across the 6 resolution columns. One SQL statement, DuckDB handles it
+    // in a single vectorized pass.
+    let duck = duckdb::Connection::open(&db_path)?;
+
+    log::info!("Aggregating H3 counts from staging table...");
+    duck.execute_batch(
+        "CREATE TABLE h3_counts AS
+         WITH unpivoted AS (
+             SELECT h3_r4 AS h3_index, 4 AS resolution, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
+             UNION ALL
+             SELECT h3_r5, 5, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
+             UNION ALL
+             SELECT h3_r6, 6, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
+             UNION ALL
+             SELECT h3_r7, 7, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
+             UNION ALL
+             SELECT h3_r8, 8, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
+             UNION ALL
+             SELECT h3_r9, 9, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
+         )
+         SELECT
+             CAST(h3_index AS UBIGINT) AS h3_index,
+             CAST(resolution AS TINYINT) AS resolution,
+             category,
+             subcategory,
+             CAST(severity AS TINYINT) AS severity,
+             CAST(arrest AS TINYINT) AS arrest,
+             day,
+             CAST(COUNT(*) AS INTEGER) AS cnt,
+             SUM(lng) AS sum_lng,
+             SUM(lat) AS sum_lat
+         FROM unpivoted
+         GROUP BY h3_index, resolution, category, subcategory, severity, arrest, day
+         ORDER BY resolution, h3_index",
+    )?;
+
+    // Drop staging table to reclaim space
+    duck.execute_batch("DROP TABLE h3_staging")?;
+
+    // Create indexes for fast viewport queries
+    log::info!("Creating H3 indexes...");
+    duck.execute_batch("CREATE INDEX idx_h3_counts_res_cell ON h3_counts (resolution, h3_index)")?;
+
+    log::info!(
+        "H3 DuckDB database generated: {} ({total_count} incidents indexed)",
         db_path.display()
     );
     Ok(())

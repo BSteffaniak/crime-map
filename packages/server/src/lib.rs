@@ -33,6 +33,8 @@ pub struct AppState {
     /// `DuckDB` connection for fast pre-aggregated count queries.
     /// `duckdb::Connection` is `Send` but not `Sync`, so a `Mutex` is needed.
     pub count_db: Arc<Mutex<duckdb::Connection>>,
+    /// `DuckDB` connection for H3 hexbin queries (pre-aggregated).
+    pub h3_db: Arc<Mutex<duckdb::Connection>>,
     /// AI agent context (available cities, date range).
     pub ai_context: Arc<crime_map_ai::agent::AgentContext>,
     /// `SQLite` database for persistent AI conversation storage.
@@ -86,6 +88,16 @@ pub async fn run_server() -> std::io::Result<()> {
     )
     .expect("Failed to open DuckDB count database");
 
+    log::info!("Opening H3 hexbin DuckDB database...");
+    let h3_path = Path::new("data/generated/h3.duckdb");
+    let h3_db = duckdb::Connection::open_with_flags(
+        h3_path,
+        duckdb::Config::default()
+            .access_mode(duckdb::AccessMode::ReadOnly)
+            .expect("Failed to set H3 DuckDB access mode"),
+    )
+    .expect("Failed to open H3 DuckDB database");
+
     // Build AI context: discover available cities and date range
     log::info!("Building AI context...");
     let available_cities = geo_queries::get_available_cities(db_conn.as_ref())
@@ -110,6 +122,7 @@ pub async fn run_server() -> std::io::Result<()> {
         db: Arc::from(db_conn),
         sidebar_db: Arc::from(sidebar_db),
         count_db: Arc::new(Mutex::new(count_db)),
+        h3_db: Arc::new(Mutex::new(h3_db)),
         ai_context: Arc::new(ai_context),
         conversations_db: Arc::from(conversations_db),
     });
@@ -137,6 +150,7 @@ pub async fn run_server() -> std::io::Result<()> {
                     .route("/sources", web::get().to(handlers::sources))
                     .route("/sidebar", web::get().to(handlers::sidebar))
                     .route("/clusters", web::get().to(handlers::clusters))
+                    .route("/hexbins", web::get().to(handlers::hexbins))
                     .route("/ai/ask", web::post().to(handlers::ai_ask)),
             )
             // Serve generated tile data

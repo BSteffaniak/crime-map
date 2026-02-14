@@ -1,25 +1,26 @@
 /**
- * React hook for fetching server-side cluster data.
+ * React hook for fetching server-side H3 hexbin data.
  *
- * Queries GET /api/clusters with the current viewport, zoom, and filters.
- * Active at any zoom level >= HEATMAP_MAX_ZOOM (8). Clusters coexist with
- * individual PMTiles dots — clusters render on top in dense areas, dots
- * show through in sparse areas.
- * Uses the same debounce/abort pattern as useSidebar.
+ * Queries GET /api/hexbins with the current viewport, zoom, and filters.
+ * The response is MessagePack-encoded and decoded client-side. Active at
+ * any zoom level >= HEATMAP_MAX_ZOOM (8). Hexbins render as a choropleth
+ * overlay on top of the heatmap, with individual PMTiles dots showing
+ * through at high zoom in sparse areas.
  */
 
 import { useEffect, useRef, useState } from "react";
+import { decode } from "@msgpack/msgpack";
 import type { FilterState, CategoryId } from "../types";
 import { CRIME_CATEGORIES } from "../types";
 import type { BBox } from "../sidebar/types";
-import type { ClusterEntry } from "./types";
-import { HEATMAP_MAX_ZOOM, clusterTargetK } from "../map-config";
+import type { HexbinEntry } from "./types";
+import { HEATMAP_MAX_ZOOM } from "../map-config";
 
-/** Debounce delay for cluster requests (ms). */
+/** Debounce delay for hexbin requests (ms). */
 const DEBOUNCE_MS = 150;
 
 /**
- * Builds the query string for the clusters API.
+ * Builds the query string for the hexbins API.
  */
 function buildQueryString(
   bbox: BBox,
@@ -30,7 +31,6 @@ function buildQueryString(
 
   params.set("bbox", bbox.join(","));
   params.set("zoom", String(Math.floor(zoom)));
-  params.set("k", String(clusterTargetK(zoom)));
 
   // Date filters
   if (filters.dateFrom) {
@@ -71,23 +71,23 @@ function buildQueryString(
   return params.toString();
 }
 
-interface UseClustersResult {
-  clusters: ClusterEntry[];
+interface UseHexbinsResult {
+  hexbins: HexbinEntry[];
   loading: boolean;
 }
 
 /**
- * Fetches server-side cluster data for the current viewport.
+ * Fetches server-side H3 hexbin data for the current viewport.
  *
  * Active at any zoom >= HEATMAP_MAX_ZOOM. Returns an empty array below
- * that threshold (heatmap handles those zoom levels).
+ * that threshold (heatmap handles those zoom levels alone).
  */
-export function useClusters(
+export function useHexbins(
   bbox: BBox | null,
   zoom: number,
   filters: FilterState,
-): UseClustersResult {
-  const [clusters, setClusters] = useState<ClusterEntry[]>([]);
+): UseHexbinsResult {
+  const [hexbins, setHexbins] = useState<HexbinEntry[]>([]);
   const [loading, setLoading] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
@@ -104,9 +104,9 @@ export function useClusters(
 
       const gen = ++genRef.current;
 
-      // Only fetch clusters at zoom 8+
+      // Only fetch hexbins at zoom 8+
       if (!bbox || zoom < HEATMAP_MAX_ZOOM) {
-        setClusters([]);
+        setHexbins([]);
         setLoading(false);
         return;
       }
@@ -117,21 +117,25 @@ export function useClusters(
 
       const qs = buildQueryString(bbox, zoom, filters);
 
-      fetch(`/api/clusters?${qs}`, { signal: controller.signal })
+      fetch(`/api/hexbins?${qs}`, { signal: controller.signal })
         .then((res) => {
-          if (!res.ok) throw new Error(`Clusters API ${res.status}`);
-          return res.json() as Promise<ClusterEntry[]>;
+          if (!res.ok) throw new Error(`Hexbins API ${res.status}`);
+          return res.arrayBuffer();
         })
-        .then((data) => {
+        .then((buffer) => {
           if (gen !== genRef.current) return;
-          setClusters(data);
+          // rmp_serde::to_vec encodes structs as positional arrays:
+          // each entry is [vertices, count] matching Rust field order.
+          const raw = decode(new Uint8Array(buffer)) as [[number, number][], number][];
+          const data: HexbinEntry[] = raw.map(([vertices, count]) => ({ vertices, count }));
+          setHexbins(data);
           setLoading(false);
         })
         .catch((err) => {
           if (err instanceof DOMException && err.name === "AbortError") return;
-          console.error("Clusters fetch failed:", err);
+          console.error("Hexbins fetch failed:", err);
           if (gen !== genRef.current) return;
-          setClusters([]);
+          setHexbins([]);
           setLoading(false);
         });
     }, DEBOUNCE_MS);
@@ -150,5 +154,5 @@ export function useClusters(
     };
   }, []);
 
-  return { clusters, loading };
+  return { hexbins, loading };
 }

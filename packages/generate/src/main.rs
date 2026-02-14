@@ -11,8 +11,8 @@
 use clap::{Args, Parser, Subcommand};
 use crime_map_database::db;
 use crime_map_generate::{
-    GenerateArgs, OUTPUT_COUNT_DB, OUTPUT_INCIDENTS_DB, OUTPUT_INCIDENTS_PMTILES, output_dir,
-    resolve_source_ids, run_with_cache,
+    GenerateArgs, OUTPUT_COUNT_DB, OUTPUT_H3_DB, OUTPUT_INCIDENTS_DB, OUTPUT_INCIDENTS_PMTILES,
+    output_dir, resolve_source_ids, run_with_cache,
 };
 
 #[derive(Parser)]
@@ -72,7 +72,12 @@ enum Commands {
         #[command(flatten)]
         args: CliGenerateArgs,
     },
-    /// Generate all output files (`PMTiles`, sidebar `SQLite`, and count `DuckDB`)
+    /// Generate `DuckDB` H3 hexbin database with pre-aggregated H3 cell counts
+    H3Db {
+        #[command(flatten)]
+        args: CliGenerateArgs,
+    },
+    /// Generate all output files (`PMTiles`, sidebar `SQLite`, count `DuckDB`, and H3 `DuckDB`)
     All {
         #[command(flatten)]
         args: CliGenerateArgs,
@@ -132,6 +137,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?;
         }
+        Commands::H3Db { args } => {
+            let args = GenerateArgs::from(args);
+            let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
+            run_with_cache(db.as_ref(), &args, &source_ids, &dir, &[OUTPUT_H3_DB], None).await?;
+        }
         Commands::All { args } => {
             let args = GenerateArgs::from(args);
             let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
@@ -144,6 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     OUTPUT_INCIDENTS_PMTILES,
                     OUTPUT_INCIDENTS_DB,
                     OUTPUT_COUNT_DB,
+                    OUTPUT_H3_DB,
                 ],
                 None,
             )

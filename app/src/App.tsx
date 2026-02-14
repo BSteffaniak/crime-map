@@ -4,7 +4,7 @@ import FilterPanel from "./components/filters/FilterPanel";
 import IncidentSidebar from "./components/sidebar/IncidentSidebar";
 import AiChat from "./components/ai/AiChat";
 import { useFilters } from "./hooks/useFilters";
-import { useClusters } from "./lib/clusters/useClusters";
+import { useHexbins } from "./lib/hexbins/useHexbins";
 import type { BBox } from "./lib/sidebar/types";
 import { DEFAULT_ZOOM } from "./lib/map-config";
 
@@ -39,7 +39,7 @@ export default function App() {
     [],
   );
 
-  const { clusters } = useClusters(bbox, zoom, filters);
+  const { hexbins } = useHexbins(bbox, zoom, filters);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden">
@@ -107,7 +107,7 @@ export default function App() {
 
       {/* Map */}
       <div className="flex-1">
-        <CrimeMap filters={filters} clusters={clusters} onBoundsChange={handleBoundsChange} />
+        <CrimeMap filters={filters} hexbins={hexbins} zoom={zoom} onBoundsChange={handleBoundsChange} />
       </div>
     </div>
   );

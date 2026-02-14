@@ -39,8 +39,11 @@ async-stream = { workspace = true }
 
 dialoguer = { workspace = true }
 duckdb = { workspace = true }
+geo = { workspace = true }
+h3o = { workspace = true, features = ["geo"] }
 log = { workspace = true }
 pretty_env_logger = { workspace = true }
+rmp-serde = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["full"] }

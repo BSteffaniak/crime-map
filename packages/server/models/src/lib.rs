@@ -256,6 +256,19 @@ impl From<&ClusterQueryParams> for CountFilterParams {
     }
 }
 
+impl From<&HexbinQueryParams> for CountFilterParams {
+    fn from(p: &HexbinQueryParams) -> Self {
+        Self {
+            from: p.from.clone(),
+            to: p.to.clone(),
+            categories: p.categories.clone(),
+            subcategories: p.subcategories.clone(),
+            severity_min: p.severity_min,
+            arrest_made: p.arrest_made,
+        }
+    }
+}
+
 /// Query parameters for the clusters endpoint.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -289,5 +302,40 @@ pub struct ClusterEntry {
     /// Weighted centroid latitude.
     pub lat: f64,
     /// Filtered incident count in this cluster.
+    pub count: u64,
+}
+
+/// Query parameters for the hexbins endpoint.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HexbinQueryParams {
+    /// Bounding box as `west,south,east,north`.
+    pub bbox: Option<String>,
+    /// Current map zoom level.
+    pub zoom: Option<u8>,
+    /// Start date for temporal filtering (ISO 8601).
+    pub from: Option<String>,
+    /// End date for temporal filtering (ISO 8601).
+    pub to: Option<String>,
+    /// Comma-separated list of category names to include.
+    pub categories: Option<String>,
+    /// Comma-separated list of subcategory names to include.
+    pub subcategories: Option<String>,
+    /// Minimum severity value (1-5).
+    pub severity_min: Option<u8>,
+    /// Filter by arrest status.
+    pub arrest_made: Option<bool>,
+}
+
+/// A single hexbin entry in the hexbins endpoint response.
+///
+/// Serialized via `MessagePack` for compact binary payloads. Each entry
+/// contains an H3 cell's boundary vertices and the aggregated incident
+/// count within that cell.
+#[derive(Debug, Clone, Serialize)]
+pub struct HexbinEntry {
+    /// Hex boundary vertices as `[[lng, lat], ...]` (typically 6 points).
+    pub vertices: Vec<[f64; 2]>,
+    /// Filtered incident count in this hexagonal cell.
     pub count: u64,
 }
