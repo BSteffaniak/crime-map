@@ -1,32 +1,28 @@
 /** MapLibre configuration and layer definitions. */
 
-import type { StyleSpecification } from "maplibre-gl";
 import hexbinConfig from "@config/hexbins.json";
 
 /** Default map center: geographic center of the contiguous US. */
 export const DEFAULT_CENTER: [number, number] = [-98.5795, 39.8283];
 export const DEFAULT_ZOOM = 4;
 
-/** Base map style using free OpenStreetMap tiles. */
-export const MAP_STYLE: StyleSpecification = {
-  version: 8,
-  sources: {
-    osm: {
-      type: "raster",
-      tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
-      tileSize: 256,
-      attribution: "&copy; OpenStreetMap contributors",
-    },
-  },
-  layers: [
-    {
-      id: "osm-tiles",
-      type: "raster",
-      source: "osm",
-      minzoom: 0,
-      maxzoom: 19,
-    },
-  ],
+/** CARTO vector basemap style URLs (free, no API key). */
+export const DARK_STYLE =
+  "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
+export const LIGHT_STYLE =
+  "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json";
+
+/**
+ * The first label layer ID AFTER roads/bridges/buildings in each CARTO style.
+ * Hexbin and heatmap layers are inserted before this layer so they render
+ * below map labels but above roads.
+ *
+ * Positron places `waterway_label` before roads, so we use `watername_ocean`.
+ * Dark Matter places `waterway_label` after roads, so it works directly.
+ */
+export const LABEL_BEFORE_ID: Record<"light" | "dark", string> = {
+  dark: "waterway_label",
+  light: "watername_ocean",
 };
 
 /**
@@ -82,3 +78,13 @@ export function hexFillOpacity(zoom: number): number {
 
 /** Hex outline stroke opacity. */
 export const HEX_STROKE_OPACITY: number = hexbinConfig.hexStrokeOpacity;
+
+/** Theme-dependent hex outline color. */
+export function hexOutlineColor(theme: "light" | "dark"): string {
+  return theme === "dark" ? "#ff6b6b" : "#a50f15";
+}
+
+/** Theme-dependent point stroke (border) color. */
+export function pointStrokeColor(theme: "light" | "dark"): string {
+  return theme === "dark" ? "#1a1a2e" : "#ffffff";
+}

@@ -2,7 +2,7 @@ import {
   CRIME_CATEGORIES,
   type CategoryId,
   type FilterState,
-} from "../../lib/types";
+} from "@/lib/types";
 
 const DATE_PRESETS = [
   { id: "7d", label: "7 Days" },
@@ -41,14 +41,14 @@ export default function FilterPanel({
   activeFilterCount,
 }: FilterPanelProps) {
   return (
-    <div className="flex h-full flex-col overflow-y-auto bg-white">
+    <div className="flex h-full flex-col overflow-y-auto bg-background">
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3">
-        <h2 className="text-lg font-semibold text-gray-900">Filters</h2>
+      <div className="flex items-center justify-between border-b border-border px-4 py-3">
+        <h2 className="text-lg font-semibold text-foreground">Filters</h2>
         {activeFilterCount > 0 && (
           <button
             onClick={onClearAll}
-            className="text-sm text-blue-600 hover:text-blue-800"
+            className="text-sm text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300"
           >
             Clear all ({activeFilterCount})
           </button>
@@ -56,8 +56,8 @@ export default function FilterPanel({
       </div>
 
       {/* Crime Type Section */}
-      <div className="border-b border-gray-200 px-4 py-3">
-        <h3 className="mb-2 text-sm font-medium text-gray-700">Crime Type</h3>
+      <div className="border-b border-border px-4 py-3">
+        <h3 className="mb-2 text-sm font-medium text-muted-foreground">Crime Type</h3>
         {(Object.keys(CRIME_CATEGORIES) as CategoryId[]).map((catId) => {
           const cat = CRIME_CATEGORIES[catId];
           const isExpanded = filters.categories.includes(catId);
@@ -68,8 +68,8 @@ export default function FilterPanel({
                 onClick={() => onToggleCategory(catId)}
                 className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm transition-colors ${
                   isExpanded
-                    ? "bg-gray-100 font-medium text-gray-900"
-                    : "text-gray-700 hover:bg-gray-50"
+                    ? "bg-accent font-medium text-foreground"
+                    : "text-muted-foreground hover:bg-accent/50"
                 }`}
               >
                 <span
@@ -86,13 +86,13 @@ export default function FilterPanel({
                     return (
                       <label
                         key={sub.id}
-                        className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs text-gray-600 hover:bg-gray-50"
+                        className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-accent/50"
                       >
                         <input
                           type="checkbox"
                           checked={isActive}
                           onChange={() => onToggleSubcategory(sub.id)}
-                          className="h-3.5 w-3.5 rounded border-gray-300"
+                          className="h-3.5 w-3.5 rounded border-border"
                         />
                         {sub.label}
                       </label>
@@ -106,8 +106,8 @@ export default function FilterPanel({
       </div>
 
       {/* Severity Section */}
-      <div className="border-b border-gray-200 px-4 py-3">
-        <h3 className="mb-2 text-sm font-medium text-gray-700">
+      <div className="border-b border-border px-4 py-3">
+        <h3 className="mb-2 text-sm font-medium text-muted-foreground">
           Minimum Severity
         </h3>
         <div className="flex flex-wrap gap-1.5">
@@ -117,8 +117,8 @@ export default function FilterPanel({
               onClick={() => onSetSeverityMin(level.value)}
               className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
                 filters.severityMin === level.value
-                  ? "bg-gray-900 text-white"
-                  : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                  ? "bg-foreground text-background"
+                  : "bg-accent text-muted-foreground hover:bg-accent/80"
               }`}
             >
               {level.label}
@@ -128,8 +128,8 @@ export default function FilterPanel({
       </div>
 
       {/* Date Range Section */}
-      <div className="border-b border-gray-200 px-4 py-3">
-        <h3 className="mb-2 text-sm font-medium text-gray-700">Time Range</h3>
+      <div className="border-b border-border px-4 py-3">
+        <h3 className="mb-2 text-sm font-medium text-muted-foreground">Time Range</h3>
         <div className="flex flex-wrap gap-1.5">
           {DATE_PRESETS.map((preset) => (
             <button
@@ -141,8 +141,8 @@ export default function FilterPanel({
               }
               className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
                 filters.datePreset === preset.id
-                  ? "bg-gray-900 text-white"
-                  : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                  ? "bg-foreground text-background"
+                  : "bg-accent text-muted-foreground hover:bg-accent/80"
               }`}
             >
               {preset.label}
@@ -153,7 +153,7 @@ export default function FilterPanel({
 
       {/* Arrest Status Section */}
       <div className="px-4 py-3">
-        <h3 className="mb-2 text-sm font-medium text-gray-700">
+        <h3 className="mb-2 text-sm font-medium text-muted-foreground">
           Arrest Status
         </h3>
         <div className="flex flex-wrap gap-1.5">
@@ -167,8 +167,8 @@ export default function FilterPanel({
               onClick={() => onSetArrestFilter(option.value as boolean | null)}
               className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
                 filters.arrestMade === option.value
-                  ? "bg-gray-900 text-white"
-                  : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                  ? "bg-foreground text-background"
+                  : "bg-accent text-muted-foreground hover:bg-accent/80"
               }`}
             >
               {option.label}

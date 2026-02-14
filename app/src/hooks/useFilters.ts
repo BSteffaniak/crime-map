@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { FilterState, CategoryId } from "../lib/types";
-import { DEFAULT_FILTERS } from "../lib/types";
+import type { FilterState, CategoryId } from "@/lib/types";
+import { DEFAULT_FILTERS } from "@/lib/types";
 
 // -- URL serialization --
 

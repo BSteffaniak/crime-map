@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { categoryColor, type FilterState } from "../../lib/types";
-import { useSidebar } from "../../lib/sidebar/useSidebar";
-import type { SidebarIncident } from "../../lib/sidebar/types";
-import type { BBox } from "../../lib/sidebar/types";
+import { categoryColor, type FilterState } from "@/lib/types";
+import { useSidebar } from "@/lib/sidebar/useSidebar";
+import type { SidebarIncident } from "@/lib/sidebar/types";
+import type { BBox } from "@/lib/sidebar/types";
 
 const ESTIMATED_ROW_HEIGHT = 96;
 const OVERSCAN_COUNT = 5;
@@ -56,11 +56,11 @@ export default function IncidentSidebar({ bbox, filters }: IncidentSidebarProps)
   }, [handleScroll]);
 
   return (
-    <div className="flex h-full flex-col bg-white">
+    <div className="flex h-full flex-col bg-background">
       {/* Header */}
-      <div className="border-b border-gray-200 px-4 py-3">
-        <h2 className="text-lg font-semibold text-gray-900">Incidents</h2>
-        <p className="text-xs text-gray-500">
+      <div className="border-b border-border px-4 py-3">
+        <h2 className="text-lg font-semibold text-foreground">Incidents</h2>
+        <p className="text-xs text-muted-foreground">
           {loading
             ? "Loading..."
             : totalCount > 0
@@ -72,7 +72,7 @@ export default function IncidentSidebar({ bbox, filters }: IncidentSidebarProps)
       {/* Virtualized Incident List */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
         {features.length === 0 && !loading && (
-          <div className="px-4 py-8 text-center text-sm text-gray-400">
+          <div className="px-4 py-8 text-center text-sm text-muted-foreground">
             No incidents in the current view.
             <br />
             Pan or zoom the map to see data.
@@ -103,7 +103,7 @@ export default function IncidentSidebar({ bbox, filters }: IncidentSidebarProps)
 
         {/* Loading more indicator */}
         {hasMore && (
-          <div className="px-4 py-3 text-center text-xs text-gray-400">
+          <div className="px-4 py-3 text-center text-xs text-muted-foreground">
             {loadingMoreRef.current ? "Loading more..." : `${totalCount - features.length} more`}
           </div>
         )}
@@ -114,7 +114,7 @@ export default function IncidentSidebar({ bbox, filters }: IncidentSidebarProps)
 
 function IncidentCard({ incident }: { incident: SidebarIncident }) {
   return (
-    <div className="border-b border-gray-100 px-4 py-3 transition-colors hover:bg-gray-50">
+    <div className="border-b border-border px-4 py-3 transition-colors hover:bg-accent/50">
       <div className="flex items-start justify-between">
         <div className="flex items-center gap-2">
           <span
@@ -123,22 +123,22 @@ function IncidentCard({ incident }: { incident: SidebarIncident }) {
               backgroundColor: categoryColor(incident.category),
             }}
           />
-          <span className="text-sm font-medium text-gray-900">
+          <span className="text-sm font-medium text-foreground">
             {incident.subcategory.replace(/_/g, " ")}
           </span>
         </div>
-        <span className="text-xs text-gray-400">
+        <span className="text-xs text-muted-foreground">
           Sev {incident.severity}
         </span>
       </div>
 
       {incident.description && (
-        <p className="mt-1 ml-[18px] text-xs text-gray-600 line-clamp-2">
+        <p className="mt-1 ml-[18px] text-xs text-muted-foreground line-clamp-2">
           {incident.description}
         </p>
       )}
 
-      <div className="mt-1 ml-[18px] flex items-center gap-3 text-xs text-gray-400">
+      <div className="mt-1 ml-[18px] flex items-center gap-3 text-xs text-muted-foreground">
         <span>
           {new Date(incident.occurredAt).toLocaleDateString("en-US", {
             month: "short",
@@ -155,7 +155,7 @@ function IncidentCard({ incident }: { incident: SidebarIncident }) {
       </div>
 
       {incident.arrestMade && (
-        <span className="mt-1 ml-[18px] inline-block rounded-full bg-green-100 px-2 py-0.5 text-xs text-green-700">
+        <span className="mt-1 ml-[18px] inline-block rounded-full bg-green-100 px-2 py-0.5 text-xs text-green-700 dark:bg-green-900/30 dark:text-green-400">
           Arrest made
         </span>
       )}
