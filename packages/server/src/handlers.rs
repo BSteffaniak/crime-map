@@ -1,5 +1,8 @@
 //! HTTP handler functions for the crime map API.
 
+use std::collections::BTreeMap;
+use std::sync::LazyLock;
+
 use actix_web::{HttpResponse, web};
 use crime_map_crime_models::{CrimeCategory, CrimeSubcategory};
 use crime_map_database::queries;
@@ -9,6 +12,7 @@ use crime_map_server_models::{
     CountFilterParams, IncidentQueryParams, SidebarIncident, SidebarQueryParams, SidebarResponse,
 };
 use moosicbox_json_utils::database::ToValue as _;
+use serde::Deserialize;
 use switchy_database::{DatabaseValue, Row};
 
 use crate::AppState;
@@ -398,18 +402,41 @@ fn execute_duckdb_count(
     Ok(total)
 }
 
-/// Target number of output clusters for each zoom level.
-///
-/// Lower zoom levels show fewer, coarser clusters; higher zoom levels
-/// show more, finer-grained clusters. These values are tunable.
-const CLUSTER_TARGET_COUNTS: [(u8, usize); 4] = [(8, 40), (9, 60), (10, 80), (11, 100)];
+/// Shared cluster configuration loaded from `config/clusters.json` at
+/// compile time. Defines the base density and per-zoom multipliers used
+/// to compute the target number of k-means output clusters.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClusterConfig {
+    density: usize,
+    zoom_multipliers: BTreeMap<String, f64>,
+}
 
-/// Returns the target cluster count for the given zoom level.
-fn cluster_target_count(zoom: u8) -> usize {
-    CLUSTER_TARGET_COUNTS
-        .iter()
-        .find(|(z, _)| *z == zoom)
-        .map_or(60, |(_, k)| *k)
+/// Cluster configuration embedded at compile time from the shared JSON.
+const CLUSTER_CONFIG_JSON: &str = include_str!("../../../config/clusters.json");
+
+/// Parsed cluster configuration (lazily initialized on first access).
+static CLUSTER_CONFIG: LazyLock<ClusterConfig> = LazyLock::new(|| {
+    serde_json::from_str(CLUSTER_CONFIG_JSON).expect("invalid config/clusters.json")
+});
+
+/// Computes the target cluster count for a given zoom level using the
+/// shared configuration's density and zoom multipliers.
+fn compute_target_k(zoom: u8) -> usize {
+    let config = &*CLUSTER_CONFIG;
+    let multiplier = config
+        .zoom_multipliers
+        .get(&zoom.to_string())
+        .copied()
+        .unwrap_or(1.5);
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let k = (config.density as f64 * multiplier).round() as usize;
+    k.max(1)
 }
 
 /// `GET /api/clusters`
@@ -418,12 +445,16 @@ fn cluster_target_count(zoom: u8) -> usize {
 /// `DuckDB` `count_summary` table. Uses weighted k-means clustering to
 /// produce natural, non-grid-aligned cluster positions. Supports all the
 /// same filters as the sidebar endpoint.
+///
+/// The `k` query parameter overrides the default target cluster count
+/// computed from `config/clusters.json`.
 pub async fn clusters(
     state: web::Data<AppState>,
     params: web::Query<ClusterQueryParams>,
 ) -> HttpResponse {
     let bbox = params.bbox.as_deref().and_then(parse_bbox);
     let zoom = params.zoom.unwrap_or(9);
+    let target_k = params.k.unwrap_or_else(|| compute_target_k(zoom));
 
     let count_db = state.count_db.clone();
     let params_owned = params.into_inner();
@@ -434,7 +465,7 @@ pub async fn clusters(
             .lock()
             .map_err(|e| format!("Failed to lock DuckDB connection: {e}"))?;
         let filter_params = CountFilterParams::from(&params_owned);
-        execute_duckdb_clusters(&conn, &filter_params, bbox_owned.as_ref(), zoom)
+        execute_duckdb_clusters(&conn, &filter_params, bbox_owned.as_ref(), target_k)
     })
     .await;
 
@@ -481,6 +512,7 @@ struct MicroCell {
 ///
 /// If the number of micro-cells is at most `k`, each cell becomes its own
 /// cluster directly (no iteration needed).
+#[allow(clippy::too_many_lines)]
 fn weighted_kmeans(cells: &[MicroCell], k: usize, bbox: &BoundingBox) -> Vec<ClusterEntry> {
     if cells.is_empty() {
         return Vec::new();
@@ -615,7 +647,7 @@ fn execute_duckdb_clusters(
     db_conn: &duckdb::Connection,
     params: &CountFilterParams,
     bbox: Option<&BoundingBox>,
-    zoom: u8,
+    target_k: usize,
 ) -> Result<Vec<ClusterEntry>, String> {
     let mut conditions: Vec<String> = Vec::new();
     let mut bind_values: Vec<DuckValue> = Vec::new();
@@ -686,8 +718,6 @@ fn execute_duckdb_clusters(
         }
         BoundingBox::new(west, south, east, north)
     });
-
-    let target_k = cluster_target_count(zoom);
 
     Ok(weighted_kmeans(&micro_cells, target_k, &effective_bbox))
 }

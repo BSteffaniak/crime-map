@@ -1,6 +1,7 @@
 /** MapLibre configuration and layer definitions. */
 
 import type { StyleSpecification } from "maplibre-gl";
+import clusterConfig from "@config/clusters.json";
 
 /** Default map center: geographic center of the contiguous US. */
 export const DEFAULT_CENTER: [number, number] = [-98.5795, 39.8283];
@@ -38,22 +39,15 @@ export const HEATMAP_MAX_ZOOM = 8;
 export const CLUSTER_MAX_ZOOM = 12;
 
 /**
- * Server-side cluster target counts by zoom level.
+ * Computes the target cluster count for a given zoom level using the
+ * shared config from `config/clusters.json`.
  *
- * The server uses weighted k-means clustering on fine-grained micro-cells
- * from the `count_summary` table (0.001-degree resolution). The target
- * count controls how many output clusters are produced per viewport.
- *
- * | Zoom | Target clusters |
- * |------|-----------------|
- * | 8    | 40              |
- * | 9    | 60              |
- * | 10   | 80              |
- * | 11   | 100             |
+ * The density base is multiplied by the zoom-specific multiplier to
+ * produce more clusters as the user zooms in.
  */
-export const CLUSTER_TARGET_COUNTS: Record<number, number> = {
-  8: 40,
-  9: 60,
-  10: 80,
-  11: 100,
-};
+export function clusterTargetK(zoom: number): number {
+  const z = Math.floor(zoom).toString();
+  const multiplier =
+    (clusterConfig.zoomMultipliers as Record<string, number>)[z] ?? 1.5;
+  return Math.round(clusterConfig.density * multiplier);
+}

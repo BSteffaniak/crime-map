@@ -11,7 +11,7 @@ import type { FilterState, CategoryId } from "../types";
 import { CRIME_CATEGORIES } from "../types";
 import type { BBox } from "../sidebar/types";
 import type { ClusterEntry } from "./types";
-import { HEATMAP_MAX_ZOOM, CLUSTER_MAX_ZOOM } from "../map-config";
+import { HEATMAP_MAX_ZOOM, CLUSTER_MAX_ZOOM, clusterTargetK } from "../map-config";
 
 /** Debounce delay for cluster requests (ms). */
 const DEBOUNCE_MS = 150;
@@ -28,6 +28,7 @@ function buildQueryString(
 
   params.set("bbox", bbox.join(","));
   params.set("zoom", String(Math.floor(zoom)));
+  params.set("k", String(clusterTargetK(zoom)));
 
   // Date filters
   if (filters.dateFrom) {

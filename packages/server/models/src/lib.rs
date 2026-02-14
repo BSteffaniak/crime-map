@@ -262,8 +262,10 @@ impl From<&ClusterQueryParams> for CountFilterParams {
 pub struct ClusterQueryParams {
     /// Bounding box as `west,south,east,north`.
     pub bbox: Option<String>,
-    /// Current map zoom level (determines grid coarseness).
+    /// Current map zoom level.
     pub zoom: Option<u8>,
+    /// Target number of output clusters (overrides server default).
+    pub k: Option<usize>,
     /// Start date for temporal filtering (ISO 8601).
     pub from: Option<String>,
     /// End date for temporal filtering (ISO 8601).
