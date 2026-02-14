@@ -20,9 +20,60 @@ use actix_web::{App, HttpServer, middleware, web};
 use crime_map_database::{db, run_migrations};
 use crime_map_geography::queries as geo_queries;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use switchy_database::Database;
 use switchy_database_connection::init_sqlite_rusqlite;
+
+/// Simple round-robin pool of read-only `DuckDB` connections.
+///
+/// `duckdb::Connection` is `Send` but not `Sync`, so each connection is
+/// wrapped in a `Mutex`. The pool hands out connections round-robin via
+/// an atomic counter, allowing concurrent queries on different
+/// connections.
+pub struct DuckDbPool {
+    connections: Vec<Mutex<duckdb::Connection>>,
+    next: AtomicUsize,
+}
+
+impl DuckDbPool {
+    /// Opens `size` read-only connections to the `DuckDB` file at `path`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any connection fails to open.
+    #[must_use]
+    pub fn new(path: &Path, size: usize) -> Self {
+        let connections = (0..size)
+            .map(|_| {
+                let conn = duckdb::Connection::open_with_flags(
+                    path,
+                    duckdb::Config::default()
+                        .access_mode(duckdb::AccessMode::ReadOnly)
+                        .expect("Failed to set DuckDB access mode"),
+                )
+                .expect("Failed to open DuckDB connection for pool");
+                Mutex::new(conn)
+            })
+            .collect();
+        Self {
+            connections,
+            next: AtomicUsize::new(0),
+        }
+    }
+
+    /// Acquires the next connection from the pool (round-robin).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `Mutex` is poisoned.
+    pub fn acquire(&self) -> std::sync::MutexGuard<'_, duckdb::Connection> {
+        let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.connections.len();
+        self.connections[idx]
+            .lock()
+            .expect("DuckDB pool mutex poisoned")
+    }
+}
 
 /// Shared application state.
 pub struct AppState {
@@ -33,8 +84,8 @@ pub struct AppState {
     /// `DuckDB` connection for fast pre-aggregated count queries.
     /// `duckdb::Connection` is `Send` but not `Sync`, so a `Mutex` is needed.
     pub count_db: Arc<Mutex<duckdb::Connection>>,
-    /// `DuckDB` connection for H3 hexbin queries (pre-aggregated).
-    pub h3_db: Arc<Mutex<duckdb::Connection>>,
+    /// Pool of read-only `DuckDB` connections for H3 hexbin queries.
+    pub h3_pool: Arc<DuckDbPool>,
     /// AI agent context (available cities, date range).
     pub ai_context: Arc<crime_map_ai::agent::AgentContext>,
     /// `SQLite` database for persistent AI conversation storage.
@@ -88,15 +139,9 @@ pub async fn run_server() -> std::io::Result<()> {
     )
     .expect("Failed to open DuckDB count database");
 
-    log::info!("Opening H3 hexbin DuckDB database...");
+    log::info!("Opening H3 hexbin DuckDB connection pool...");
     let h3_path = Path::new("data/generated/h3.duckdb");
-    let h3_db = duckdb::Connection::open_with_flags(
-        h3_path,
-        duckdb::Config::default()
-            .access_mode(duckdb::AccessMode::ReadOnly)
-            .expect("Failed to set H3 DuckDB access mode"),
-    )
-    .expect("Failed to open H3 DuckDB database");
+    let h3_pool = DuckDbPool::new(h3_path, 4);
 
     // Build AI context: discover available cities and date range
     log::info!("Building AI context...");
@@ -122,7 +167,7 @@ pub async fn run_server() -> std::io::Result<()> {
         db: Arc::from(db_conn),
         sidebar_db: Arc::from(sidebar_db),
         count_db: Arc::new(Mutex::new(count_db)),
-        h3_db: Arc::new(Mutex::new(h3_db)),
+        h3_pool: Arc::new(h3_pool),
         ai_context: Arc::new(ai_context),
         conversations_db: Arc::from(conversations_db),
     });

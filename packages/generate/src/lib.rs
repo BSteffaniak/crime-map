@@ -1168,6 +1168,71 @@ async fn generate_h3_db(
     log::info!("Creating H3 indexes...");
     duck.execute_batch("CREATE INDEX idx_h3_counts_res_cell ON h3_counts (resolution, h3_index)")?;
 
+    // Pre-compute hex boundary vertices for every distinct H3 cell.
+    // This avoids per-request trigonometric computation at runtime.
+    log::info!("Pre-computing H3 boundary vertices...");
+    duck.execute_batch(
+        "CREATE TABLE h3_boundaries (
+             h3_index UBIGINT PRIMARY KEY,
+             v0_lng DOUBLE NOT NULL, v0_lat DOUBLE NOT NULL,
+             v1_lng DOUBLE NOT NULL, v1_lat DOUBLE NOT NULL,
+             v2_lng DOUBLE NOT NULL, v2_lat DOUBLE NOT NULL,
+             v3_lng DOUBLE NOT NULL, v3_lat DOUBLE NOT NULL,
+             v4_lng DOUBLE NOT NULL, v4_lat DOUBLE NOT NULL,
+             v5_lng DOUBLE NOT NULL, v5_lat DOUBLE NOT NULL
+         )",
+    )?;
+
+    {
+        let mut boundary_stmt = duck
+            .prepare("INSERT INTO h3_boundaries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")?;
+
+        let mut distinct_stmt =
+            duck.prepare("SELECT DISTINCT CAST(h3_index AS BIGINT) FROM h3_counts")?;
+        let mut rows = distinct_stmt.query([])?;
+
+        let mut boundary_count: u64 = 0;
+        while let Some(row) = rows.next()? {
+            let h3_raw: i64 = row.get(0)?;
+            #[allow(clippy::cast_sign_loss)]
+            let h3_u64 = h3_raw as u64;
+            let Some(cell) = h3o::CellIndex::try_from(h3_u64).ok() else {
+                continue;
+            };
+
+            let boundary = cell.boundary();
+            let verts: Vec<_> = boundary.iter().collect();
+
+            // Hexagons have 6 vertices; pentagons have 5 (extremely rare).
+            // Pad with the last vertex if fewer than 6.
+            let v = |i: usize| -> (f64, f64) {
+                if i < verts.len() {
+                    (verts[i].lng(), verts[i].lat())
+                } else {
+                    let last = &verts[verts.len() - 1];
+                    (last.lng(), last.lat())
+                }
+            };
+
+            let (v0_lng, v0_lat) = v(0);
+            let (v1_lng, v1_lat) = v(1);
+            let (v2_lng, v2_lat) = v(2);
+            let (v3_lng, v3_lat) = v(3);
+            let (v4_lng, v4_lat) = v(4);
+            let (v5_lng, v5_lat) = v(5);
+
+            #[allow(clippy::cast_possible_wrap)]
+            boundary_stmt.execute(duckdb::params![
+                h3_raw, v0_lng, v0_lat, v1_lng, v1_lat, v2_lng, v2_lat, v3_lng, v3_lat, v4_lng,
+                v4_lat, v5_lng, v5_lat,
+            ])?;
+
+            boundary_count += 1;
+        }
+
+        log::info!("Pre-computed boundaries for {boundary_count} distinct H3 cells");
+    }
+
     log::info!(
         "H3 DuckDB database generated: {} ({total_count} incidents indexed)",
         db_path.display()

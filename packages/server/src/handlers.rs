@@ -445,14 +445,12 @@ pub async fn hexbins(
     let zoom = params.zoom.unwrap_or(9);
     let resolution = resolution_for_zoom(zoom);
 
-    let h3_db = state.h3_db.clone();
+    let h3_pool = state.h3_pool.clone();
     let params_owned = params.into_inner();
     let bbox_owned = bbox;
 
     let result = web::block(move || {
-        let conn = h3_db
-            .lock()
-            .map_err(|e| format!("Failed to lock H3 DuckDB connection: {e}"))?;
+        let conn = h3_pool.acquire();
         let filter_params = CountFilterParams::from(&params_owned);
         execute_h3_hexbins(&conn, &filter_params, bbox_owned.as_ref(), resolution)
     })
@@ -807,9 +805,10 @@ fn execute_duckdb_clusters(
 
 /// Executes the H3 hexbin query against the `DuckDB` `h3_counts` table.
 ///
-/// Fetches aggregated counts per H3 cell within the viewport, then
-/// computes hex boundary polygons using `h3o`. Returns a compact array
-/// of [`HexbinEntry`] structs ready for `MessagePack` serialization.
+/// Fetches aggregated counts per H3 cell within the viewport and reads
+/// pre-computed hex boundary polygons from the `h3_boundaries` table.
+/// Returns a compact array of [`HexbinEntry`] structs ready for
+/// `MessagePack` serialization.
 fn execute_h3_hexbins(
     db_conn: &duckdb::Connection,
     params: &CountFilterParams,
@@ -820,13 +819,15 @@ fn execute_h3_hexbins(
     let mut bind_values: Vec<DuckValue> = Vec::new();
 
     // Filter by resolution
-    conditions.push("resolution = ?".to_string());
+    conditions.push("h.resolution = ?".to_string());
     bind_values.push(DuckValue::Int(i32::from(resolution)));
 
     // Apply standard filters (date, category, severity, arrest)
     build_h3_conditions(params, &mut conditions, &mut bind_values);
 
-    // Apply bbox filter using h3o's Tiler for exact H3 cell coverage
+    // Apply bbox filter using h3o's Tiler for exact H3 cell coverage.
+    // Cell indices are formatted as a SQL literal list with unnest() to
+    // avoid thousands of bind parameters that cause query plan bloat.
     if let Some(b) = bbox {
         let Ok(res) = h3o::Resolution::try_from(resolution) else {
             return Err(format!("Invalid H3 resolution: {resolution}"));
@@ -856,22 +857,32 @@ fn execute_h3_hexbins(
             return Ok(Vec::new());
         }
 
-        // Build IN clause for the H3 cell indices
-        let placeholders: Vec<&str> = cells.iter().map(|_| "?").collect();
-        conditions.push(format!("h3_index IN ({})", placeholders.join(", ")));
-        for cell in &cells {
-            #[allow(clippy::cast_possible_wrap)]
-            bind_values.push(DuckValue::BigInt(u64::from(*cell) as i64));
-        }
+        // Build unnest() literal list (values are u64 from CellIndex, safe)
+        let cell_literals: Vec<String> = cells
+            .iter()
+            .map(|cell| format!("{}", u64::from(*cell)))
+            .collect();
+        conditions.push(format!(
+            "h.h3_index IN (SELECT unnest([{}]::UBIGINT[]))",
+            cell_literals.join(", ")
+        ));
     }
 
     let where_clause = format!(" WHERE {}", conditions.join(" AND "));
 
     let sql = format!(
-        "SELECT h3_index, CAST(SUM(cnt) AS BIGINT) AS count
-         FROM h3_counts{where_clause}
-         GROUP BY h3_index
-         HAVING SUM(cnt) > 0"
+        "SELECT h.h3_index, CAST(SUM(h.cnt) AS BIGINT) AS count,
+                b.v0_lng, b.v0_lat, b.v1_lng, b.v1_lat,
+                b.v2_lng, b.v2_lat, b.v3_lng, b.v3_lat,
+                b.v4_lng, b.v4_lat, b.v5_lng, b.v5_lat
+         FROM h3_counts h
+         JOIN h3_boundaries b ON h.h3_index = b.h3_index
+         {where_clause}
+         GROUP BY h.h3_index,
+                  b.v0_lng, b.v0_lat, b.v1_lng, b.v1_lat,
+                  b.v2_lng, b.v2_lat, b.v3_lng, b.v3_lat,
+                  b.v4_lng, b.v4_lat, b.v5_lng, b.v5_lat
+         HAVING SUM(h.cnt) > 0"
     );
 
     let mut stmt = db_conn
@@ -891,24 +902,31 @@ fn execute_h3_hexbins(
         .next()
         .map_err(|e| format!("H3 DuckDB row error: {e}"))?
     {
-        let h3_raw: i64 = row.get(0).map_err(|e| format!("H3 get h3_index: {e}"))?;
         let count: i64 = row.get(1).map_err(|e| format!("H3 get count: {e}"))?;
 
-        // Convert raw i64 back to CellIndex and compute boundary
-        #[allow(clippy::cast_sign_loss)]
-        let h3_u64 = h3_raw as u64;
-        let Some(cell) = h3o::CellIndex::try_from(h3_u64).ok() else {
-            continue;
-        };
-
-        let boundary = cell.boundary();
-        let vertices: Vec<[f64; 2]> = boundary
-            .iter()
-            .map(|coord| [coord.lng(), coord.lat()])
-            .collect();
+        // Read pre-computed boundary vertices (12 DOUBLE columns)
+        let v0_lng: f64 = row.get(2).map_err(|e| format!("H3 get v0_lng: {e}"))?;
+        let v0_lat: f64 = row.get(3).map_err(|e| format!("H3 get v0_lat: {e}"))?;
+        let v1_lng: f64 = row.get(4).map_err(|e| format!("H3 get v1_lng: {e}"))?;
+        let v1_lat: f64 = row.get(5).map_err(|e| format!("H3 get v1_lat: {e}"))?;
+        let v2_lng: f64 = row.get(6).map_err(|e| format!("H3 get v2_lng: {e}"))?;
+        let v2_lat: f64 = row.get(7).map_err(|e| format!("H3 get v2_lat: {e}"))?;
+        let v3_lng: f64 = row.get(8).map_err(|e| format!("H3 get v3_lng: {e}"))?;
+        let v3_lat: f64 = row.get(9).map_err(|e| format!("H3 get v3_lat: {e}"))?;
+        let v4_lng: f64 = row.get(10).map_err(|e| format!("H3 get v4_lng: {e}"))?;
+        let v4_lat: f64 = row.get(11).map_err(|e| format!("H3 get v4_lat: {e}"))?;
+        let v5_lng: f64 = row.get(12).map_err(|e| format!("H3 get v5_lng: {e}"))?;
+        let v5_lat: f64 = row.get(13).map_err(|e| format!("H3 get v5_lat: {e}"))?;
 
         entries.push(HexbinEntry {
-            vertices,
+            vertices: vec![
+                [v0_lng, v0_lat],
+                [v1_lng, v1_lat],
+                [v2_lng, v2_lat],
+                [v3_lng, v3_lat],
+                [v4_lng, v4_lat],
+                [v5_lng, v5_lat],
+            ],
             count: count.try_into().unwrap_or(0),
         });
     }
@@ -1007,7 +1025,6 @@ fn add_count_in_filter(
 /// Helper enum for `DuckDB` parameter binding.
 enum DuckValue {
     Int(i32),
-    BigInt(i64),
     Str(String),
 }
 
@@ -1016,7 +1033,6 @@ enum DuckValue {
 fn duck_value_to_boxed(v: DuckValue) -> Box<dyn duckdb::ToSql> {
     match v {
         DuckValue::Int(i) => Box::new(i),
-        DuckValue::BigInt(i) => Box::new(i),
         DuckValue::Str(s) => Box::new(s),
     }
 }
@@ -1024,31 +1040,32 @@ fn duck_value_to_boxed(v: DuckValue) -> Box<dyn duckdb::ToSql> {
 /// Builds the WHERE conditions and bind values for `DuckDB` queries
 /// against the `h3_counts` table. Applies the same filter dimensions as
 /// `build_count_conditions`: date range, categories, subcategories,
-/// severity, and arrest status.
+/// severity, and arrest status. Column names are prefixed with `h.`
+/// because the hexbin query aliases `h3_counts` as `h`.
 fn build_h3_conditions(
     params: &CountFilterParams,
     conditions: &mut Vec<String>,
     bind_values: &mut Vec<DuckValue>,
 ) {
     if let Some(ref from) = params.from {
-        conditions.push("day >= ?".to_string());
+        conditions.push("h.day >= ?".to_string());
         bind_values.push(DuckValue::Str(extract_date_part(from)));
     }
     if let Some(ref to) = params.to {
-        conditions.push("day <= ?".to_string());
+        conditions.push("h.day <= ?".to_string());
         bind_values.push(DuckValue::Str(extract_date_part(to)));
     }
 
     add_count_in_filter(
         params.categories.as_deref(),
-        "category",
+        "h.category",
         conditions,
         bind_values,
     );
 
     add_count_in_filter(
         params.subcategories.as_deref(),
-        "subcategory",
+        "h.subcategory",
         conditions,
         bind_values,
     );
@@ -1056,12 +1073,12 @@ fn build_h3_conditions(
     if let Some(sev) = params.severity_min
         && sev > 1
     {
-        conditions.push("severity >= ?".to_string());
+        conditions.push("h.severity >= ?".to_string());
         bind_values.push(DuckValue::Int(i32::from(sev)));
     }
 
     if let Some(arrest) = params.arrest_made {
-        conditions.push("arrest = ?".to_string());
+        conditions.push("h.arrest = ?".to_string());
         bind_values.push(DuckValue::Int(i32::from(arrest)));
     }
 }
