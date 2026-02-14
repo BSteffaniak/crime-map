@@ -73,6 +73,20 @@ export function buildProtomapsStyle(theme: MapTheme): StyleSpecification {
     labelsOnly: true,
   });
 
+  // Boost text halo for readability over data layers (hexbins, heatmap).
+  // Protomaps defaults to halo-width 1 with no blur — too thin to read
+  // over the red hexbin fill. Widening to 2 with a soft 0.5 blur creates
+  // a clear knockout around each character.
+  for (const layer of labelLayers) {
+    if (layer.type === "symbol" && layer.paint) {
+      const paint = layer.paint as Record<string, unknown>;
+      if ("text-halo-width" in paint) {
+        paint["text-halo-width"] = 2;
+        paint["text-halo-blur"] = 0.5;
+      }
+    }
+  }
+
   return {
     version: 8,
     glyphs: GLYPHS_URL,
