@@ -47,15 +47,28 @@ export function hexbinResolution(zoom: number): number {
   return (hexbinConfig.zoomResolutionMap as Record<string, number>)[z] ?? 5;
 }
 
-/** Sequential red color scale for hex fill (5 steps, light to dark). */
-export const HEX_COLOR_SCALE: string[] = hexbinConfig.colorScale;
-
 /** Minimum count for a hexbin to be rendered. */
 export const HEX_MIN_COUNT: number = hexbinConfig.minCount;
 
 /**
- * Returns the hex fill opacity for a given zoom level, interpolating
- * between configured breakpoints.
+ * Single hex fill color per theme. Density is represented via opacity,
+ * not color variation.
+ */
+export function hexFillColor(theme: "light" | "dark"): string {
+  return (hexbinConfig.hexFillColor as Record<string, string>)[theme];
+}
+
+/**
+ * Base opacity range [min, max] for hex fill before zoom scaling.
+ * Low-count hexes get min opacity; high-count hexes get max.
+ */
+export const HEX_OPACITY_RANGE: [number, number] =
+  hexbinConfig.hexFillOpacityRange as [number, number];
+
+/**
+ * Returns the hex fill opacity envelope for a given zoom level,
+ * interpolating between configured breakpoints. This value scales the
+ * per-feature opacity range.
  */
 export function hexFillOpacity(zoom: number): number {
   const entries = Object.entries(hexbinConfig.hexFillOpacity)
@@ -76,12 +89,12 @@ export function hexFillOpacity(zoom: number): number {
   return 0.5;
 }
 
-/** Hex outline stroke opacity. */
+/** Max hex outline stroke opacity (at highest count). */
 export const HEX_STROKE_OPACITY: number = hexbinConfig.hexStrokeOpacity;
 
 /** Theme-dependent hex outline color. */
 export function hexOutlineColor(theme: "light" | "dark"): string {
-  return theme === "dark" ? "#ff6b6b" : "#a50f15";
+  return (hexbinConfig.hexOutlineColor as Record<string, string>)[theme];
 }
 
 /** Theme-dependent point stroke (border) color. */

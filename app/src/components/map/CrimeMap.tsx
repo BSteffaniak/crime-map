@@ -9,9 +9,10 @@ import {
   LABEL_BEFORE_ID,
   HEATMAP_MAX_ZOOM,
   POINTS_MIN_ZOOM,
-  HEX_COLOR_SCALE,
   HEX_MIN_COUNT,
   HEX_STROKE_OPACITY,
+  HEX_OPACITY_RANGE,
+  hexFillColor,
   hexFillOpacity,
   hexOutlineColor,
   pointStrokeColor,
@@ -49,44 +50,97 @@ function hexbinsToGeoJSON(hexbins: HexbinEntry[]): GeoJSON.FeatureCollection {
 }
 
 /**
- * Computes quantile-based step expressions for hex fill color based on
- * the current viewport's count distribution. Returns a MapLibre step
- * expression for fill-color.
+ * Computes a quantile-based interpolate expression that maps each feature's
+ * `count` property to an opacity value. The base [min, max] range from config
+ * is scaled by the zoom-dependent envelope so hexes naturally fade at extreme
+ * zoom levels.
  */
-function buildHexColorSteps(hexbins: HexbinEntry[]): maplibregl.ExpressionSpecification {
+function buildHexOpacityExpr(
+  hexbins: HexbinEntry[],
+  zoomScale: number,
+): maplibregl.ExpressionSpecification {
+  const [baseMin, baseMax] = HEX_OPACITY_RANGE;
+  const oMin = baseMin * zoomScale;
+  const oMax = baseMax * zoomScale;
+
   const visible = hexbins.filter((h) => h.count >= HEX_MIN_COUNT);
   if (visible.length === 0) {
-    return ["step", ["get", "count"], HEX_COLOR_SCALE[0], 1, HEX_COLOR_SCALE[2]];
+    return ["literal", oMin];
   }
 
   const counts = visible.map((h) => h.count).sort((a, b) => a - b);
-  const quantile = (arr: number[], q: number) =>
-    arr[Math.min(Math.floor(q * arr.length), arr.length - 1)];
+  const lo = counts[0];
+  const hi = counts[counts.length - 1];
 
-  const p20 = quantile(counts, 0.2);
-  const p40 = quantile(counts, 0.4);
-  const p60 = quantile(counts, 0.6);
-  const p80 = quantile(counts, 0.8);
-
-  // If all counts are the same, use a single mid-range color
-  if (p20 === p80) {
-    return ["step", ["get", "count"], HEX_COLOR_SCALE[2], p80 + 1, HEX_COLOR_SCALE[2]];
+  // If all counts identical, use a mid-range opacity
+  if (lo === hi) {
+    return ["literal", (oMin + oMax) / 2];
   }
 
-  // Build step expression with deduplicated thresholds
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const steps: any[] = ["step", ["get", "count"], HEX_COLOR_SCALE[0]];
-  const breakpoints = [p20, p40, p60, p80];
-  let lastThreshold = -Infinity;
+  const quantile = (q: number) =>
+    counts[Math.min(Math.floor(q * counts.length), counts.length - 1)];
 
-  for (let i = 0; i < breakpoints.length; i++) {
-    if (breakpoints[i] > lastThreshold) {
-      steps.push(breakpoints[i], HEX_COLOR_SCALE[i + 1]);
-      lastThreshold = breakpoints[i];
+  const p25 = quantile(0.25);
+  const p50 = quantile(0.50);
+  const p75 = quantile(0.75);
+
+  // Lerp helper: map a quantile position (0-1) to the opacity range
+  const lerp = (t: number) => oMin + t * (oMax - oMin);
+
+  // Build interpolation with deduplicated breakpoints
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const expr: any[] = ["interpolate", ["linear"], ["get", "count"]];
+  const stops: [number, number][] = [
+    [lo, lerp(0)],
+    [p25, lerp(0.25)],
+    [p50, lerp(0.50)],
+    [p75, lerp(0.75)],
+    [hi, lerp(1)],
+  ];
+
+  let lastCount = -Infinity;
+  for (const [count, opacity] of stops) {
+    if (count > lastCount) {
+      expr.push(count, opacity);
+      lastCount = count;
     }
   }
 
-  return steps as maplibregl.ExpressionSpecification;
+  // Need at least 2 stops for interpolate
+  if (expr.length < 7) {
+    return ["literal", (oMin + oMax) / 2];
+  }
+
+  return expr as maplibregl.ExpressionSpecification;
+}
+
+/**
+ * Builds an outline opacity expression that scales with feature count.
+ * Range: 0.1 (low count) to HEX_STROKE_OPACITY (high count).
+ */
+function buildOutlineOpacityExpr(
+  hexbins: HexbinEntry[],
+): maplibregl.ExpressionSpecification {
+  const visible = hexbins.filter((h) => h.count >= HEX_MIN_COUNT);
+  if (visible.length === 0) {
+    return ["literal", 0.1];
+  }
+
+  const counts = visible.map((h) => h.count).sort((a, b) => a - b);
+  const lo = counts[0];
+  const hi = counts[counts.length - 1];
+
+  if (lo === hi) {
+    return ["literal", (0.1 + HEX_STROKE_OPACITY) / 2];
+  }
+
+  return [
+    "interpolate",
+    ["linear"],
+    ["get", "count"],
+    lo, 0.1,
+    hi, HEX_STROKE_OPACITY,
+  ] as maplibregl.ExpressionSpecification;
 }
 
 // ---------------------------------------------------------------------------
@@ -215,14 +269,15 @@ function HexbinLayer({
     });
     sourceAddedRef.current = true;
 
+    // Single fill color; density represented via per-feature opacity
     map.addLayer(
       {
         id: "hexbin-fill",
         type: "fill",
         source: "hexbins",
         paint: {
-          "fill-color": HEX_COLOR_SCALE[2],
-          "fill-opacity": 0.5,
+          "fill-color": hexFillColor(theme),
+          "fill-opacity": 0,
         },
       },
       beforeId,
@@ -244,7 +299,7 @@ function HexbinLayer({
             14, 1,
             18, 1.5,
           ],
-          "line-opacity": HEX_STROKE_OPACITY,
+          "line-opacity": 0.1,
         },
       },
       beforeId,
@@ -262,7 +317,7 @@ function HexbinLayer({
     };
   }, [isLoaded, map, theme]);
 
-  // Update hexbin GeoJSON data + colors when hexbins change
+  // Update hexbin GeoJSON data + opacity expressions when hexbins or zoom change
   useEffect(() => {
     if (!isLoaded || !map || !sourceAddedRef.current) return;
 
@@ -271,16 +326,15 @@ function HexbinLayer({
 
     source.setData(hexbinsToGeoJSON(hexbins));
 
-    const colorSteps = buildHexColorSteps(hexbins);
-    map.setPaintProperty("hexbin-fill", "fill-color", colorSteps);
-  }, [hexbins, isLoaded, map]);
+    // Per-feature fill opacity scaled by zoom envelope
+    const zoomScale = hexFillOpacity(zoom);
+    const fillOpacityExpr = buildHexOpacityExpr(hexbins, zoomScale);
+    map.setPaintProperty("hexbin-fill", "fill-opacity", fillOpacityExpr);
 
-  // Update hex fill opacity based on zoom
-  useEffect(() => {
-    if (!isLoaded || !map) return;
-    if (!map.getLayer("hexbin-fill")) return;
-    map.setPaintProperty("hexbin-fill", "fill-opacity", hexFillOpacity(zoom));
-  }, [zoom, isLoaded, map]);
+    // Per-feature outline opacity (not zoom-scaled, just count-based)
+    const outlineOpacityExpr = buildOutlineOpacityExpr(hexbins);
+    map.setPaintProperty("hexbin-outline", "line-opacity", outlineOpacityExpr);
+  }, [hexbins, zoom, isLoaded, map]);
 
   return null;
 }

@@ -20,13 +20,15 @@
     "17": 9,
     "18": 9
   },
-  "colorScale": [
-    "#fee5d9",
-    "#fcae91",
-    "#fb6a4a",
-    "#de2d26",
-    "#a50f15"
-  ],
+  "hexFillColor": {
+    "light": "#dc2626",
+    "dark": "#ef4444"
+  },
+  "hexFillOpacityRange": [0.08, 0.80],
+  "hexOutlineColor": {
+    "light": "#a50f15",
+    "dark": "#ff6b6b"
+  },
   "minCount": 1,
   "hexFillOpacity": {
     "0": 0.3,
