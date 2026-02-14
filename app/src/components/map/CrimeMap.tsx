@@ -163,31 +163,30 @@ export default function CrimeMap({ filters, hexbins, zoom, onBoundsChange }: Cri
       },
     });
 
-    // -- Layer 2: H3 hexbin fill (zoom 8+) --
+    // -- Layer 2: H3 hexbin fill (all zoom levels) --
     map.addLayer({
       id: "hexbin-fill",
       type: "fill",
       source: "hexbins",
-      minzoom: HEATMAP_MAX_ZOOM,
       paint: {
         "fill-color": HEX_COLOR_SCALE[2],
         "fill-opacity": 0.5,
       },
     });
 
-    // -- Layer 3: H3 hexbin outline (zoom 8+) --
+    // -- Layer 3: H3 hexbin outline (all zoom levels) --
     map.addLayer({
       id: "hexbin-outline",
       type: "line",
       source: "hexbins",
-      minzoom: HEATMAP_MAX_ZOOM,
       paint: {
         "line-color": "#a50f15",
         "line-width": [
           "interpolate",
           ["linear"],
           ["zoom"],
-          HEATMAP_MAX_ZOOM, 0.5,
+          0, 0.3,
+          8, 0.5,
           14, 1,
           18, 1.5,
         ],

@@ -2,10 +2,9 @@
  * React hook for fetching server-side H3 hexbin data.
  *
  * Queries GET /api/hexbins with the current viewport, zoom, and filters.
- * The response is MessagePack-encoded and decoded client-side. Active at
- * any zoom level >= HEATMAP_MAX_ZOOM (8). Hexbins render as a choropleth
- * overlay on top of the heatmap, with individual PMTiles dots showing
- * through at high zoom in sparse areas.
+ * The response is MessagePack-encoded and decoded client-side. Hexbins
+ * are fetched at every zoom level; the server picks the appropriate H3
+ * resolution based on the zoom parameter via config/hexbins.json.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -14,7 +13,6 @@ import type { FilterState, CategoryId } from "../types";
 import { CRIME_CATEGORIES } from "../types";
 import type { BBox } from "../sidebar/types";
 import type { HexbinEntry } from "./types";
-import { HEATMAP_MAX_ZOOM } from "../map-config";
 
 /** Debounce delay for hexbin requests (ms). */
 const DEBOUNCE_MS = 150;
@@ -104,8 +102,7 @@ export function useHexbins(
 
       const gen = ++genRef.current;
 
-      // Only fetch hexbins at zoom 8+
-      if (!bbox || zoom < HEATMAP_MAX_ZOOM) {
+      if (!bbox) {
         setHexbins([]);
         setLoading(false);
         return;
