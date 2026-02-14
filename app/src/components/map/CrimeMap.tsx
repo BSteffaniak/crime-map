@@ -6,7 +6,7 @@ import {
   DEFAULT_CENTER,
   DEFAULT_ZOOM,
   HEATMAP_MAX_ZOOM,
-  CLUSTER_MAX_ZOOM,
+  CLUSTER_MIN_COUNT,
 } from "../../lib/map-config";
 import { severityColor, type FilterState } from "../../lib/types";
 import { buildIncidentFilter } from "../../lib/map-filters/expressions";
@@ -82,13 +82,46 @@ export default function CrimeMap({ filters, clusters, onBoundsChange }: CrimeMap
       },
     });
 
-    // -- Layer 2a: Server-side cluster circles (zoom 8-11) --
+    // -- Layer 2: Individual points from PMTiles (zoom 8+) --
+    // Rendered first so cluster circles draw on top in dense areas.
+    map.addLayer({
+      id: "incidents-points",
+      type: "circle",
+      source: "incidents",
+      "source-layer": "incidents",
+      minzoom: HEATMAP_MAX_ZOOM,
+      paint: {
+        "circle-radius": [
+          "interpolate",
+          ["linear"],
+          ["zoom"],
+          HEATMAP_MAX_ZOOM, 2,
+          12, 3,
+          16, 8,
+        ],
+        "circle-color": [
+          "match",
+          ["get", "severity"],
+          5, severityColor(5),
+          4, severityColor(4),
+          3, severityColor(3),
+          2, severityColor(2),
+          severityColor(1),
+        ],
+        "circle-stroke-width": 0.5,
+        "circle-stroke-color": "#ffffff",
+        "circle-opacity": 0.85,
+      },
+    });
+
+    // -- Layer 3a: Server-side cluster circles (zoom 8+, count >= minClusterCount) --
+    // Rendered on top of individual dots; fully opaque to occlude dots underneath.
     map.addLayer({
       id: "server-cluster-circles",
       type: "circle",
       source: "server-clusters",
       minzoom: HEATMAP_MAX_ZOOM,
-      maxzoom: CLUSTER_MAX_ZOOM,
+      filter: [">=", ["get", "count"], CLUSTER_MIN_COUNT],
       paint: {
         "circle-radius": [
           "step",
@@ -110,17 +143,17 @@ export default function CrimeMap({ filters, clusters, onBoundsChange }: CrimeMap
         ],
         "circle-stroke-width": 1.5,
         "circle-stroke-color": "#ffffff",
-        "circle-opacity": 0.85,
+        "circle-opacity": 1.0,
       },
     });
 
-    // -- Layer 2b: Server-side cluster count labels --
+    // -- Layer 3b: Server-side cluster count labels --
     map.addLayer({
       id: "server-cluster-count",
       type: "symbol",
       source: "server-clusters",
       minzoom: HEATMAP_MAX_ZOOM,
-      maxzoom: CLUSTER_MAX_ZOOM,
+      filter: [">=", ["get", "count"], CLUSTER_MIN_COUNT],
       layout: {
         "text-field": [
           "case",
@@ -141,36 +174,6 @@ export default function CrimeMap({ filters, clusters, onBoundsChange }: CrimeMap
       },
     });
 
-    // -- Layer 3: Individual points from PMTiles (zoom 12+) --
-    map.addLayer({
-      id: "incidents-points",
-      type: "circle",
-      source: "incidents",
-      "source-layer": "incidents",
-      minzoom: CLUSTER_MAX_ZOOM,
-      paint: {
-        "circle-radius": [
-          "interpolate",
-          ["linear"],
-          ["zoom"],
-          CLUSTER_MAX_ZOOM, 3,
-          16, 8,
-        ],
-        "circle-color": [
-          "match",
-          ["get", "severity"],
-          5, severityColor(5),
-          4, severityColor(4),
-          3, severityColor(3),
-          2, severityColor(2),
-          severityColor(1),
-        ],
-        "circle-stroke-width": 0.5,
-        "circle-stroke-color": "#ffffff",
-        "circle-opacity": 0.85,
-      },
-    });
-
     // -- Click handlers --
 
     // Click cluster to zoom in
@@ -180,11 +183,18 @@ export default function CrimeMap({ filters, clusters, onBoundsChange }: CrimeMap
 
       const coords = (feature.geometry as GeoJSON.Point).coordinates as [number, number];
       const curZoom = map.getZoom();
-      map.easeTo({ center: coords, zoom: Math.min(curZoom + 2, CLUSTER_MAX_ZOOM) });
+      map.easeTo({ center: coords, zoom: curZoom + 2 });
     });
 
     // Click individual point for popup (PMTiles layer)
+    // Skip if a cluster circle exists at the same point to avoid double-handling.
     map.on("click", "incidents-points", (e) => {
+      // Check if a cluster covers this click point
+      const clusterFeatures = map.queryRenderedFeatures(e.point, {
+        layers: ["server-cluster-circles"],
+      });
+      if (clusterFeatures.length > 0) return;
+
       const feature = e.features?.[0];
       if (!feature || !feature.properties) return;
 
@@ -291,9 +301,11 @@ export default function CrimeMap({ filters, clusters, onBoundsChange }: CrimeMap
     });
 
     // Compute quantile-based breakpoints for relative color/radius scaling
-    if (clusters.length === 0) return;
+    // Only consider clusters that pass the minClusterCount filter
+    const visibleClusters = clusters.filter((c) => c.count >= CLUSTER_MIN_COUNT);
+    if (visibleClusters.length === 0) return;
 
-    const counts = clusters.map((c) => c.count).sort((a, b) => a - b);
+    const counts = visibleClusters.map((c) => c.count).sort((a, b) => a - b);
     const quantile = (arr: number[], q: number) =>
       arr[Math.min(Math.floor(q * arr.length), arr.length - 1)];
 

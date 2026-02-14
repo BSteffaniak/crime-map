@@ -2,7 +2,9 @@
  * React hook for fetching server-side cluster data.
  *
  * Queries GET /api/clusters with the current viewport, zoom, and filters.
- * Only active at zoom levels 8-11 (the cluster visualization range).
+ * Active at any zoom level >= HEATMAP_MAX_ZOOM (8). Clusters coexist with
+ * individual PMTiles dots — clusters render on top in dense areas, dots
+ * show through in sparse areas.
  * Uses the same debounce/abort pattern as useSidebar.
  */
 
@@ -11,7 +13,7 @@ import type { FilterState, CategoryId } from "../types";
 import { CRIME_CATEGORIES } from "../types";
 import type { BBox } from "../sidebar/types";
 import type { ClusterEntry } from "./types";
-import { HEATMAP_MAX_ZOOM, CLUSTER_MAX_ZOOM, clusterTargetK } from "../map-config";
+import { HEATMAP_MAX_ZOOM, clusterTargetK } from "../map-config";
 
 /** Debounce delay for cluster requests (ms). */
 const DEBOUNCE_MS = 150;
@@ -77,8 +79,8 @@ interface UseClustersResult {
 /**
  * Fetches server-side cluster data for the current viewport.
  *
- * Only fetches when zoom is within the cluster range (8-11).
- * Returns an empty array outside that range.
+ * Active at any zoom >= HEATMAP_MAX_ZOOM. Returns an empty array below
+ * that threshold (heatmap handles those zoom levels).
  */
 export function useClusters(
   bbox: BBox | null,
@@ -102,8 +104,8 @@ export function useClusters(
 
       const gen = ++genRef.current;
 
-      // Only fetch clusters at zoom 8-11
-      if (!bbox || zoom < HEATMAP_MAX_ZOOM || zoom >= CLUSTER_MAX_ZOOM) {
+      // Only fetch clusters at zoom 8+
+      if (!bbox || zoom < HEATMAP_MAX_ZOOM) {
         setClusters([]);
         setLoading(false);
         return;

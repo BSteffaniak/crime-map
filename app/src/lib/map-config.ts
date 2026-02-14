@@ -32,11 +32,13 @@ export const MAP_STYLE: StyleSpecification = {
 /**
  * Zoom thresholds for switching between visualization modes:
  * - 0-7: heatmap
- * - 8-11: clusters (server-side DuckDB aggregation)
- * - 12+: individual points
+ * - 8+: clusters (server-side DuckDB k-means) + individual points (PMTiles)
+ *
+ * Clusters and individual dots coexist at zoom 8+. Clusters render on top
+ * and are only shown when count >= minClusterCount. Individual dots show
+ * through in sparse areas where no cluster covers them.
  */
 export const HEATMAP_MAX_ZOOM = 8;
-export const CLUSTER_MAX_ZOOM = 12;
 
 /**
  * Computes the target cluster count for a given zoom level using the
@@ -51,3 +53,10 @@ export function clusterTargetK(zoom: number): number {
     (clusterConfig.zoomMultipliers as Record<string, number>)[z] ?? 1.5;
   return Math.round(clusterConfig.density * multiplier);
 }
+
+/**
+ * Minimum incident count for a cluster to be rendered. Clusters below
+ * this threshold are not shown — individual PMTiles dots handle sparse
+ * areas instead.
+ */
+export const CLUSTER_MIN_COUNT: number = clusterConfig.minClusterCount;
