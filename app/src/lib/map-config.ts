@@ -1,29 +1,100 @@
 /** MapLibre configuration and layer definitions. */
 
+import { layers, namedFlavor } from "@protomaps/basemaps";
+import type { StyleSpecification } from "maplibre-gl";
 import hexbinConfig from "@config/hexbins.json";
 
 /** Default map center: geographic center of the contiguous US. */
 export const DEFAULT_CENTER: [number, number] = [-98.5795, 39.8283];
 export const DEFAULT_ZOOM = 4;
 
-/** CARTO vector basemap style URLs (free, no API key). */
-export const DARK_STYLE =
-  "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
-export const LIGHT_STYLE =
-  "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json";
+/**
+ * All available map themes. Each maps to a Protomaps flavor and a base
+ * UI theme ("light" or "dark") that controls Tailwind classes and
+ * overlay styling.
+ */
+export const MAP_THEMES = ["light", "dark", "white", "grayscale", "black"] as const;
+export type MapTheme = (typeof MAP_THEMES)[number];
+
+/** Maps each map theme to the base UI theme used for Tailwind/overlay colors. */
+export function baseUiTheme(mapTheme: MapTheme): "light" | "dark" {
+  switch (mapTheme) {
+    case "light":
+    case "white":
+    case "grayscale":
+      return "light";
+    case "dark":
+    case "black":
+      return "dark";
+  }
+}
+
+/** Default map theme for each UI base theme. */
+export function defaultMapTheme(uiTheme: "light" | "dark"): MapTheme {
+  return uiTheme;
+}
+
+// ---------------------------------------------------------------------------
+// Protomaps style generation
+// ---------------------------------------------------------------------------
+
+/** Builds the Protomaps CDN URL using yesterday's date (guaranteed available). */
+function protomapsTileUrl(): string {
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `pmtiles://https://build.protomaps.com/${yyyy}${mm}${dd}.pmtiles`;
+}
+
+const PMTILES_URL = protomapsTileUrl();
+const GLYPHS_URL =
+  "https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf";
+const SPRITE_BASE =
+  "https://protomaps.github.io/basemaps-assets/sprites/v4";
+
+const SOURCE_NAME = "protomaps";
 
 /**
- * The first label layer ID AFTER roads/bridges/buildings in each CARTO style.
- * Hexbin and heatmap layers are inserted before this layer so they render
- * below map labels but above roads.
- *
- * Positron places `waterway_label` before roads, so we use `watername_ocean`.
- * Dark Matter places `waterway_label` after roads, so it works directly.
+ * Builds a full MapLibre `StyleSpecification` for a Protomaps theme with
+ * the "data sandwich" pattern: base layers, then a gap for data layers
+ * (inserted at runtime via `beforeId`), then label layers on top.
  */
-export const LABEL_BEFORE_ID: Record<"light" | "dark", string> = {
-  dark: "waterway_label",
-  light: "watername_ocean",
-};
+export function buildProtomapsStyle(theme: MapTheme): StyleSpecification {
+  const flavor = namedFlavor(theme);
+
+  // Base geometry layers (no labels)
+  const baseLayers = layers(SOURCE_NAME, flavor);
+
+  // Label layers only
+  const labelLayers = layers(SOURCE_NAME, flavor, {
+    lang: "en",
+    labelsOnly: true,
+  });
+
+  return {
+    version: 8,
+    glyphs: GLYPHS_URL,
+    sprite: `${SPRITE_BASE}/${theme}`,
+    sources: {
+      [SOURCE_NAME]: {
+        type: "vector",
+        url: PMTILES_URL,
+        attribution:
+          '<a href="https://openstreetmap.org/copyright">OpenStreetMap</a> | <a href="https://protomaps.com">Protomaps</a>',
+      },
+    },
+    layers: [...baseLayers, ...labelLayers],
+  } as StyleSpecification;
+}
+
+/**
+ * The first label layer ID in Protomaps styles. Data layers (hexbins,
+ * heatmap) are inserted before this layer so they render below map
+ * labels but above roads — the "data sandwich" pattern.
+ */
+export const LABEL_BEFORE_ID = "address_label";
 
 /**
  * Zoom thresholds for switching between visualization modes:
@@ -51,8 +122,8 @@ export function hexbinResolution(zoom: number): number {
 export const HEX_MIN_COUNT: number = hexbinConfig.minCount;
 
 /**
- * Single hex fill color per theme. Density is represented via opacity,
- * not color variation.
+ * Single hex fill color per base UI theme. Density is represented via
+ * opacity, not color variation.
  */
 export function hexFillColor(theme: "light" | "dark"): string {
   return (hexbinConfig.hexFillColor as Record<string, string>)[theme];

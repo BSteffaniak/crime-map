@@ -1,11 +1,9 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import maplibregl from "maplibre-gl";
 import { Map, useMap, MapControls } from "@/components/ui/map";
 import {
   DEFAULT_CENTER,
   DEFAULT_ZOOM,
-  DARK_STYLE,
-  LIGHT_STYLE,
   LABEL_BEFORE_ID,
   HEATMAP_MAX_ZOOM,
   POINTS_MIN_ZOOM,
@@ -16,6 +14,9 @@ import {
   hexFillOpacity,
   hexOutlineColor,
   pointStrokeColor,
+  buildProtomapsStyle,
+  baseUiTheme,
+  type MapTheme,
 } from "@/lib/map-config";
 import { severityColor, type FilterState } from "@/lib/types";
 import { buildIncidentFilter } from "@/lib/map-filters/expressions";
@@ -25,7 +26,7 @@ interface CrimeMapProps {
   filters: FilterState;
   hexbins: HexbinEntry[];
   zoom: number;
-  theme: "light" | "dark";
+  mapTheme: MapTheme;
   onBoundsChange?: (bounds: maplibregl.LngLatBounds, zoom: number) => void;
 }
 
@@ -152,17 +153,15 @@ function buildOutlineOpacityExpr(
 /** Heatmap layer from PMTiles vector source. */
 function HeatmapLayer({
   filters,
-  theme,
+  uiTheme,
 }: {
   filters: FilterState;
-  theme: "light" | "dark";
+  uiTheme: "light" | "dark";
 }) {
   const { map, isLoaded } = useMap();
 
   useEffect(() => {
     if (!isLoaded || !map) return;
-
-    const beforeId = LABEL_BEFORE_ID[theme];
 
     if (!map.getSource("incidents")) {
       map.addSource("incidents", {
@@ -228,7 +227,7 @@ function HeatmapLayer({
           ],
         },
       },
-      beforeId,
+      LABEL_BEFORE_ID,
     );
 
     // Apply any active filters
@@ -242,7 +241,7 @@ function HeatmapLayer({
         // Style may have been swapped
       }
     };
-  }, [isLoaded, map, theme, filters]);
+  }, [isLoaded, map, uiTheme, filters]);
 
   return null;
 }
@@ -251,11 +250,11 @@ function HeatmapLayer({
 function HexbinLayer({
   hexbins,
   zoom,
-  theme,
+  uiTheme,
 }: {
   hexbins: HexbinEntry[];
   zoom: number;
-  theme: "light" | "dark";
+  uiTheme: "light" | "dark";
 }) {
   const { map, isLoaded } = useMap();
   const sourceAddedRef = useRef(false);
@@ -263,8 +262,6 @@ function HexbinLayer({
   // Add source + layers when map style is loaded
   useEffect(() => {
     if (!isLoaded || !map) return;
-
-    const beforeId = LABEL_BEFORE_ID[theme];
 
     map.addSource("hexbins", {
       type: "geojson",
@@ -279,11 +276,11 @@ function HexbinLayer({
         type: "fill",
         source: "hexbins",
         paint: {
-          "fill-color": hexFillColor(theme),
+          "fill-color": hexFillColor(uiTheme),
           "fill-opacity": 0,
         },
       },
-      beforeId,
+      LABEL_BEFORE_ID,
     );
 
     map.addLayer(
@@ -292,7 +289,7 @@ function HexbinLayer({
         type: "line",
         source: "hexbins",
         paint: {
-          "line-color": hexOutlineColor(theme),
+          "line-color": hexOutlineColor(uiTheme),
           "line-width": [
             "interpolate",
             ["linear"],
@@ -305,7 +302,7 @@ function HexbinLayer({
           "line-opacity": 0.1,
         },
       },
-      beforeId,
+      LABEL_BEFORE_ID,
     );
 
     return () => {
@@ -318,7 +315,7 @@ function HexbinLayer({
       }
       sourceAddedRef.current = false;
     };
-  }, [isLoaded, map, theme]);
+  }, [isLoaded, map, uiTheme]);
 
   // Update hexbin GeoJSON data + opacity expressions when hexbins or zoom change
   useEffect(() => {
@@ -345,10 +342,10 @@ function HexbinLayer({
 /** Individual incident points from PMTiles (appears at high zoom). */
 function IncidentPointsLayer({
   filters,
-  theme,
+  uiTheme,
 }: {
   filters: FilterState;
-  theme: "light" | "dark";
+  uiTheme: "light" | "dark";
 }) {
   const { map, isLoaded } = useMap();
 
@@ -389,7 +386,7 @@ function IncidentPointsLayer({
           severityColor(1),
         ],
         "circle-stroke-width": 0.5,
-        "circle-stroke-color": pointStrokeColor(theme),
+        "circle-stroke-color": pointStrokeColor(uiTheme),
         "circle-opacity": [
           "interpolate",
           ["linear"],
@@ -411,7 +408,7 @@ function IncidentPointsLayer({
         // Style may have been swapped
       }
     };
-  }, [isLoaded, map, theme, filters]);
+  }, [isLoaded, map, uiTheme, filters]);
 
   return null;
 }
@@ -583,7 +580,12 @@ function BoundsTracker({
 // Main CrimeMap component
 // ---------------------------------------------------------------------------
 
-export default function CrimeMap({ filters, hexbins, zoom, theme, onBoundsChange }: CrimeMapProps) {
+export default function CrimeMap({ filters, hexbins, zoom, mapTheme, onBoundsChange }: CrimeMapProps) {
+  const uiTheme = baseUiTheme(mapTheme);
+  // Memoize the style so the Map component gets a stable reference per theme
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const style = useMemo(() => buildProtomapsStyle(mapTheme), [mapTheme]);
+
   const handleBoundsChange = useCallback(
     (bounds: maplibregl.LngLatBounds, z: number) => {
       onBoundsChange?.(bounds, z);
@@ -593,7 +595,7 @@ export default function CrimeMap({ filters, hexbins, zoom, theme, onBoundsChange
 
   return (
     <Map
-      styles={{ light: LIGHT_STYLE, dark: DARK_STYLE }}
+      style={style}
       center={DEFAULT_CENTER}
       zoom={DEFAULT_ZOOM}
       className="h-full w-full"
@@ -604,9 +606,9 @@ export default function CrimeMap({ filters, hexbins, zoom, theme, onBoundsChange
         showLocate
         showCompass
       />
-      <HeatmapLayer filters={filters} theme={theme} />
-      <HexbinLayer hexbins={hexbins} zoom={zoom} theme={theme} />
-      <IncidentPointsLayer filters={filters} theme={theme} />
+      <HeatmapLayer filters={filters} uiTheme={uiTheme} />
+      <HexbinLayer hexbins={hexbins} zoom={zoom} uiTheme={uiTheme} />
+      <IncidentPointsLayer filters={filters} uiTheme={uiTheme} />
       <MapInteractions />
       <BoundsTracker onBoundsChange={handleBoundsChange} />
     </Map>

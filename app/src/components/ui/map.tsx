@@ -20,60 +20,8 @@ import { X, Minus, Plus, Locate, Maximize, Loader2 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
-// Check document class for theme (works with next-themes, etc.)
-function getDocumentTheme(): Theme | null {
-  if (typeof document === "undefined") return null;
-  if (document.documentElement.classList.contains("dark")) return "dark";
-  if (document.documentElement.classList.contains("light")) return "light";
-  return null;
-}
-
-// Get system preference
-function getSystemTheme(): Theme {
-  if (typeof window === "undefined") return "light";
-  return window.matchMedia("(prefers-color-scheme: dark)").matches
-    ? "dark"
-    : "light";
-}
-
-function useResolvedTheme(themeProp?: "light" | "dark"): "light" | "dark" {
-  const [detectedTheme, setDetectedTheme] = useState<"light" | "dark">(
-    () => getDocumentTheme() ?? getSystemTheme()
-  );
-
-  useEffect(() => {
-    if (themeProp) return; // Skip detection if theme is provided via prop
-
-    // Watch for document class changes (e.g., next-themes toggling dark class)
-    const observer = new MutationObserver(() => {
-      const docTheme = getDocumentTheme();
-      if (docTheme) {
-        setDetectedTheme(docTheme);
-      }
-    });
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["class"],
-    });
-
-    // Also watch for system preference changes
-    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
-    const handleSystemChange = (e: MediaQueryListEvent) => {
-      // Only use system preference if no document class is set
-      if (!getDocumentTheme()) {
-        setDetectedTheme(e.matches ? "dark" : "light");
-      }
-    };
-    mediaQuery.addEventListener("change", handleSystemChange);
-
-    return () => {
-      observer.disconnect();
-      mediaQuery.removeEventListener("change", handleSystemChange);
-    };
-  }, [themeProp]);
-
-  return themeProp ?? detectedTheme;
-}
+// Theme detection removed — the parent component is responsible for
+// choosing the map style and passing it directly via the `style` prop.
 
 type MapContextValue = {
   map: MapLibreGL.Map | null;
@@ -100,14 +48,7 @@ function useMap() {
   return context;
 }
 
-const defaultStyles = {
-  dark: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
-  light: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
-};
-
 type MapStyleOption = string | MapLibreGL.StyleSpecification;
-
-type Theme = "light" | "dark";
 
 /** Map viewport state */
 type MapViewport = {
@@ -126,15 +67,11 @@ type MapProps = {
   /** Additional CSS classes for the map container */
   className?: string;
   /**
-   * Theme for the map. If not provided, automatically detects system preference.
-   * Pass your theme value here.
+   * The map style to use. Can be a URL string or a full `StyleSpecification`
+   * object (e.g. from Protomaps `buildProtomapsStyle()`). When this prop
+   * changes, the map style is swapped automatically.
    */
-  theme?: Theme;
-  /** Custom map styles for light and dark themes. Overrides the default Carto styles. */
-  styles?: {
-    light?: MapStyleOption;
-    dark?: MapStyleOption;
-  };
+  style: MapStyleOption;
   /** Map projection type. Use `{ type: "globe" }` for 3D globe view. */
   projection?: MapLibreGL.ProjectionSpecification;
   /**
@@ -166,8 +103,7 @@ const Map = forwardRef<MapRef, MapProps>(function Map(
   {
     children,
     className,
-    theme: themeProp,
-    styles,
+    style: styleProp,
     projection,
     viewport,
     onViewportChange,
@@ -182,20 +118,11 @@ const Map = forwardRef<MapRef, MapProps>(function Map(
   const currentStyleRef = useRef<MapStyleOption | null>(null);
   const styleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const internalUpdateRef = useRef(false);
-  const resolvedTheme = useResolvedTheme(themeProp);
 
   const isControlled = viewport !== undefined && onViewportChange !== undefined;
 
   const onViewportChangeRef = useRef(onViewportChange);
   onViewportChangeRef.current = onViewportChange;
-
-  const mapStyles = useMemo(
-    () => ({
-      dark: styles?.dark ?? defaultStyles.dark,
-      light: styles?.light ?? defaultStyles.light,
-    }),
-    [styles]
-  );
 
   // Expose the map instance to the parent component
   useImperativeHandle(ref, () => mapInstance as MapLibreGL.Map, [mapInstance]);
@@ -211,13 +138,11 @@ const Map = forwardRef<MapRef, MapProps>(function Map(
   useEffect(() => {
     if (!containerRef.current) return;
 
-    const initialStyle =
-      resolvedTheme === "dark" ? mapStyles.dark : mapStyles.light;
-    currentStyleRef.current = initialStyle;
+    currentStyleRef.current = styleProp;
 
     const map = new MapLibreGL.Map({
       container: containerRef.current,
-      style: initialStyle,
+      style: styleProp,
       renderWorldCopies: false,
       attributionControl: {
         compact: true,
@@ -292,21 +217,18 @@ const Map = forwardRef<MapRef, MapProps>(function Map(
     internalUpdateRef.current = false;
   }, [mapInstance, isControlled, viewport]);
 
-  // Handle style change
+  // Handle style change when parent passes a new style prop
   useEffect(() => {
-    if (!mapInstance || !resolvedTheme) return;
+    if (!mapInstance) return;
 
-    const newStyle =
-      resolvedTheme === "dark" ? mapStyles.dark : mapStyles.light;
-
-    if (currentStyleRef.current === newStyle) return;
+    if (currentStyleRef.current === styleProp) return;
 
     clearStyleTimeout();
-    currentStyleRef.current = newStyle;
+    currentStyleRef.current = styleProp;
     setIsStyleLoaded(false);
 
-    mapInstance.setStyle(newStyle, { diff: true });
-  }, [mapInstance, resolvedTheme, mapStyles, clearStyleTimeout]);
+    mapInstance.setStyle(styleProp, { diff: true });
+  }, [mapInstance, styleProp, clearStyleTimeout]);
 
   const contextValue = useMemo(
     () => ({

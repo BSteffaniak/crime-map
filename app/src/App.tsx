@@ -16,7 +16,7 @@ export default function App() {
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("filters");
   const [bbox, setBbox] = useState<BBox | null>(null);
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
-  const { theme, toggleTheme, isDark } = useTheme();
+  const { mapTheme, cycleMapTheme } = useTheme();
 
   const {
     filters,
@@ -110,8 +110,8 @@ export default function App() {
 
       {/* Map */}
       <div className="relative flex-1">
-        <CrimeMap filters={filters} hexbins={hexbins} zoom={zoom} theme={theme} onBoundsChange={handleBoundsChange} />
-        <ThemeToggle isDark={isDark} onToggle={toggleTheme} />
+        <CrimeMap filters={filters} hexbins={hexbins} zoom={zoom} mapTheme={mapTheme} onBoundsChange={handleBoundsChange} />
+        <ThemeToggle mapTheme={mapTheme} onCycle={cycleMapTheme} />
       </div>
     </div>
   );
