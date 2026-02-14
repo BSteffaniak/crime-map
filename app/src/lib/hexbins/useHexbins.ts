@@ -23,6 +23,31 @@ import type { HexbinEntry } from "./types";
 import { VIEWPORT_DEBOUNCE_MS, hexbinResolution } from "../map-config";
 
 /**
+ * Expands a bounding box by a zoom-dependent buffer so hexbins beyond the
+ * visible viewport edge are pre-fetched. This prevents "pop in" at the
+ * edges when panning, especially at higher zoom levels where individual
+ * hexbins are large and visually prominent.
+ *
+ * | Zoom   | Factor (per side) | Total coverage |
+ * |--------|-------------------|----------------|
+ * | 0-7    | 0.10              | ~1.2x × 1.2x  |
+ * | 8-11   | 0.20              | ~1.4x × 1.4x  |
+ * | 12+    | 0.25              | ~1.5x × 1.5x  |
+ */
+function expandBbox(bbox: BBox, zoom: number): BBox {
+  const factor = zoom >= 12 ? 0.25 : zoom >= 8 ? 0.2 : 0.1;
+  const [west, south, east, north] = bbox;
+  const dLng = (east - west) * factor;
+  const dLat = (north - south) * factor;
+  return [
+    Math.max(west - dLng, -180),
+    Math.max(south - dLat, -90),
+    Math.min(east + dLng, 180),
+    Math.min(north + dLat, 90),
+  ];
+}
+
+/**
  * Builds the query string for the hexbins API.
  */
 function buildQueryString(
@@ -135,7 +160,7 @@ export function useHexbins(
       abortRef.current = controller;
       setLoading(true);
 
-      const qs = buildQueryString(bbox, zoom, filters);
+      const qs = buildQueryString(expandBbox(bbox, zoom), zoom, filters);
 
       fetch(`/api/hexbins?${qs}`, { signal: controller.signal })
         .then((res) => {
