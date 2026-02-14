@@ -2,13 +2,12 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
 #![allow(clippy::multiple_crate_versions, clippy::cargo_common_metadata)]
 
-//! Library for generating `PMTiles`, cluster tiles, sidebar `SQLite`, and
-//! count `DuckDB` databases from `PostGIS` crime incident data.
+//! Library for generating `PMTiles`, sidebar `SQLite`, and count `DuckDB`
+//! databases from `PostGIS` crime incident data.
 //!
 //! Exports crime incident data as `GeoJSONSeq`, then runs tippecanoe to
-//! produce `PMTiles` (heatmap/points and clustered tiles). A `SQLite`
-//! database with R-tree spatial indexing is generated for server-side
-//! sidebar queries.
+//! produce `PMTiles` (heatmap/points). A `SQLite` database with R-tree
+//! spatial indexing is generated for server-side sidebar queries.
 //!
 //! Supports checksum-based caching: a manifest file tracks per-source
 //! fingerprints so unchanged data is not re-exported. Each output is
@@ -43,9 +42,6 @@ const MANIFEST_VERSION: u32 = 1;
 
 /// Output name constant for the incidents `PMTiles` file.
 pub const OUTPUT_INCIDENTS_PMTILES: &str = "incidents_pmtiles";
-
-/// Output name constant for the clusters `PMTiles` file.
-pub const OUTPUT_CLUSTERS_PMTILES: &str = "clusters_pmtiles";
 
 /// Output name constant for the sidebar `SQLite` database.
 pub const OUTPUT_INCIDENTS_DB: &str = "incidents_db";
@@ -201,13 +197,6 @@ pub async fn run_with_cache(
         progress.set_position(0);
         generate_pmtiles(db, args, source_ids, dir, &progress).await?;
         record_output(manifest, OUTPUT_INCIDENTS_PMTILES);
-        save_manifest(dir, manifest)?;
-    }
-
-    if needs.get(OUTPUT_CLUSTERS_PMTILES) == Some(&true) {
-        progress.set_message("Generating cluster tiles...".to_string());
-        generate_cluster_tiles(db, args, source_ids, dir, &progress).await?;
-        record_output(manifest, OUTPUT_CLUSTERS_PMTILES);
         save_manifest(dir, manifest)?;
     }
 
@@ -411,7 +400,6 @@ fn record_output(manifest: &mut Manifest, output_name: &str) {
 fn output_file_path(dir: &Path, output_name: &str) -> PathBuf {
     match output_name {
         OUTPUT_INCIDENTS_PMTILES => dir.join("incidents.pmtiles"),
-        OUTPUT_CLUSTERS_PMTILES => dir.join("clusters.pmtiles"),
         OUTPUT_INCIDENTS_DB => dir.join("incidents.db"),
         OUTPUT_COUNT_DB => dir.join("counts.duckdb"),
         _ => dir.join(output_name),
@@ -589,62 +577,6 @@ async fn generate_pmtiles(
     }
 
     log::info!("PMTiles generated: {}", output_path.display());
-    Ok(())
-}
-
-/// Generates clustered `PMTiles` for mid-zoom levels (8-11) via tippecanoe.
-///
-/// Uses tippecanoe's built-in point clustering (`--cluster-distance=60`) to
-/// aggregate nearby points. Each cluster feature receives automatic
-/// `point_count` and `clustered` properties. The `severity` attribute is
-/// summed across merged points via `--accumulate-attribute`.
-///
-/// The output is a static file suitable for CDN caching.
-///
-/// # Errors
-///
-/// Returns an error if the `GeoJSONSeq` export or tippecanoe fails.
-async fn generate_cluster_tiles(
-    db: &dyn Database,
-    args: &GenerateArgs,
-    source_ids: &[i32],
-    dir: &Path,
-    progress: &Arc<dyn ProgressCallback>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let geojsonseq_path = dir.join("incidents.geojsonseq");
-
-    // Ensure GeoJSONSeq exists
-    if !geojsonseq_path.exists() {
-        log::info!("GeoJSONSeq not found, exporting...");
-        export_geojsonseq(db, &geojsonseq_path, args.limit, source_ids, progress).await?;
-    }
-
-    log::info!("Running tippecanoe to generate cluster tiles...");
-
-    let output_path = dir.join("clusters.pmtiles");
-
-    let status = Command::new("tippecanoe")
-        .args([
-            "-o",
-            &output_path.to_string_lossy(),
-            "--force",
-            "--no-feature-limit",
-            "--no-tile-size-limit",
-            "--minimum-zoom=8",
-            "--maximum-zoom=11",
-            "-r1",
-            "--cluster-distance=60",
-            "--accumulate-attribute=severity:sum",
-            "--layer=clusters",
-            &geojsonseq_path.to_string_lossy(),
-        ])
-        .status()?;
-
-    if !status.success() {
-        return Err("tippecanoe cluster generation failed".into());
-    }
-
-    log::info!("Cluster PMTiles generated: {}", output_path.display());
     Ok(())
 }
 
@@ -977,7 +909,9 @@ async fn generate_count_db(
                   WHEN arrest_made = 0 THEN 0
                   ELSE 2 END AS arrest,
              SUBSTRING(occurred_at, 1, 10) AS day,
-             COUNT(*) AS cnt
+             COUNT(*) AS cnt,
+             SUM(longitude) AS sum_lng,
+             SUM(latitude) AS sum_lat
          FROM incidents
          GROUP BY ALL",
     )?;

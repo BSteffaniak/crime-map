@@ -167,7 +167,6 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
                 "PMTiles (heatmap + points)",
                 crime_map_generate::OUTPUT_INCIDENTS_PMTILES,
             ),
-            ("Cluster tiles", crime_map_generate::OUTPUT_CLUSTERS_PMTILES),
             ("Sidebar SQLite", crime_map_generate::OUTPUT_INCIDENTS_DB),
             ("Count DuckDB", crime_map_generate::OUTPUT_COUNT_DB),
         ];

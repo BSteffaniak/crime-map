@@ -136,6 +136,7 @@ pub async fn run_server() -> std::io::Result<()> {
                     .route("/incidents", web::get().to(handlers::incidents))
                     .route("/sources", web::get().to(handlers::sources))
                     .route("/sidebar", web::get().to(handlers::sidebar))
+                    .route("/clusters", web::get().to(handlers::clusters))
                     .route("/ai/ask", web::post().to(handlers::ai_ask)),
             )
             // Serve generated tile data

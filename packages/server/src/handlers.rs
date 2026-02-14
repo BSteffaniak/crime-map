@@ -5,8 +5,8 @@ use crime_map_crime_models::{CrimeCategory, CrimeSubcategory};
 use crime_map_database::queries;
 use crime_map_database_models::{BoundingBox, IncidentQuery};
 use crime_map_server_models::{
-    ApiCategoryNode, ApiHealth, ApiIncident, ApiSubcategoryNode, IncidentQueryParams,
-    SidebarIncident, SidebarQueryParams, SidebarResponse,
+    ApiCategoryNode, ApiHealth, ApiIncident, ApiSubcategoryNode, ClusterEntry, ClusterQueryParams,
+    CountFilterParams, IncidentQueryParams, SidebarIncident, SidebarQueryParams, SidebarResponse,
 };
 use moosicbox_json_utils::database::ToValue as _;
 use switchy_database::{DatabaseValue, Row};
@@ -175,7 +175,8 @@ pub async fn sidebar(
         let conn = count_db
             .lock()
             .map_err(|e| format!("Failed to lock DuckDB connection: {e}"))?;
-        execute_duckdb_count(&conn, &count_params_owned, bbox_owned.as_ref())
+        let filter_params = CountFilterParams::from(&count_params_owned);
+        execute_duckdb_count(&conn, &filter_params, bbox_owned.as_ref())
     })
     .await;
 
@@ -363,7 +364,7 @@ fn add_features_in_filter(
 /// the pre-aggregated dimensions.
 fn execute_duckdb_count(
     db_conn: &duckdb::Connection,
-    params: &SidebarQueryParams,
+    params: &CountFilterParams,
     bbox: Option<&BoundingBox>,
 ) -> Result<u64, String> {
     let mut conditions: Vec<String> = Vec::new();
@@ -383,16 +384,8 @@ fn execute_duckdb_count(
         .prepare(&sql)
         .map_err(|e| format!("DuckDB prepare failed: {e}"))?;
 
-    // Build a Vec of boxed ToSql values, then collect references for query
-    let boxed_params: Vec<Box<dyn duckdb::ToSql>> = bind_values
-        .into_iter()
-        .map(|v| -> Box<dyn duckdb::ToSql> {
-            match v {
-                DuckValue::Int(i) => Box::new(i),
-                DuckValue::Str(s) => Box::new(s),
-            }
-        })
-        .collect();
+    let boxed_params: Vec<Box<dyn duckdb::ToSql>> =
+        bind_values.into_iter().map(duck_value_to_boxed).collect();
     let param_refs: Vec<&dyn duckdb::ToSql> = boxed_params.iter().map(AsRef::as_ref).collect();
 
     let total: u64 = stmt
@@ -405,9 +398,143 @@ fn execute_duckdb_count(
     Ok(total)
 }
 
-/// Builds the WHERE conditions and bind values for the `DuckDB` count query.
+/// Grid divisor for each zoom level at zoom 8-11.
+///
+/// The `count_summary` table uses `cell_lng`/`cell_lat` at `* 100`
+/// resolution (0.01-degree cells). The grid divisor groups these cells
+/// into coarser clusters appropriate for the zoom level.
+const CLUSTER_GRID_DIVISORS: [(u8, i32); 4] = [
+    (8, 25), // ~0.25 degree grid (~21 km)
+    (9, 15), // ~0.15 degree grid (~13 km)
+    (10, 8), // ~0.08 degree grid (~7 km)
+    (11, 4), // ~0.04 degree grid (~3.4 km)
+];
+
+/// Returns the grid divisor for the given zoom level.
+fn cluster_grid_divisor(zoom: u8) -> i32 {
+    CLUSTER_GRID_DIVISORS
+        .iter()
+        .find(|(z, _)| *z == zoom)
+        .map_or(20, |(_, d)| *d)
+}
+
+/// `GET /api/clusters`
+///
+/// Returns grid-aggregated cluster data with weighted centroids from the
+/// `DuckDB` `count_summary` table. Supports all the same filters as the
+/// sidebar endpoint. The grid resolution adapts to the zoom level.
+pub async fn clusters(
+    state: web::Data<AppState>,
+    params: web::Query<ClusterQueryParams>,
+) -> HttpResponse {
+    let bbox = params.bbox.as_deref().and_then(parse_bbox);
+    let zoom = params.zoom.unwrap_or(9);
+
+    let count_db = state.count_db.clone();
+    let params_owned = params.into_inner();
+    let bbox_owned = bbox;
+
+    let result = web::block(move || {
+        let conn = count_db
+            .lock()
+            .map_err(|e| format!("Failed to lock DuckDB connection: {e}"))?;
+        let filter_params = CountFilterParams::from(&params_owned);
+        execute_duckdb_clusters(&conn, &filter_params, bbox_owned.as_ref(), zoom)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(entries)) => HttpResponse::Ok().json(entries),
+        Ok(Err(e)) => {
+            log::error!("Clusters query failed: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to query cluster data"
+            }))
+        }
+        Err(e) => {
+            log::error!("Clusters query blocking error: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to query cluster data"
+            }))
+        }
+    }
+}
+
+/// Executes the cluster aggregation query against the `DuckDB`
+/// `count_summary` table.
+///
+/// Groups cells into a coarser grid based on the zoom level and computes
+/// weighted centroids using `sum_lng` / `sum_lat` columns.
+fn execute_duckdb_clusters(
+    db_conn: &duckdb::Connection,
+    params: &CountFilterParams,
+    bbox: Option<&BoundingBox>,
+    zoom: u8,
+) -> Result<Vec<ClusterEntry>, String> {
+    let mut conditions: Vec<String> = Vec::new();
+    let mut bind_values: Vec<DuckValue> = Vec::new();
+
+    build_count_conditions(params, bbox, &mut conditions, &mut bind_values);
+
+    let grid_n = cluster_grid_divisor(zoom);
+
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    };
+
+    let sql = format!(
+        "SELECT
+             FLOOR(cell_lng / {grid_n}) AS grid_lng,
+             FLOOR(cell_lat / {grid_n}) AS grid_lat,
+             SUM(cnt) AS count,
+             SUM(sum_lng) AS total_lng,
+             SUM(sum_lat) AS total_lat
+         FROM count_summary{where_clause}
+         GROUP BY 1, 2
+         HAVING SUM(cnt) > 0"
+    );
+
+    let mut stmt = db_conn
+        .prepare(&sql)
+        .map_err(|e| format!("DuckDB prepare failed: {e}"))?;
+
+    let boxed_params: Vec<Box<dyn duckdb::ToSql>> =
+        bind_values.into_iter().map(duck_value_to_boxed).collect();
+    let param_refs: Vec<&dyn duckdb::ToSql> = boxed_params.iter().map(AsRef::as_ref).collect();
+
+    let mut rows = stmt
+        .query(param_refs.as_slice())
+        .map_err(|e| format!("DuckDB query failed: {e}"))?;
+
+    let mut entries = Vec::new();
+    while let Some(row) = rows.next().map_err(|e| format!("DuckDB row error: {e}"))? {
+        let count: i64 = row.get(2).map_err(|e| format!("DuckDB get count: {e}"))?;
+        let total_lng: f64 = row
+            .get(3)
+            .map_err(|e| format!("DuckDB get total_lng: {e}"))?;
+        let total_lat: f64 = row
+            .get(4)
+            .map_err(|e| format!("DuckDB get total_lat: {e}"))?;
+
+        #[allow(clippy::cast_precision_loss)]
+        let count_f = count as f64;
+
+        entries.push(ClusterEntry {
+            lng: total_lng / count_f,
+            lat: total_lat / count_f,
+            count: count.try_into().unwrap_or(0),
+        });
+    }
+
+    Ok(entries)
+}
+
+/// Builds the WHERE conditions and bind values for `DuckDB` queries
+/// against the `count_summary` table.
 fn build_count_conditions(
-    params: &SidebarQueryParams,
+    params: &CountFilterParams,
     bbox: Option<&BoundingBox>,
     conditions: &mut Vec<String>,
     bind_values: &mut Vec<DuckValue>,
@@ -496,6 +623,15 @@ fn add_count_in_filter(
 enum DuckValue {
     Int(i32),
     Str(String),
+}
+
+/// Converts a [`DuckValue`] to a boxed `dyn ToSql` for `DuckDB` parameter
+/// binding.
+fn duck_value_to_boxed(v: DuckValue) -> Box<dyn duckdb::ToSql> {
+    match v {
+        DuckValue::Int(i) => Box::new(i),
+        DuckValue::Str(s) => Box::new(s),
+    }
 }
 
 /// Extracts the date portion (`YYYY-MM-DD`) from a date or RFC 3339 string.

@@ -85,7 +85,6 @@ cargo generate all
 Exports incidents from PostGIS as GeoJSONSeq, then generates:
 
 - `data/generated/incidents.pmtiles` -- vector tiles for heatmap and point layers
-- `data/generated/clusters.pmtiles` -- clustered vector tiles for mid-zoom (zoom 8-11)
 - `data/generated/incidents.db` -- SQLite with R-tree spatial index for sidebar queries
 - `data/generated/counts.duckdb` -- pre-aggregated counts for fast filtering
 

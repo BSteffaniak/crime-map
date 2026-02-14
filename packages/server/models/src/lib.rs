@@ -211,3 +211,81 @@ pub struct SidebarIncident {
     /// Location type.
     pub location_type: Option<String>,
 }
+
+/// Shared filter fields used by both the sidebar and cluster count queries
+/// against the `DuckDB` `count_summary` table.
+#[derive(Debug, Clone)]
+pub struct CountFilterParams {
+    /// Start date for temporal filtering (ISO 8601).
+    pub from: Option<String>,
+    /// End date for temporal filtering (ISO 8601).
+    pub to: Option<String>,
+    /// Comma-separated list of category names to include.
+    pub categories: Option<String>,
+    /// Comma-separated list of subcategory names to include.
+    pub subcategories: Option<String>,
+    /// Minimum severity value (1-5).
+    pub severity_min: Option<u8>,
+    /// Filter by arrest status.
+    pub arrest_made: Option<bool>,
+}
+
+impl From<&SidebarQueryParams> for CountFilterParams {
+    fn from(p: &SidebarQueryParams) -> Self {
+        Self {
+            from: p.from.clone(),
+            to: p.to.clone(),
+            categories: p.categories.clone(),
+            subcategories: p.subcategories.clone(),
+            severity_min: p.severity_min,
+            arrest_made: p.arrest_made,
+        }
+    }
+}
+
+impl From<&ClusterQueryParams> for CountFilterParams {
+    fn from(p: &ClusterQueryParams) -> Self {
+        Self {
+            from: p.from.clone(),
+            to: p.to.clone(),
+            categories: p.categories.clone(),
+            subcategories: p.subcategories.clone(),
+            severity_min: p.severity_min,
+            arrest_made: p.arrest_made,
+        }
+    }
+}
+
+/// Query parameters for the clusters endpoint.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterQueryParams {
+    /// Bounding box as `west,south,east,north`.
+    pub bbox: Option<String>,
+    /// Current map zoom level (determines grid coarseness).
+    pub zoom: Option<u8>,
+    /// Start date for temporal filtering (ISO 8601).
+    pub from: Option<String>,
+    /// End date for temporal filtering (ISO 8601).
+    pub to: Option<String>,
+    /// Comma-separated list of category names to include.
+    pub categories: Option<String>,
+    /// Comma-separated list of subcategory names to include.
+    pub subcategories: Option<String>,
+    /// Minimum severity value (1-5).
+    pub severity_min: Option<u8>,
+    /// Filter by arrest status.
+    pub arrest_made: Option<bool>,
+}
+
+/// A single cluster entry in the clusters endpoint response.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterEntry {
+    /// Weighted centroid longitude.
+    pub lng: f64,
+    /// Weighted centroid latitude.
+    pub lat: f64,
+    /// Filtered incident count in this cluster.
+    pub count: u64,
+}

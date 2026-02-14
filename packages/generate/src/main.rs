@@ -11,8 +11,8 @@
 use clap::{Args, Parser, Subcommand};
 use crime_map_database::db;
 use crime_map_generate::{
-    GenerateArgs, OUTPUT_CLUSTERS_PMTILES, OUTPUT_COUNT_DB, OUTPUT_INCIDENTS_DB,
-    OUTPUT_INCIDENTS_PMTILES, output_dir, resolve_source_ids, run_with_cache,
+    GenerateArgs, OUTPUT_COUNT_DB, OUTPUT_INCIDENTS_DB, OUTPUT_INCIDENTS_PMTILES, output_dir,
+    resolve_source_ids, run_with_cache,
 };
 
 #[derive(Parser)]
@@ -62,11 +62,6 @@ enum Commands {
         #[command(flatten)]
         args: CliGenerateArgs,
     },
-    /// Generate clustered `PMTiles` for mid-zoom (zoom 8-11) via tippecanoe
-    Clusters {
-        #[command(flatten)]
-        args: CliGenerateArgs,
-    },
     /// Generate sidebar `SQLite` database for server-side queries
     Sidebar {
         #[command(flatten)]
@@ -77,7 +72,7 @@ enum Commands {
         #[command(flatten)]
         args: CliGenerateArgs,
     },
-    /// Generate all output files (`PMTiles`, clusters, sidebar `SQLite`, and count `DuckDB`)
+    /// Generate all output files (`PMTiles`, sidebar `SQLite`, and count `DuckDB`)
     All {
         #[command(flatten)]
         args: CliGenerateArgs,
@@ -107,19 +102,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &source_ids,
                 &dir,
                 &[OUTPUT_INCIDENTS_PMTILES],
-                None,
-            )
-            .await?;
-        }
-        Commands::Clusters { args } => {
-            let args = GenerateArgs::from(args);
-            let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
-            run_with_cache(
-                db.as_ref(),
-                &args,
-                &source_ids,
-                &dir,
-                &[OUTPUT_CLUSTERS_PMTILES],
                 None,
             )
             .await?;
@@ -160,7 +142,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &dir,
                 &[
                     OUTPUT_INCIDENTS_PMTILES,
-                    OUTPUT_CLUSTERS_PMTILES,
                     OUTPUT_INCIDENTS_DB,
                     OUTPUT_COUNT_DB,
                 ],

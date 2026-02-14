@@ -31,8 +31,29 @@ export const MAP_STYLE: StyleSpecification = {
 /**
  * Zoom thresholds for switching between visualization modes:
  * - 0-7: heatmap
- * - 8-11: clusters
+ * - 8-11: clusters (server-side DuckDB aggregation)
  * - 12+: individual points
  */
 export const HEATMAP_MAX_ZOOM = 8;
 export const CLUSTER_MAX_ZOOM = 12;
+
+/**
+ * Server-side cluster grid divisors by zoom level.
+ *
+ * The `count_summary` table uses 0.01-degree cells (longitude/latitude * 100).
+ * These divisors group cells into coarser grids for cluster aggregation.
+ * The server uses the same values; these are documented here for reference.
+ *
+ * | Zoom | Divisor | Effective grid |
+ * |------|---------|----------------|
+ * | 8    | 25      | ~0.25 degree   |
+ * | 9    | 15      | ~0.15 degree   |
+ * | 10   | 8       | ~0.08 degree   |
+ * | 11   | 4       | ~0.04 degree   |
+ */
+export const CLUSTER_GRID_DIVISORS: Record<number, number> = {
+  8: 25,
+  9: 15,
+  10: 8,
+  11: 4,
+};

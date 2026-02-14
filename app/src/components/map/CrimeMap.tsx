@@ -10,14 +10,15 @@ import {
 } from "../../lib/map-config";
 import { severityColor, type FilterState } from "../../lib/types";
 import { buildIncidentFilter } from "../../lib/map-filters/expressions";
-import type { FilterSpecification } from "maplibre-gl";
+import type { ClusterEntry } from "../../lib/clusters/types";
 
 interface CrimeMapProps {
   filters: FilterState;
+  clusters: ClusterEntry[];
   onBoundsChange?: (bounds: maplibregl.LngLatBounds, zoom: number) => void;
 }
 
-export default function CrimeMap({ filters, onBoundsChange }: CrimeMapProps) {
+export default function CrimeMap({ filters, clusters, onBoundsChange }: CrimeMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -31,10 +32,10 @@ export default function CrimeMap({ filters, onBoundsChange }: CrimeMapProps) {
       url: "pmtiles:///tiles/incidents.pmtiles",
     });
 
-    // PMTiles source for pre-clustered mid-zoom tiles
-    map.addSource("clusters", {
-      type: "vector",
-      url: "pmtiles:///tiles/clusters.pmtiles",
+    // GeoJSON source for server-provided clusters
+    map.addSource("server-clusters", {
+      type: "geojson",
+      data: { type: "FeatureCollection", features: [] },
     });
 
     // -- Layer 1: Heatmap (zoom 0-7) --
@@ -81,59 +82,55 @@ export default function CrimeMap({ filters, onBoundsChange }: CrimeMapProps) {
       },
     });
 
-    // -- Layer 2a: Cluster circles from PMTiles (zoom 8-11) --
+    // -- Layer 2a: Server-side cluster circles (zoom 8-11) --
     map.addLayer({
-      id: "incidents-cluster-circles",
+      id: "server-cluster-circles",
       type: "circle",
-      source: "clusters",
-      "source-layer": "clusters",
-      filter: ["has", "point_count"],
+      source: "server-clusters",
       minzoom: HEATMAP_MAX_ZOOM,
       maxzoom: CLUSTER_MAX_ZOOM,
       paint: {
         "circle-radius": [
           "step",
-          ["get", "point_count"],
-          15,
-          10, 20,
-          50, 25,
-          200, 30,
-          1000, 40,
+          ["get", "count"],
+          8,
+          10, 11,
+          50, 15,
+          200, 20,
+          1000, 28,
         ],
         "circle-color": [
           "step",
-          ["get", "point_count"],
+          ["get", "count"],
           "#51bbd6",
           10, "#f1f075",
           50, "#f28cb1",
           200, "#f59e0b",
           1000, "#dc2626",
         ],
-        "circle-stroke-width": 2,
+        "circle-stroke-width": 1.5,
         "circle-stroke-color": "#ffffff",
         "circle-opacity": 0.85,
       },
     });
 
-    // -- Layer 2b: Cluster count labels --
+    // -- Layer 2b: Server-side cluster count labels --
     map.addLayer({
-      id: "incidents-cluster-count",
+      id: "server-cluster-count",
       type: "symbol",
-      source: "clusters",
-      "source-layer": "clusters",
-      filter: ["has", "point_count"],
+      source: "server-clusters",
       minzoom: HEATMAP_MAX_ZOOM,
       maxzoom: CLUSTER_MAX_ZOOM,
       layout: {
         "text-field": [
           "case",
-          [">=", ["get", "point_count"], 1_000_000],
-          ["concat", ["to-string", ["/", ["round", ["/", ["get", "point_count"], 100_000]], 10]], "M"],
-          [">=", ["get", "point_count"], 10_000],
-          ["concat", ["to-string", ["round", ["/", ["get", "point_count"], 1000]]], "K"],
-          [">=", ["get", "point_count"], 1_000],
-          ["concat", ["to-string", ["/", ["round", ["/", ["get", "point_count"], 100]], 10]], "K"],
-          ["to-string", ["get", "point_count"]],
+          [">=", ["get", "count"], 1_000_000],
+          ["concat", ["to-string", ["/", ["round", ["/", ["get", "count"], 100_000]], 10]], "M"],
+          [">=", ["get", "count"], 10_000],
+          ["concat", ["to-string", ["round", ["/", ["get", "count"], 1000]]], "K"],
+          [">=", ["get", "count"], 1_000],
+          ["concat", ["to-string", ["/", ["round", ["/", ["get", "count"], 100]], 10]], "K"],
+          ["to-string", ["get", "count"]],
         ],
         "text-font": ["Open Sans Regular"],
         "text-size": 12,
@@ -141,32 +138,6 @@ export default function CrimeMap({ filters, onBoundsChange }: CrimeMapProps) {
       paint: {
         "text-color": "#333",
         "text-opacity": 1,
-      },
-    });
-
-    // -- Layer 2c: Unclustered points from cluster tiles (zoom 8-11) --
-    map.addLayer({
-      id: "incidents-cluster-unclustered",
-      type: "circle",
-      source: "clusters",
-      "source-layer": "clusters",
-      filter: ["!", ["has", "point_count"]],
-      minzoom: HEATMAP_MAX_ZOOM,
-      maxzoom: CLUSTER_MAX_ZOOM,
-      paint: {
-        "circle-radius": 4,
-        "circle-color": [
-          "match",
-          ["get", "severity"],
-          5, severityColor(5),
-          4, severityColor(4),
-          3, severityColor(3),
-          2, severityColor(2),
-          severityColor(1),
-        ],
-        "circle-stroke-width": 0.5,
-        "circle-stroke-color": "#ffffff",
-        "circle-opacity": 0.7,
       },
     });
 
@@ -203,7 +174,7 @@ export default function CrimeMap({ filters, onBoundsChange }: CrimeMapProps) {
     // -- Click handlers --
 
     // Click cluster to zoom in
-    map.on("click", "incidents-cluster-circles", (e) => {
+    map.on("click", "server-cluster-circles", (e) => {
       const feature = e.features?.[0];
       if (!feature) return;
 
@@ -240,8 +211,7 @@ export default function CrimeMap({ filters, onBoundsChange }: CrimeMapProps) {
 
     // Cursor changes
     for (const layerId of [
-      "incidents-cluster-circles",
-      "incidents-cluster-unclustered",
+      "server-cluster-circles",
       "incidents-points",
     ]) {
       map.on("mouseenter", layerId, () => {
@@ -302,6 +272,25 @@ export default function CrimeMap({ filters, onBoundsChange }: CrimeMapProps) {
     };
   }, [setupLayers, onBoundsChange]);
 
+  // -- Update server-cluster GeoJSON source when clusters change --
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !loaded) return;
+
+    const source = map.getSource("server-clusters") as maplibregl.GeoJSONSource | undefined;
+    if (!source) return;
+
+    source.setData({
+      type: "FeatureCollection",
+      features: clusters.map((c) => ({
+        type: "Feature" as const,
+        geometry: { type: "Point" as const, coordinates: [c.lng, c.lat] },
+        properties: { count: c.count },
+      })),
+    });
+  }, [clusters, loaded]);
+
   // -- Apply MapLibre filters on tile layers when filters change --
 
   useEffect(() => {
@@ -310,22 +299,9 @@ export default function CrimeMap({ filters, onBoundsChange }: CrimeMapProps) {
 
     const filterExpr = buildIncidentFilter(filters);
 
-    // Apply to heatmap and individual points layers
+    // Apply to heatmap and high-zoom individual points
     map.setFilter("incidents-heat", filterExpr);
     map.setFilter("incidents-points", filterExpr);
-
-    // For unclustered features in the cluster tile layer, combine with
-    // the base filter that excludes cluster features
-    const unclusteredBase = ["!", ["has", "point_count"]] as FilterSpecification;
-    if (filterExpr) {
-      map.setFilter("incidents-cluster-unclustered", [
-        "all",
-        unclusteredBase,
-        filterExpr,
-      ] as FilterSpecification);
-    } else {
-      map.setFilter("incidents-cluster-unclustered", unclusteredBase);
-    }
   }, [filters, loaded]);
 
   return (

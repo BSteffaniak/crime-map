@@ -4,13 +4,16 @@ import FilterPanel from "./components/filters/FilterPanel";
 import IncidentSidebar from "./components/sidebar/IncidentSidebar";
 import AiChat from "./components/ai/AiChat";
 import { useFilters } from "./hooks/useFilters";
+import { useClusters } from "./lib/clusters/useClusters";
 import type { BBox } from "./lib/sidebar/types";
+import { DEFAULT_ZOOM } from "./lib/map-config";
 
 type SidebarTab = "filters" | "incidents" | "ai";
 
 export default function App() {
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("filters");
   const [bbox, setBbox] = useState<BBox | null>(null);
+  const [zoom, setZoom] = useState(DEFAULT_ZOOM);
 
   const {
     filters,
@@ -24,16 +27,19 @@ export default function App() {
   } = useFilters();
 
   const handleBoundsChange = useCallback(
-    (bounds: { getWest(): number; getSouth(): number; getEast(): number; getNorth(): number }) => {
+    (bounds: { getWest(): number; getSouth(): number; getEast(): number; getNorth(): number }, newZoom: number) => {
       setBbox([
         bounds.getWest(),
         bounds.getSouth(),
         bounds.getEast(),
         bounds.getNorth(),
       ]);
+      setZoom(newZoom);
     },
     [],
   );
+
+  const { clusters } = useClusters(bbox, zoom, filters);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden">
@@ -101,7 +107,7 @@ export default function App() {
 
       {/* Map */}
       <div className="flex-1">
-        <CrimeMap filters={filters} onBoundsChange={handleBoundsChange} />
+        <CrimeMap filters={filters} clusters={clusters} onBoundsChange={handleBoundsChange} />
       </div>
     </div>
   );
