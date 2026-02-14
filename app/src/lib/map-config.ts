@@ -38,22 +38,22 @@ export const HEATMAP_MAX_ZOOM = 8;
 export const CLUSTER_MAX_ZOOM = 12;
 
 /**
- * Server-side cluster grid divisors by zoom level.
+ * Server-side cluster target counts by zoom level.
  *
- * The `count_summary` table uses 0.001-degree cells (longitude/latitude * 1000).
- * These divisors group cells into coarser grids for cluster aggregation.
- * The server uses the same values; these are documented here for reference.
+ * The server uses weighted k-means clustering on fine-grained micro-cells
+ * from the `count_summary` table (0.001-degree resolution). The target
+ * count controls how many output clusters are produced per viewport.
  *
- * | Zoom | Divisor | Effective grid |
- * |------|---------|----------------|
- * | 8    | 80      | ~0.08 degree   |
- * | 9    | 40      | ~0.04 degree   |
- * | 10   | 20      | ~0.02 degree   |
- * | 11   | 10      | ~0.01 degree   |
+ * | Zoom | Target clusters |
+ * |------|-----------------|
+ * | 8    | 40              |
+ * | 9    | 60              |
+ * | 10   | 80              |
+ * | 11   | 100             |
  */
-export const CLUSTER_GRID_DIVISORS: Record<number, number> = {
-  8: 80,
-  9: 40,
-  10: 20,
-  11: 10,
+export const CLUSTER_TARGET_COUNTS: Record<number, number> = {
+  8: 40,
+  9: 60,
+  10: 80,
+  11: 100,
 };

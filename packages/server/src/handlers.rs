@@ -398,31 +398,26 @@ fn execute_duckdb_count(
     Ok(total)
 }
 
-/// Grid divisor for each zoom level at zoom 8-11.
+/// Target number of output clusters for each zoom level.
 ///
-/// The `count_summary` table uses `cell_lng`/`cell_lat` at `* 1000`
-/// resolution (0.001-degree cells, ~111m). The grid divisor groups these
-/// cells into coarser clusters appropriate for the zoom level.
-const CLUSTER_GRID_DIVISORS: [(u8, i32); 4] = [
-    (8, 80),  // ~0.08 degree grid (~6.8 km)
-    (9, 40),  // ~0.04 degree grid (~3.4 km)
-    (10, 20), // ~0.02 degree grid (~1.7 km)
-    (11, 10), // ~0.01 degree grid (~1.1 km)
-];
+/// Lower zoom levels show fewer, coarser clusters; higher zoom levels
+/// show more, finer-grained clusters. These values are tunable.
+const CLUSTER_TARGET_COUNTS: [(u8, usize); 4] = [(8, 40), (9, 60), (10, 80), (11, 100)];
 
-/// Returns the grid divisor for the given zoom level.
-fn cluster_grid_divisor(zoom: u8) -> i32 {
-    CLUSTER_GRID_DIVISORS
+/// Returns the target cluster count for the given zoom level.
+fn cluster_target_count(zoom: u8) -> usize {
+    CLUSTER_TARGET_COUNTS
         .iter()
         .find(|(z, _)| *z == zoom)
-        .map_or(20, |(_, d)| *d)
+        .map_or(60, |(_, k)| *k)
 }
 
 /// `GET /api/clusters`
 ///
-/// Returns grid-aggregated cluster data with weighted centroids from the
-/// `DuckDB` `count_summary` table. Supports all the same filters as the
-/// sidebar endpoint. The grid resolution adapts to the zoom level.
+/// Returns density-based cluster data with weighted centroids from the
+/// `DuckDB` `count_summary` table. Uses weighted k-means clustering to
+/// produce natural, non-grid-aligned cluster positions. Supports all the
+/// same filters as the sidebar endpoint.
 pub async fn clusters(
     state: web::Data<AppState>,
     params: web::Query<ClusterQueryParams>,
@@ -460,11 +455,162 @@ pub async fn clusters(
     }
 }
 
-/// Executes the cluster aggregation query against the `DuckDB`
-/// `count_summary` table.
+/// A micro-cell returned from the `DuckDB` query: one row per distinct
+/// `(cell_lng, cell_lat)` pair with the filter dimensions collapsed.
+struct MicroCell {
+    /// Weighted centroid longitude.
+    centroid_lng: f64,
+    /// Weighted centroid latitude.
+    centroid_lat: f64,
+    /// Incident count in this micro-cell.
+    count: u64,
+}
+
+/// Runs weighted k-means clustering on micro-cells to produce `k` output
+/// clusters with natural, density-driven positions.
 ///
-/// Groups cells into a coarser grid based on the zoom level and computes
-/// weighted centroids using `sum_lng` / `sum_lat` columns.
+/// **Algorithm:**
+/// 1. Place `k` initial seed centroids evenly across the bounding box.
+/// 2. Repeat for up to `max_iterations`:
+///    a. Assign each micro-cell to the nearest centroid (by Euclidean
+///    distance in degree space).
+///    b. Recompute each centroid as the weighted average of its assigned
+///    cells: `centroid = SUM(cell_centroid * count) / SUM(count)`.
+///    c. If no assignments changed, stop early.
+/// 3. Emit one [`ClusterEntry`] per non-empty centroid.
+///
+/// If the number of micro-cells is at most `k`, each cell becomes its own
+/// cluster directly (no iteration needed).
+fn weighted_kmeans(cells: &[MicroCell], k: usize, bbox: &BoundingBox) -> Vec<ClusterEntry> {
+    if cells.is_empty() {
+        return Vec::new();
+    }
+
+    // If fewer cells than target clusters, return each cell directly
+    if cells.len() <= k {
+        return cells
+            .iter()
+            .map(|c| ClusterEntry {
+                lng: c.centroid_lng,
+                lat: c.centroid_lat,
+                count: c.count,
+            })
+            .collect();
+    }
+
+    // Initialize k seed centroids spread across the bbox in a grid pattern
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let cols = (k as f64).sqrt().ceil() as usize;
+    let rows = k.div_ceil(cols);
+    #[allow(clippy::cast_precision_loss)]
+    let lng_step = (bbox.east - bbox.west) / (cols as f64 + 1.0);
+    #[allow(clippy::cast_precision_loss)]
+    let lat_step = (bbox.north - bbox.south) / (rows as f64 + 1.0);
+
+    let mut centroids: Vec<(f64, f64)> = Vec::with_capacity(k);
+    for r in 0..rows {
+        for c in 0..cols {
+            if centroids.len() >= k {
+                break;
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let lng = lng_step.mul_add(c as f64 + 1.0, bbox.west);
+            #[allow(clippy::cast_precision_loss)]
+            let lat = lat_step.mul_add(r as f64 + 1.0, bbox.south);
+            centroids.push((lng, lat));
+        }
+    }
+
+    let mut assignments: Vec<usize> = vec![0; cells.len()];
+    let max_iterations = 10;
+
+    for _ in 0..max_iterations {
+        let mut changed = false;
+
+        // Assign each micro-cell to the nearest centroid
+        for (i, cell) in cells.iter().enumerate() {
+            let mut best_idx = 0;
+            let mut best_dist = f64::MAX;
+
+            for (j, &(clng, clat)) in centroids.iter().enumerate() {
+                let dlng = cell.centroid_lng - clng;
+                let dlat = cell.centroid_lat - clat;
+                let dist = dlng.mul_add(dlng, dlat * dlat);
+                if dist < best_dist {
+                    best_dist = dist;
+                    best_idx = j;
+                }
+            }
+
+            if assignments[i] != best_idx {
+                assignments[i] = best_idx;
+                changed = true;
+            }
+        }
+
+        if !changed {
+            break;
+        }
+
+        // Recompute centroids as weighted averages
+        let mut sum_lng = vec![0.0_f64; k];
+        let mut sum_lat = vec![0.0_f64; k];
+        let mut sum_cnt = vec![0_u64; k];
+
+        for (i, cell) in cells.iter().enumerate() {
+            let idx = assignments[i];
+            #[allow(clippy::cast_precision_loss)]
+            let w = cell.count as f64;
+            sum_lng[idx] = w.mul_add(cell.centroid_lng, sum_lng[idx]);
+            sum_lat[idx] = w.mul_add(cell.centroid_lat, sum_lat[idx]);
+            sum_cnt[idx] += cell.count;
+        }
+
+        for j in 0..k {
+            if sum_cnt[j] > 0 {
+                #[allow(clippy::cast_precision_loss)]
+                let total = sum_cnt[j] as f64;
+                centroids[j] = (sum_lng[j] / total, sum_lat[j] / total);
+            }
+        }
+    }
+
+    // Collect final clusters (skip empty centroids)
+    let mut result_lng = vec![0.0_f64; k];
+    let mut result_lat = vec![0.0_f64; k];
+    let mut result_cnt = vec![0_u64; k];
+
+    for (i, cell) in cells.iter().enumerate() {
+        let idx = assignments[i];
+        #[allow(clippy::cast_precision_loss)]
+        let w = cell.count as f64;
+        result_lng[idx] = w.mul_add(cell.centroid_lng, result_lng[idx]);
+        result_lat[idx] = w.mul_add(cell.centroid_lat, result_lat[idx]);
+        result_cnt[idx] += cell.count;
+    }
+
+    (0..k)
+        .filter(|&j| result_cnt[j] > 0)
+        .map(|j| {
+            #[allow(clippy::cast_precision_loss)]
+            let total = result_cnt[j] as f64;
+            ClusterEntry {
+                lng: result_lng[j] / total,
+                lat: result_lat[j] / total,
+                count: result_cnt[j],
+            }
+        })
+        .collect()
+}
+
+/// Executes the cluster query against the `DuckDB` `count_summary` table.
+///
+/// Fetches micro-cells (one per distinct spatial cell within the viewport),
+/// then runs weighted k-means to produce naturally positioned clusters.
 fn execute_duckdb_clusters(
     db_conn: &duckdb::Connection,
     params: &CountFilterParams,
@@ -476,8 +622,6 @@ fn execute_duckdb_clusters(
 
     build_count_conditions(params, bbox, &mut conditions, &mut bind_values);
 
-    let grid_n = cluster_grid_divisor(zoom);
-
     let where_clause = if conditions.is_empty() {
         String::new()
     } else {
@@ -486,13 +630,13 @@ fn execute_duckdb_clusters(
 
     let sql = format!(
         "SELECT
-             FLOOR(cell_lng / {grid_n}) AS grid_lng,
-             FLOOR(cell_lat / {grid_n}) AS grid_lat,
+             cell_lng,
+             cell_lat,
              SUM(cnt) AS count,
              SUM(sum_lng) AS total_lng,
              SUM(sum_lat) AS total_lat
          FROM count_summary{where_clause}
-         GROUP BY 1, 2
+         GROUP BY cell_lng, cell_lat
          HAVING SUM(cnt) > 0"
     );
 
@@ -508,7 +652,7 @@ fn execute_duckdb_clusters(
         .query(param_refs.as_slice())
         .map_err(|e| format!("DuckDB query failed: {e}"))?;
 
-    let mut entries = Vec::new();
+    let mut micro_cells = Vec::new();
     while let Some(row) = rows.next().map_err(|e| format!("DuckDB row error: {e}"))? {
         let count: i64 = row.get(2).map_err(|e| format!("DuckDB get count: {e}"))?;
         let total_lng: f64 = row
@@ -521,14 +665,31 @@ fn execute_duckdb_clusters(
         #[allow(clippy::cast_precision_loss)]
         let count_f = count as f64;
 
-        entries.push(ClusterEntry {
-            lng: total_lng / count_f,
-            lat: total_lat / count_f,
+        micro_cells.push(MicroCell {
+            centroid_lng: total_lng / count_f,
+            centroid_lat: total_lat / count_f,
             count: count.try_into().unwrap_or(0),
         });
     }
 
-    Ok(entries)
+    // Use the viewport bbox for k-means seeding; fall back to data extent
+    let effective_bbox = bbox.copied().unwrap_or_else(|| {
+        let mut west = f64::MAX;
+        let mut east = f64::MIN;
+        let mut south = f64::MAX;
+        let mut north = f64::MIN;
+        for c in &micro_cells {
+            west = west.min(c.centroid_lng);
+            east = east.max(c.centroid_lng);
+            south = south.min(c.centroid_lat);
+            north = north.max(c.centroid_lat);
+        }
+        BoundingBox::new(west, south, east, north)
+    });
+
+    let target_k = cluster_target_count(zoom);
+
+    Ok(weighted_kmeans(&micro_cells, target_k, &effective_bbox))
 }
 
 /// Builds the WHERE conditions and bind values for `DuckDB` queries

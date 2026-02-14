@@ -913,7 +913,8 @@ async fn generate_count_db(
              SUM(longitude) AS sum_lng,
              SUM(latitude) AS sum_lat
          FROM incidents
-         GROUP BY ALL",
+         GROUP BY ALL
+         ORDER BY cell_lng, cell_lat",
     )?;
 
     // Drop the raw incidents table to save space
