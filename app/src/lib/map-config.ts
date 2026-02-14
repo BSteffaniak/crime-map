@@ -40,20 +40,20 @@ export const CLUSTER_MAX_ZOOM = 12;
 /**
  * Server-side cluster grid divisors by zoom level.
  *
- * The `count_summary` table uses 0.01-degree cells (longitude/latitude * 100).
+ * The `count_summary` table uses 0.001-degree cells (longitude/latitude * 1000).
  * These divisors group cells into coarser grids for cluster aggregation.
  * The server uses the same values; these are documented here for reference.
  *
  * | Zoom | Divisor | Effective grid |
  * |------|---------|----------------|
- * | 8    | 25      | ~0.25 degree   |
- * | 9    | 15      | ~0.15 degree   |
- * | 10   | 8       | ~0.08 degree   |
- * | 11   | 4       | ~0.04 degree   |
+ * | 8    | 80      | ~0.08 degree   |
+ * | 9    | 40      | ~0.04 degree   |
+ * | 10   | 20      | ~0.02 degree   |
+ * | 11   | 10      | ~0.01 degree   |
  */
 export const CLUSTER_GRID_DIVISORS: Record<number, number> = {
-  8: 25,
-  9: 15,
-  10: 8,
-  11: 4,
+  8: 80,
+  9: 40,
+  10: 20,
+  11: 10,
 };

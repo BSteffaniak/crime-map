@@ -400,14 +400,14 @@ fn execute_duckdb_count(
 
 /// Grid divisor for each zoom level at zoom 8-11.
 ///
-/// The `count_summary` table uses `cell_lng`/`cell_lat` at `* 100`
-/// resolution (0.01-degree cells). The grid divisor groups these cells
-/// into coarser clusters appropriate for the zoom level.
+/// The `count_summary` table uses `cell_lng`/`cell_lat` at `* 1000`
+/// resolution (0.001-degree cells, ~111m). The grid divisor groups these
+/// cells into coarser clusters appropriate for the zoom level.
 const CLUSTER_GRID_DIVISORS: [(u8, i32); 4] = [
-    (8, 25), // ~0.25 degree grid (~21 km)
-    (9, 15), // ~0.15 degree grid (~13 km)
-    (10, 8), // ~0.08 degree grid (~7 km)
-    (11, 4), // ~0.04 degree grid (~3.4 km)
+    (8, 80),  // ~0.08 degree grid (~6.8 km)
+    (9, 40),  // ~0.04 degree grid (~3.4 km)
+    (10, 20), // ~0.02 degree grid (~1.7 km)
+    (11, 10), // ~0.01 degree grid (~1.1 km)
 ];
 
 /// Returns the grid divisor for the given zoom level.
@@ -540,15 +540,15 @@ fn build_count_conditions(
     bind_values: &mut Vec<DuckValue>,
 ) {
     if let Some(b) = bbox {
-        // Convert bbox to cell coordinates: floor(coord * 100)
+        // Convert bbox to cell coordinates: floor(coord * 1000)
         #[allow(clippy::cast_possible_truncation)]
-        let cell_west = (b.west * 100.0).floor() as i32;
+        let cell_west = (b.west * 1000.0).floor() as i32;
         #[allow(clippy::cast_possible_truncation)]
-        let cell_east = (b.east * 100.0).floor() as i32;
+        let cell_east = (b.east * 1000.0).floor() as i32;
         #[allow(clippy::cast_possible_truncation)]
-        let cell_south = (b.south * 100.0).floor() as i32;
+        let cell_south = (b.south * 1000.0).floor() as i32;
         #[allow(clippy::cast_possible_truncation)]
-        let cell_north = (b.north * 100.0).floor() as i32;
+        let cell_north = (b.north * 1000.0).floor() as i32;
 
         conditions.push("cell_lng >= ? AND cell_lng <= ?".to_string());
         bind_values.push(DuckValue::Int(cell_west));

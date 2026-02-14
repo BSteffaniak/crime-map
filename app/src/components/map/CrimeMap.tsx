@@ -93,11 +93,11 @@ export default function CrimeMap({ filters, clusters, onBoundsChange }: CrimeMap
         "circle-radius": [
           "step",
           ["get", "count"],
-          8,
-          10, 11,
-          50, 15,
-          200, 20,
-          1000, 28,
+          5,
+          10, 8,
+          50, 12,
+          200, 16,
+          1000, 22,
         ],
         "circle-color": [
           "step",
@@ -133,7 +133,7 @@ export default function CrimeMap({ filters, clusters, onBoundsChange }: CrimeMap
           ["to-string", ["get", "count"]],
         ],
         "text-font": ["Open Sans Regular"],
-        "text-size": 12,
+        "text-size": 11,
       },
       paint: {
         "text-color": "#333",
@@ -289,6 +289,48 @@ export default function CrimeMap({ filters, clusters, onBoundsChange }: CrimeMap
         properties: { count: c.count },
       })),
     });
+
+    // Compute quantile-based breakpoints for relative color/radius scaling
+    if (clusters.length === 0) return;
+
+    const counts = clusters.map((c) => c.count).sort((a, b) => a - b);
+    const quantile = (arr: number[], q: number) =>
+      arr[Math.min(Math.floor(q * arr.length), arr.length - 1)];
+
+    const p20 = quantile(counts, 0.2);
+    const p40 = quantile(counts, 0.4);
+    const p60 = quantile(counts, 0.6);
+    const p80 = quantile(counts, 0.8);
+
+    const COLORS = ["#51bbd6", "#f1f075", "#f28cb1", "#f59e0b", "#dc2626"];
+    const RADII = [5, 8, 12, 16, 22];
+
+    // When all clusters have the same count, use a single color/size
+    if (p20 === p80) {
+      map.setPaintProperty("server-cluster-circles", "circle-color", COLORS[2]);
+      map.setPaintProperty("server-cluster-circles", "circle-radius", RADII[2]);
+      return;
+    }
+
+    // Build step expressions with deduplicated thresholds
+    // (MapLibre requires strictly increasing step values)
+    const breakpoints = [p20, p40, p60, p80];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const colorSteps: any[] = ["step", ["get", "count"], COLORS[0]];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const radiusSteps: any[] = ["step", ["get", "count"], RADII[0]];
+
+    let lastThreshold = -Infinity;
+    for (let i = 0; i < breakpoints.length; i++) {
+      if (breakpoints[i] > lastThreshold) {
+        colorSteps.push(breakpoints[i], COLORS[i + 1]);
+        radiusSteps.push(breakpoints[i], RADII[i + 1]);
+        lastThreshold = breakpoints[i];
+      }
+    }
+
+    map.setPaintProperty("server-cluster-circles", "circle-color", colorSteps);
+    map.setPaintProperty("server-cluster-circles", "circle-radius", radiusSteps);
   }, [clusters, loaded]);
 
   // -- Apply MapLibre filters on tile layers when filters change --
