@@ -67,36 +67,58 @@ command_data() {
         "manifest.json"
     )
 
-    # Remove existing files so SFTP put can overwrite
-    echo "    Clearing existing data files on volume..."
-    fly ssh console --command "rm -f /app/data/generated/incidents.db /app/data/generated/counts.duckdb /app/data/generated/h3.duckdb /app/data/generated/metadata.json /app/data/generated/manifest.json" 2>/dev/null || true
-
+    # Upload files, skipping unchanged ones (compared by size)
+    local uploaded=0
     for file in "${files[@]}"; do
         local filepath="${DATA_DIR}/${file}"
         if [ -f "$filepath" ]; then
+            local local_size remote_size remote_raw
+            local_size=$(wc -c < "$filepath" | tr -d ' ')
+            remote_raw=$(fly ssh console --command "stat -c %s /app/data/generated/${file} 2>/dev/null || echo 0" 2>/dev/null || echo "0")
+            remote_size=$(echo "$remote_raw" | grep -oE '[0-9]+' | head -1)
+            remote_size="${remote_size:-0}"
+
+            echo "    Checking ${file}: local=${local_size} remote=${remote_size}"
+
+            if [ "$local_size" = "$remote_size" ]; then
+                echo "    Skipping ${file} (unchanged)"
+                continue
+            fi
+
+            # Remove existing file so SFTP put can write
+            fly ssh console --command "rm -f /app/data/generated/${file}" 2>/dev/null || true
+
             local size
             size=$(du -h "$filepath" | cut -f1)
             echo "    Uploading ${file} (${size})..."
             fly ssh sftp shell <<EOF
 put ${filepath} /app/data/generated/${file}
 EOF
+            uploaded=$((uploaded + 1))
         else
-            echo "    Skipping ${file} (not found)"
+            echo "    Skipping ${file} (not found locally)"
         fi
     done
 
     kill $keepalive_pid 2>/dev/null
     trap - EXIT
 
-    # Verify uploads by comparing checksums
+    if [ $uploaded -eq 0 ]; then
+        echo "==> All files up to date, nothing to upload."
+        return
+    fi
+
+    # Verify uploads by comparing sizes
     echo "==> Verifying uploaded files..."
     local verify_failed=false
     for file in "${files[@]}"; do
         local filepath="${DATA_DIR}/${file}"
         if [ -f "$filepath" ]; then
-            local local_size remote_size
+            local local_size remote_size remote_raw
             local_size=$(wc -c < "$filepath" | tr -d ' ')
-            remote_size=$(fly ssh console --command "wc -c < /app/data/generated/${file}" 2>/dev/null | tr -d '[:space:]')
+            remote_raw=$(fly ssh console --command "stat -c %s /app/data/generated/${file} 2>/dev/null || echo 0" 2>/dev/null || echo "0")
+            remote_size=$(echo "$remote_raw" | grep -oE '[0-9]+' | head -1)
+            remote_size="${remote_size:-0}"
 
             if [ "$local_size" != "$remote_size" ]; then
                 echo "    MISMATCH ${file}: local=${local_size} bytes, remote=${remote_size} bytes"
