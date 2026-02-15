@@ -171,6 +171,8 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
             ),
             ("Sidebar SQLite", crime_map_generate::OUTPUT_INCIDENTS_DB),
             ("Count DuckDB", crime_map_generate::OUTPUT_COUNT_DB),
+            ("H3 Hexbin DuckDB", crime_map_generate::OUTPUT_H3_DB),
+            ("Server Metadata", crime_map_generate::OUTPUT_METADATA),
         ];
 
         let output_labels: Vec<&str> = output_choices.iter().map(|(l, _)| *l).collect();
