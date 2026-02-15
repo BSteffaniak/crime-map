@@ -23,6 +23,11 @@ jobs:
       - name: Setup Fly.io CLI
         uses: superfly/flyctl-actions/setup-flyctl@master
 
+      - name: Alias flyctl to fly
+        run: |
+          sudo ln -sf "$(which flyctl)" /usr/local/bin/fly
+          fly version
+
       - name: Deploy
         run: ./scripts/deploy.sh app
         env:
