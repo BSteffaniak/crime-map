@@ -55,7 +55,7 @@ export default function App() {
       <CrimeMap filters={filters} hexbins={hexbins} zoom={zoom} mapTheme={mapTheme} onBoundsChange={handleBoundsChange} />
 
       {/* Floating controls — top-left */}
-      <div className="absolute top-2 left-2 z-10 flex items-center gap-2">
+      <div className="absolute top-3 left-2 z-10 flex items-start gap-2">
         {/* Sidebar toggle button */}
         {!sidebarOpen && (
           <button
