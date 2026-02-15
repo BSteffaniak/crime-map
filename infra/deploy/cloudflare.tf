@@ -18,6 +18,26 @@ resource "cloudflare_r2_bucket" "tiles" {
   location   = "enam"
 }
 
+resource "cloudflare_r2_bucket_cors" "tiles" {
+  account_id  = var.cloudflare_account_id
+  bucket_name = cloudflare_r2_bucket.tiles.name
+
+  rules = [{
+    id              = "Allow crime-map origins"
+    max_age_seconds = 86400
+    allowed = {
+      methods = ["GET", "HEAD"]
+      origins = [
+        "https://${var.fly_app_name}.fly.dev",
+        "https://${var.domain}",
+        "http://localhost:5173",
+      ]
+      headers = ["Range", "If-Match"]
+    }
+    expose_headers = ["Content-Length", "Content-Range", "ETag"]
+  }]
+}
+
 # ── DNS: Root domain -> Fly.io ───────────────────────────────────
 # Proxied through Cloudflare for caching and DDoS protection.
 
