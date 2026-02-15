@@ -50,7 +50,7 @@ export default function App() {
   const { hexbins } = useHexbins(bbox, zoom, filters, settledRef);
 
   return (
-    <div className="relative h-screen w-screen overflow-hidden bg-background text-foreground">
+    <div className="relative h-dvh w-screen overflow-hidden bg-background text-foreground">
       {/* Map — always full viewport */}
       <CrimeMap filters={filters} hexbins={hexbins} zoom={zoom} mapTheme={mapTheme} onBoundsChange={handleBoundsChange} />
 

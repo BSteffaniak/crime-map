@@ -6,9 +6,14 @@
 @custom-variant dark (&:is(.dark *));
 
 html,
-body,
-#root {
+body {
   height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+#root {
+  height: 100dvh;
   margin: 0;
   padding: 0;
 }
