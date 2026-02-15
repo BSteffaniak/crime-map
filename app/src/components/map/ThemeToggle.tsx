@@ -53,7 +53,7 @@ export default function ThemeToggle({ mapTheme, onSelect }: ThemeToggleProps) {
   }, [open]);
 
   return (
-    <div ref={containerRef} className="absolute top-2 left-2 z-10">
+    <div ref={containerRef} className="relative">
       {/* Trigger button */}
       <button
         onClick={toggle}
