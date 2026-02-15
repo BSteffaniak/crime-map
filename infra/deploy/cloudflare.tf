@@ -39,24 +39,26 @@ resource "cloudflare_r2_bucket_cors" "tiles" {
 }
 
 # ── DNS: Root domain -> Fly.io ───────────────────────────────────
-# Proxied through Cloudflare for caching and DDoS protection.
+# DNS-only (not proxied) — Fly.io handles TLS termination directly.
+# This avoids Cloudflare SSL handshake issues and allows Fly to
+# complete ACME cert validation without interference.
 
 resource "cloudflare_dns_record" "app" {
   zone_id = local.zone_id
   name    = var.domain
   type    = "CNAME"
   content = "${var.fly_app_name}.fly.dev"
-  proxied = true
-  ttl     = 1
+  proxied = false
+  ttl     = 300
 }
 
-# ── DNS: www redirect ────────────────────────────────────────────
+# ── DNS: www -> Fly.io ────────────────────────────────────────────
 
 resource "cloudflare_dns_record" "www" {
   zone_id = local.zone_id
   name    = "www"
   type    = "CNAME"
   content = "${var.fly_app_name}.fly.dev"
-  proxied = true
-  ttl     = 1
+  proxied = false
+  ttl     = 300
 }
