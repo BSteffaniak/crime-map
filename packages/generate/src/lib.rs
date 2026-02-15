@@ -52,6 +52,9 @@ pub const OUTPUT_COUNT_DB: &str = "count_duckdb";
 /// Output name constant for the H3 hexbin `DuckDB` database.
 pub const OUTPUT_H3_DB: &str = "h3_duckdb";
 
+/// Output name constant for the server metadata JSON file.
+pub const OUTPUT_METADATA: &str = "metadata";
+
 /// Per-source fingerprint capturing the data state at generation time.
 ///
 /// Since `crime_incidents` is insert-only (`ON CONFLICT DO NOTHING`),
@@ -227,6 +230,15 @@ pub async fn run_with_cache(
         progress.set_position(0);
         generate_h3_db(db, args, source_ids, dir, &progress).await?;
         record_output(manifest, OUTPUT_H3_DB);
+        save_manifest(dir, manifest)?;
+    }
+
+    if needs.get(OUTPUT_METADATA) == Some(&true) {
+        progress.set_message("Generating server metadata...".to_string());
+        progress.set_total(0);
+        progress.set_position(0);
+        generate_metadata(db, source_ids, dir).await?;
+        record_output(manifest, OUTPUT_METADATA);
         save_manifest(dir, manifest)?;
     }
 
@@ -415,6 +427,7 @@ fn output_file_path(dir: &Path, output_name: &str) -> PathBuf {
         OUTPUT_INCIDENTS_DB => dir.join("incidents.db"),
         OUTPUT_COUNT_DB => dir.join("counts.duckdb"),
         OUTPUT_H3_DB => dir.join("h3.duckdb"),
+        OUTPUT_METADATA => dir.join("metadata.json"),
         _ => dir.join(output_name),
     }
 }
@@ -1352,6 +1365,85 @@ fn insert_duckdb_row(
     ])?;
 
     Ok(id)
+}
+
+/// Generates a `metadata.json` file containing server startup context that
+/// would otherwise require `PostGIS` at runtime.
+///
+/// This includes:
+/// - `cities`: distinct `(city, state)` pairs from the dataset
+/// - `minDate` / `maxDate`: the earliest and latest `occurred_at` timestamps
+///
+/// The server loads this file at boot to populate the AI agent context
+/// without needing a live `PostGIS` connection.
+///
+/// # Errors
+///
+/// Returns an error if the database query or file write fails.
+async fn generate_metadata(
+    db: &dyn Database,
+    source_ids: &[i32],
+    dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    log::info!("Querying available cities...");
+
+    let source_filter = if source_ids.is_empty() {
+        String::new()
+    } else {
+        let ids: Vec<String> = source_ids
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        format!(" AND source_id IN ({})", ids.join(", "))
+    };
+
+    let cities_query = format!(
+        "SELECT DISTINCT city, state FROM crime_incidents
+         WHERE city IS NOT NULL AND city != ''{source_filter}
+         ORDER BY state, city"
+    );
+    let city_rows = db.query_raw_params(&cities_query, &[]).await?;
+
+    let cities: Vec<serde_json::Value> = city_rows
+        .iter()
+        .map(|row| {
+            let city: String = row.to_value("city").unwrap_or_default();
+            let state: String = row.to_value("state").unwrap_or_default();
+            serde_json::json!([city, state])
+        })
+        .collect();
+
+    log::info!("Found {} distinct cities", cities.len());
+
+    log::info!("Querying date range...");
+    let date_query = format!(
+        "SELECT MIN(occurred_at)::text as min_date, MAX(occurred_at)::text as max_date
+         FROM crime_incidents
+         WHERE has_coordinates = TRUE{source_filter}"
+    );
+    let date_rows = db.query_raw_params(&date_query, &[]).await?;
+
+    let min_date: Option<String> = date_rows
+        .first()
+        .and_then(|r| r.to_value("min_date").unwrap_or(None));
+    let max_date: Option<String> = date_rows
+        .first()
+        .and_then(|r| r.to_value("max_date").unwrap_or(None));
+
+    let metadata = serde_json::json!({
+        "cities": cities,
+        "minDate": min_date,
+        "maxDate": max_date,
+    });
+
+    let path = dir.join("metadata.json");
+    let tmp_path = dir.join("metadata.json.tmp");
+    let contents = serde_json::to_string_pretty(&metadata)?;
+    std::fs::write(&tmp_path, contents)?;
+    std::fs::rename(&tmp_path, &path)?;
+
+    log::info!("Server metadata generated: {}", path.display());
+    Ok(())
 }
 
 /// Exports all incidents from `PostGIS` as newline-delimited `GeoJSON`,

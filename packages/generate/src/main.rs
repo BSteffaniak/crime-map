@@ -12,7 +12,7 @@ use clap::{Args, Parser, Subcommand};
 use crime_map_database::db;
 use crime_map_generate::{
     GenerateArgs, OUTPUT_COUNT_DB, OUTPUT_H3_DB, OUTPUT_INCIDENTS_DB, OUTPUT_INCIDENTS_PMTILES,
-    output_dir, resolve_source_ids, run_with_cache,
+    OUTPUT_METADATA, output_dir, resolve_source_ids, run_with_cache,
 };
 
 #[derive(Parser)]
@@ -155,6 +155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     OUTPUT_INCIDENTS_DB,
                     OUTPUT_COUNT_DB,
                     OUTPUT_H3_DB,
+                    OUTPUT_METADATA,
                 ],
                 None,
             )

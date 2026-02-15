@@ -4,6 +4,18 @@ import { layers, namedFlavor } from "@protomaps/basemaps";
 import type { StyleSpecification } from "maplibre-gl";
 import hexbinConfig from "@config/hexbins.json";
 
+/**
+ * PMTiles URL for crime incident data. Configurable via `VITE_TILES_URL`
+ * environment variable at build time.
+ *
+ * - Local dev: defaults to `pmtiles:///tiles/incidents.pmtiles` (served by
+ *   the Rust backend via Vite proxy)
+ * - Production: set to a CDN URL, e.g.
+ *   `pmtiles://https://pub-xxx.r2.dev/incidents.pmtiles`
+ */
+export const INCIDENTS_PMTILES_URL: string =
+  import.meta.env.VITE_TILES_URL ?? "pmtiles:///tiles/incidents.pmtiles";
+
 /** Default map center: geographic center of the contiguous US. */
 export const DEFAULT_CENTER: [number, number] = [-98.5795, 39.8283];
 export const DEFAULT_ZOOM = 4;

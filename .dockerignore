@@ -1,0 +1,16 @@
+target/
+app/node_modules/
+app/dist/
+data/
+.git/
+.github/
+.direnv/
+.vscode/
+.idea/
+infra/
+result
+*.db
+*.swp
+*.swo
+.DS_Store
+.env.local

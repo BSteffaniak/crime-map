@@ -55,10 +55,17 @@ pub async fn categories() -> HttpResponse {
 /// `GET /api/incidents`
 ///
 /// Queries incidents with bounding box, time range, and category filters.
+/// Returns `503 Service Unavailable` when `PostGIS` is not configured.
 pub async fn incidents(
     state: web::Data<AppState>,
     params: web::Query<IncidentQueryParams>,
 ) -> HttpResponse {
+    let Some(ref db) = state.db else {
+        return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+            "error": "Database not configured (running in serverless mode)"
+        }));
+    };
+
     let bbox = params.bbox.as_deref().and_then(parse_bbox);
 
     let categories: Vec<CrimeCategory> = params
@@ -90,7 +97,7 @@ pub async fn incidents(
         offset: params.offset.unwrap_or(0),
     };
 
-    match queries::query_incidents(state.db.as_ref(), &query).await {
+    match queries::query_incidents(db.as_ref(), &query).await {
         Ok(rows) => {
             let api_incidents: Vec<ApiIncident> = rows.into_iter().map(ApiIncident::from).collect();
             HttpResponse::Ok().json(api_incidents)
@@ -107,9 +114,15 @@ pub async fn incidents(
 /// `GET /api/sources`
 ///
 /// Lists all configured data sources and their sync status.
+/// Returns `503 Service Unavailable` when `PostGIS` is not configured.
 pub async fn sources(state: web::Data<AppState>) -> HttpResponse {
-    match state
-        .db
+    let Some(ref db) = state.db else {
+        return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+            "error": "Database not configured (running in serverless mode)"
+        }));
+    };
+
+    match db
         .query_raw_params("SELECT * FROM crime_sources ORDER BY name", &[])
         .await
     {
@@ -1146,6 +1159,13 @@ pub async fn ai_ask(state: web::Data<AppState>, body: web::Json<AiAskRequest>) -
         }));
     }
 
+    // Check if PostGIS is available (required for AI tools)
+    let Some(ref db) = state.db else {
+        return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+            "error": "AI analytics require a database connection (DATABASE_URL not configured)"
+        }));
+    };
+
     // Check if AI is configured
     let provider = match crime_map_ai::providers::create_provider_from_env().await {
         Ok(p) => p,
@@ -1197,7 +1217,7 @@ pub async fn ai_ask(state: web::Data<AppState>, body: web::Json<AiAskRequest>) -
         }
     }
 
-    let db = state.db.clone();
+    let db = db.clone();
     let context = state.ai_context.clone();
     let conversations_db = state.conversations_db.clone();
     let conv_id = conversation_id.clone();

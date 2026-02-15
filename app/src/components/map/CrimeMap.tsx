@@ -11,6 +11,7 @@ import {
   HEX_STROKE_OPACITY,
   HEX_OPACITY_RANGE,
   VIEWPORT_THROTTLE_MS,
+  INCIDENTS_PMTILES_URL,
   hexFillColor,
   hexFillOpacity,
   hexOutlineColor,
@@ -168,7 +169,7 @@ function HeatmapLayer({
     if (!map.getSource("incidents")) {
       map.addSource("incidents", {
         type: "vector",
-        url: "pmtiles:///tiles/incidents.pmtiles",
+        url: INCIDENTS_PMTILES_URL,
       });
     }
 
@@ -358,7 +359,7 @@ function IncidentPointsLayer({
     if (!map.getSource("incidents")) {
       map.addSource("incidents", {
         type: "vector",
-        url: "pmtiles:///tiles/incidents.pmtiles",
+        url: INCIDENTS_PMTILES_URL,
       });
     }
 
