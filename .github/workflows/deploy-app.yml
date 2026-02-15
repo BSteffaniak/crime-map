@@ -24,10 +24,7 @@ jobs:
         uses: superfly/flyctl-actions/setup-flyctl@master
 
       - name: Deploy
-        run: |
-          fly deploy \
-            --build-arg "VITE_TILES_URL=${VITE_TILES_URL}" \
-            --build-arg "VITE_PROTOMAPS_API_KEY=${VITE_PROTOMAPS_API_KEY}"
+        run: ./scripts/deploy.sh app
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           VITE_TILES_URL: ${{ inputs.vite_tiles_url || secrets.VITE_TILES_URL }}
