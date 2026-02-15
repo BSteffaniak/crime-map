@@ -33,9 +33,11 @@ COPY config/ ./config/
 WORKDIR /app/app
 RUN bun install --frozen-lockfile
 
-# Build with the tiles URL passed as a build arg
+# Build with env vars passed as build args
 ARG VITE_TILES_URL=""
+ARG VITE_PROTOMAPS_API_KEY=""
 ENV VITE_TILES_URL=${VITE_TILES_URL}
+ENV VITE_PROTOMAPS_API_KEY=${VITE_PROTOMAPS_API_KEY}
 RUN bun run build
 
 # ── Stage 3: Minimal runtime ──────────────────────────────────────

@@ -50,8 +50,23 @@ export function defaultMapTheme(uiTheme: "light" | "dark"): MapTheme {
 // Protomaps style generation
 // ---------------------------------------------------------------------------
 
-/** Builds the Protomaps CDN URL using yesterday's date (guaranteed available). */
-function protomapsTileUrl(): string {
+/**
+ * Protomaps basemap tile source URL.
+ *
+ * - **Production**: set `VITE_PROTOMAPS_API_KEY` at build time to use the
+ *   hosted API (`api.protomaps.com`) which serves MVT tiles via TileJSON
+ *   with proper CORS headers. You must add your production origin(s) to
+ *   the key's allowed-origins list at https://protomaps.com/account.
+ * - **Local dev**: when no API key is set, falls back to the daily PMTiles
+ *   build from `build.protomaps.com` (works from localhost without CORS
+ *   issues).
+ */
+function protomapsTileSource(): string {
+  const apiKey = import.meta.env.VITE_PROTOMAPS_API_KEY as string | undefined;
+  if (apiKey) {
+    return `https://api.protomaps.com/tiles/v4.json?key=${apiKey}`;
+  }
+  // Fallback: daily build PMTiles (localhost only — CORS blocks other origins)
   const d = new Date();
   d.setDate(d.getDate() - 1);
   const yyyy = d.getFullYear();
@@ -60,7 +75,7 @@ function protomapsTileUrl(): string {
   return `pmtiles://https://build.protomaps.com/${yyyy}${mm}${dd}.pmtiles`;
 }
 
-const PMTILES_URL = protomapsTileUrl();
+const BASEMAP_SOURCE = protomapsTileSource();
 const GLYPHS_URL =
   "https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf";
 const SPRITE_BASE =
@@ -106,7 +121,7 @@ export function buildProtomapsStyle(theme: MapTheme): StyleSpecification {
     sources: {
       [SOURCE_NAME]: {
         type: "vector",
-        url: PMTILES_URL,
+        url: BASEMAP_SOURCE,
         attribution:
           '<a href="https://openstreetmap.org/copyright">OpenStreetMap</a> | <a href="https://protomaps.com">Protomaps</a>',
       },
