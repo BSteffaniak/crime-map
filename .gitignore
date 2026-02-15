@@ -11,8 +11,10 @@ data/downloads/
 *.db
 
 # Node/Frontend
-app/node_modules/
-app/dist/
+node_modules
+dist
+
+.wrangler
 
 # OS
 .DS_Store
