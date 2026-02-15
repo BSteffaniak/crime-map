@@ -1,0 +1,205 @@
+name: Deploy Data
+
+on:
+  workflow_dispatch:
+    inputs:
+      sources:
+        description: "Comma-separated source IDs to ingest (default: dc_mpd)"
+        required: false
+        type: string
+        default: "dc_mpd"
+      limit:
+        description: "Max records per source (leave empty for no limit)"
+        required: false
+        type: string
+      force:
+        description: "Force full re-sync and regeneration"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-data
+  cancel-in-progress: false
+
+env:
+  DATABASE_URL: postgres://postgres:postgres@localhost:5432/crime_map
+  FLY_APP: crime-map
+
+jobs:
+  deploy-data:
+    name: Ingest, Generate, and Upload
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_DB: crime_map
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Setup Fly.io CLI
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake
+
+      - name: Build ingest and generate binaries
+        run: |
+          cargo build --release \
+            --bin crime_map_ingest \
+            --bin crime_map_generate \
+            --features duckdb-bundled
+
+      - name: Run database migrations
+        run: |
+          cargo ingest list-sources > /dev/null 2>&1 || true
+          echo "Database ready"
+
+      - name: Ingest data
+        run: |
+          SOURCES="${{ inputs.sources || 'dc_mpd' }}"
+          echo "Ingesting sources: ${SOURCES}"
+
+          INGEST_ARGS="sync-all --sources ${SOURCES}"
+          if [ -n "${{ inputs.limit }}" ]; then
+            INGEST_ARGS="${INGEST_ARGS} --limit ${{ inputs.limit }}"
+          fi
+          if [ "${{ inputs.force }}" = "true" ]; then
+            INGEST_ARGS="${INGEST_ARGS} --force"
+          fi
+
+          cargo ingest ${INGEST_ARGS}
+
+      - name: Generate all outputs
+        run: |
+          GENERATE_ARGS="all"
+          if [ "${{ inputs.force }}" = "true" ]; then
+            GENERATE_ARGS="${GENERATE_ARGS} --force"
+          fi
+
+          cargo generate ${GENERATE_ARGS}
+
+      - name: List generated files
+        run: ls -lah data/generated/
+
+      - name: Upload PMTiles to Cloudflare R2
+        run: |
+          if [ -f "data/generated/incidents.pmtiles" ]; then
+            echo "Uploading incidents.pmtiles to R2..."
+            bunx wrangler r2 object put crime-map-tiles/incidents.pmtiles \
+              --file data/generated/incidents.pmtiles \
+              --content-type "application/octet-stream" \
+              --remote
+          else
+            echo "WARNING: incidents.pmtiles not found, skipping R2 upload"
+          fi
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Upload data files to Fly volume
+        run: |
+          APP_URL="https://${FLY_APP}.fly.dev"
+
+          # Wake the machine
+          echo "Waking machine..."
+          curl -sf "${APP_URL}/api/health" || true
+          sleep 5
+
+          # Start keepalive in background
+          (while true; do curl -sf "${APP_URL}/api/health" > /dev/null 2>&1; sleep 30; done) &
+          KEEPALIVE_PID=$!
+          trap "kill $KEEPALIVE_PID 2>/dev/null || true" EXIT
+
+          # Upload each data file
+          for file in incidents.db counts.duckdb h3.duckdb metadata.json manifest.json; do
+            if [ -f "data/generated/${file}" ]; then
+              # Remove existing file so SFTP put can write
+              fly ssh console --command "rm -f /app/data/generated/${file}" 2>/dev/null || true
+
+              size=$(du -h "data/generated/${file}" | cut -f1)
+              echo "Uploading ${file} (${size})..."
+              fly ssh sftp shell <<EOF
+          put data/generated/${file} /app/data/generated/${file}
+          EOF
+            else
+              echo "Skipping ${file} (not found)"
+            fi
+          done
+
+          kill $KEEPALIVE_PID 2>/dev/null || true
+          trap - EXIT
+
+          # Verify uploads
+          echo "Verifying uploaded files..."
+          VERIFY_FAILED=false
+          for file in incidents.db counts.duckdb h3.duckdb metadata.json manifest.json; do
+            if [ -f "data/generated/${file}" ]; then
+              local_size=$(wc -c < "data/generated/${file}" | tr -d ' ')
+              remote_raw=$(fly ssh console --command "stat -c %s /app/data/generated/${file} 2>/dev/null || echo 0" 2>/dev/null || echo "0")
+              remote_size=$(echo "$remote_raw" | grep -oE '[0-9]+' | head -1)
+              remote_size="${remote_size:-0}"
+
+              if [ "$local_size" != "$remote_size" ]; then
+                echo "MISMATCH ${file}: local=${local_size} remote=${remote_size}"
+                VERIFY_FAILED=true
+              else
+                echo "OK ${file} (${local_size} bytes)"
+              fi
+            fi
+          done
+
+          if [ "$VERIFY_FAILED" = true ]; then
+            echo "ERROR: File verification failed"
+            exit 1
+          fi
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Restart machine and verify data loaded
+        run: |
+          APP_URL="https://${FLY_APP}.fly.dev"
+
+          echo "Restarting machine to load new data..."
+          fly machine restart --skip-health-checks
+          sleep 5
+
+          echo "Waiting for server to load data..."
+          for i in $(seq 1 20); do
+            health=$(curl -sf "${APP_URL}/api/health" 2>/dev/null || echo "{}")
+            if echo "$health" | python3 -c "import sys,json; sys.exit(0 if json.load(sys.stdin).get('dataReady') else 1)" 2>/dev/null; then
+              echo "Server reports dataReady=true"
+              echo "$health" | python3 -m json.tool
+              exit 0
+            fi
+            echo "Waiting for data to load... ($i/20)"
+            sleep 3
+          done
+
+          echo "ERROR: Server did not report dataReady=true within expected time"
+          fly logs --no-tail 2>/dev/null | tail -30 || true
+          exit 1
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
