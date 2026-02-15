@@ -71,6 +71,7 @@ struct PipelineConfig {
     generate_limit: Option<u64>,
     generate_keep_intermediate: bool,
     generate_force: bool,
+    generate_sources_filter: Option<String>,
 }
 
 impl Default for PipelineConfig {
@@ -86,6 +87,7 @@ impl Default for PipelineConfig {
             generate_limit: None,
             generate_keep_intermediate: false,
             generate_force: false,
+            generate_sources_filter: None,
         }
     }
 }
@@ -193,8 +195,29 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
         Vec::new()
     };
 
-    // --- 4. Sync-specific prompts (always asked if syncing) ---
+    // --- 3b. Optionally scope generate to the selected sources ---
+    let selected_all_sources = selected_source_indices.len() == all_sources.len();
+
     let mut config = PipelineConfig::default();
+
+    if has_generate && !selected_all_sources {
+        let scope_to_selected = Confirm::new()
+            .with_prompt("Only generate for the selected sources?")
+            .default(false)
+            .interact()?;
+
+        if scope_to_selected {
+            config.generate_sources_filter = Some(
+                selected_source_indices
+                    .iter()
+                    .map(|&i| all_sources[i].id().to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+        }
+    }
+
+    // --- 4. Sync-specific prompts (always asked if syncing) ---
 
     if has_sync {
         config.sync_force = Confirm::new()
@@ -452,7 +475,7 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
 
         let args = crime_map_generate::GenerateArgs {
             limit: config.generate_limit,
-            sources: None,
+            sources: config.generate_sources_filter.clone(),
             keep_intermediate: config.generate_keep_intermediate,
             force: config.generate_force,
         };
