@@ -24,6 +24,7 @@ concurrency:
 
 env:
   DATABASE_URL: postgres://postgres:postgres@localhost:5432/crime_map
+  RUST_LOG: crime_map=debug
 
 jobs:
   deploy-data:
