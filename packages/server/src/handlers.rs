@@ -19,10 +19,12 @@ use switchy_database::{DatabaseValue, Row};
 use crate::AppState;
 
 /// `GET /api/health`
-pub async fn health() -> HttpResponse {
+pub async fn health(state: web::Data<AppState>) -> HttpResponse {
     HttpResponse::Ok().json(ApiHealth {
         healthy: true,
         version: env!("CARGO_PKG_VERSION").to_string(),
+        data_ready: state.data.get().is_some(),
+        database_connected: state.db.is_some(),
     })
 }
 
@@ -171,6 +173,12 @@ pub async fn sidebar(
     state: web::Data<AppState>,
     params: web::Query<SidebarQueryParams>,
 ) -> HttpResponse {
+    let Some(data) = state.data.get() else {
+        return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+            "error": "Data files are still loading. Please try again shortly."
+        }));
+    };
+
     let limit = params.limit.unwrap_or(50);
     let offset = params.offset.unwrap_or(0);
     let bbox = params.bbox.as_deref().and_then(parse_bbox);
@@ -178,14 +186,14 @@ pub async fn sidebar(
     let (features_query, feature_params) =
         build_features_query(&params, bbox.as_ref(), limit, offset);
 
-    let sidebar_db = state.sidebar_db.as_ref();
+    let sidebar_db = data.sidebar_db.as_ref();
 
     let features_result = sidebar_db
         .query_raw_params(&features_query, &feature_params)
         .await;
 
     // Build and execute the DuckDB count query
-    let count_db = state.count_db.clone();
+    let count_db = data.count_db.clone();
     let count_params_owned = params.into_inner();
     let bbox_owned = bbox;
 
@@ -454,11 +462,17 @@ pub async fn hexbins(
     state: web::Data<AppState>,
     params: web::Query<HexbinQueryParams>,
 ) -> HttpResponse {
+    let Some(data) = state.data.get() else {
+        return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+            "error": "Data files are still loading. Please try again shortly."
+        }));
+    };
+
     let bbox = params.bbox.as_deref().and_then(parse_bbox);
     let zoom = params.zoom.unwrap_or(9);
     let resolution = resolution_for_zoom(zoom);
 
-    let h3_pool = state.h3_pool.clone();
+    let h3_pool = data.h3_pool.clone();
     let params_owned = params.into_inner();
     let bbox_owned = bbox;
 
@@ -546,11 +560,17 @@ pub async fn clusters(
     state: web::Data<AppState>,
     params: web::Query<ClusterQueryParams>,
 ) -> HttpResponse {
+    let Some(data) = state.data.get() else {
+        return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+            "error": "Data files are still loading. Please try again shortly."
+        }));
+    };
+
     let bbox = params.bbox.as_deref().and_then(parse_bbox);
     let zoom = params.zoom.unwrap_or(9);
     let target_k = params.k.unwrap_or_else(|| compute_target_k(zoom));
 
-    let count_db = state.count_db.clone();
+    let count_db = data.count_db.clone();
     let params_owned = params.into_inner();
     let bbox_owned = bbox;
 

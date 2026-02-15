@@ -140,6 +140,10 @@ pub struct ApiHealth {
     pub healthy: bool,
     /// Service version.
     pub version: String,
+    /// Whether pre-generated data files are loaded and ready.
+    pub data_ready: bool,
+    /// Whether the `PostGIS` database is connected.
+    pub database_connected: bool,
 }
 
 /// Query parameters for the sidebar endpoint.

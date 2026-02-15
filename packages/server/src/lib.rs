@@ -11,15 +11,22 @@
 //! endpoint. Conversation history is persisted in a dedicated `SQLite`
 //! database at `data/conversations.db`.
 //!
+//! ## Graceful Startup
+//!
+//! The server starts immediately and serves the health endpoint even if
+//! the pre-generated data files (`incidents.db`, `counts.duckdb`,
+//! `h3.duckdb`) are not yet present. A background task polls for the
+//! files and initializes the data connections once they appear. Endpoints
+//! that depend on the data return `503 Service Unavailable` until the
+//! data is ready.
+//!
 //! ## Optional `PostGIS`
 //!
 //! If the `DATABASE_URL` environment variable is not set, the server boots
-//! without a `PostGIS` connection. The core map experience (tiles, sidebar,
-//! hexbins, clusters, categories) works fully from pre-generated files.
-//! Only the AI chat, `/api/incidents`, and `/api/sources` endpoints require
-//! `PostGIS` and will return `503 Service Unavailable` when it is absent.
-//! The AI agent context (available cities, date range) is loaded from a
-//! pre-generated `metadata.json` file instead.
+//! without a `PostGIS` connection. Only the AI chat, `/api/incidents`, and
+//! `/api/sources` endpoints require `PostGIS` and will return `503` when
+//! it is absent. The AI agent context is loaded from a pre-generated
+//! `metadata.json` file instead.
 
 mod handlers;
 pub mod interactive;
@@ -27,9 +34,9 @@ pub mod interactive;
 use actix_cors::Cors;
 use actix_files::Files;
 use actix_web::{App, HttpServer, middleware, web};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use switchy_database::Database;
 use switchy_database_connection::init_sqlite_rusqlite;
 
@@ -83,11 +90,9 @@ impl DuckDbPool {
     }
 }
 
-/// Shared application state.
-pub struct AppState {
-    /// `PostGIS` database connection for primary queries.
-    /// `None` when `DATABASE_URL` is not set (serverless mode).
-    pub db: Option<Arc<dyn Database>>,
+/// Pre-generated data connections that are initialized lazily once data
+/// files become available on disk.
+pub struct DataState {
     /// `SQLite` database for sidebar queries (pre-generated, read-only).
     pub sidebar_db: Arc<dyn Database>,
     /// `DuckDB` connection for fast pre-aggregated count queries.
@@ -95,10 +100,102 @@ pub struct AppState {
     pub count_db: Arc<Mutex<duckdb::Connection>>,
     /// Pool of read-only `DuckDB` connections for H3 hexbin queries.
     pub h3_pool: Arc<DuckDbPool>,
+}
+
+/// Shared application state.
+pub struct AppState {
+    /// `PostGIS` database connection for primary queries.
+    /// `None` when `DATABASE_URL` is not set (serverless mode).
+    pub db: Option<Arc<dyn Database>>,
+    /// Pre-generated data connections. Starts empty and gets populated
+    /// by the background file watcher once all data files are present.
+    pub data: Arc<OnceLock<DataState>>,
     /// AI agent context (available cities, date range).
     pub ai_context: Arc<crime_map_ai::agent::AgentContext>,
     /// `SQLite` database for persistent AI conversation storage.
     pub conversations_db: Arc<dyn Database>,
+}
+
+/// Required data files that must all be present before the server can
+/// serve map data.
+const REQUIRED_DATA_FILES: &[&str] = &["incidents.db", "counts.duckdb", "h3.duckdb"];
+
+/// Interval between file existence checks when data files are missing.
+const DATA_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Initializes the data connections from the pre-generated files in the
+/// given directory.
+///
+/// # Errors
+///
+/// Returns an error if any database file cannot be opened.
+fn init_data_state(dir: &Path) -> Result<DataState, Box<dyn std::error::Error>> {
+    log::info!("Opening sidebar SQLite database...");
+    let sidebar_path = dir.join("incidents.db");
+    let sidebar_db = init_sqlite_rusqlite(Some(&sidebar_path))
+        .map_err(|e| format!("Failed to open sidebar SQLite: {e}"))?;
+
+    log::info!("Opening DuckDB count database...");
+    let count_path = dir.join("counts.duckdb");
+    let count_db = duckdb::Connection::open_with_flags(
+        &count_path,
+        duckdb::Config::default()
+            .access_mode(duckdb::AccessMode::ReadOnly)
+            .map_err(|e| format!("Failed to set DuckDB access mode: {e}"))?,
+    )
+    .map_err(|e| format!("Failed to open DuckDB count database: {e}"))?;
+
+    log::info!("Opening H3 hexbin DuckDB connection pool...");
+    let h3_path = dir.join("h3.duckdb");
+    let h3_pool = DuckDbPool::new(&h3_path, 4);
+
+    Ok(DataState {
+        sidebar_db: Arc::from(sidebar_db),
+        count_db: Arc::new(Mutex::new(count_db)),
+        h3_pool: Arc::new(h3_pool),
+    })
+}
+
+/// Spawns a background task that waits for data files to appear and
+/// initializes the [`DataState`] once they are all present.
+///
+/// If the files already exist at startup, the `OnceLock` is set
+/// immediately. Otherwise, the task polls every
+/// [`DATA_POLL_INTERVAL`] seconds until the files appear.
+fn spawn_data_watcher(data_lock: Arc<OnceLock<DataState>>, data_dir: PathBuf) {
+    tokio::spawn(async move {
+        loop {
+            let missing: Vec<&&str> = REQUIRED_DATA_FILES
+                .iter()
+                .filter(|f| !data_dir.join(f).exists())
+                .collect();
+
+            if missing.is_empty() {
+                match init_data_state(&data_dir) {
+                    Ok(state) => {
+                        if data_lock.set(state).is_ok() {
+                            log::info!("All data files loaded successfully");
+                        }
+                        return;
+                    }
+                    Err(e) => {
+                        log::error!("Failed to open data files (will retry): {e}");
+                    }
+                }
+            } else {
+                log::info!(
+                    "Waiting for data files: {}",
+                    missing
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+
+            tokio::time::sleep(DATA_POLL_INTERVAL).await;
+        }
+    });
 }
 
 /// Loads the AI agent context from a pre-generated `metadata.json` file.
@@ -164,9 +261,13 @@ fn load_metadata_context(dir: &Path) -> crime_map_ai::agent::AgentContext {
 
 /// Starts the crime map API server.
 ///
+/// The server starts immediately and begins serving the health endpoint
+/// and frontend static files. Data-dependent endpoints (`/api/sidebar`,
+/// `/api/hexbins`, `/api/clusters`) become available once the
+/// pre-generated data files appear on the volume.
+///
 /// If `DATABASE_URL` is set, connects to `PostGIS`, runs migrations, and
 /// enables all endpoints. If not set, boots in serverless mode where
-/// the core map experience works from pre-generated files and
 /// `PostGIS`-dependent endpoints return `503`.
 ///
 /// # Errors
@@ -176,11 +277,13 @@ fn load_metadata_context(dir: &Path) -> crime_map_ai::agent::AgentContext {
 ///
 /// # Panics
 ///
-/// Panics if the sidebar `SQLite` database cannot be opened, or the
-/// `DuckDB` count database cannot be opened.
-#[allow(clippy::future_not_send)]
+/// Panics if `DATABASE_URL` is set but the connection or migration fails,
+/// or if the conversations database cannot be opened.
+#[allow(clippy::future_not_send, clippy::too_many_lines)]
 pub async fn run_server() -> std::io::Result<()> {
     pretty_env_logger::init_custom_env("RUST_LOG");
+
+    let data_dir = PathBuf::from("data/generated");
 
     // Optionally connect to PostGIS
     let db_conn: Option<Arc<dyn Database>> = if std::env::var("DATABASE_URL").is_ok() {
@@ -200,24 +303,43 @@ pub async fn run_server() -> std::io::Result<()> {
         None
     };
 
-    log::info!("Opening sidebar SQLite database...");
-    let sidebar_path = Path::new("data/generated/incidents.db");
-    let sidebar_db =
-        init_sqlite_rusqlite(Some(sidebar_path)).expect("Failed to open sidebar SQLite database");
+    // Initialize data state lazily via OnceLock
+    let data = Arc::new(OnceLock::new());
 
-    log::info!("Opening DuckDB count database...");
-    let count_path = Path::new("data/generated/counts.duckdb");
-    let count_db = duckdb::Connection::open_with_flags(
-        count_path,
-        duckdb::Config::default()
-            .access_mode(duckdb::AccessMode::ReadOnly)
-            .expect("Failed to set DuckDB access mode"),
-    )
-    .expect("Failed to open DuckDB count database");
+    // Try to load data immediately if files exist, otherwise spawn watcher
+    let all_files_exist = REQUIRED_DATA_FILES
+        .iter()
+        .all(|f| data_dir.join(f).exists());
 
-    log::info!("Opening H3 hexbin DuckDB connection pool...");
-    let h3_path = Path::new("data/generated/h3.duckdb");
-    let h3_pool = DuckDbPool::new(h3_path, 4);
+    if all_files_exist {
+        match init_data_state(&data_dir) {
+            Ok(state) => {
+                if data.set(state).is_err() {
+                    log::warn!("Data state already initialized (race condition)");
+                }
+                log::info!("Data files loaded at startup");
+            }
+            Err(e) => {
+                log::error!("Failed to open data files at startup: {e}");
+                log::info!("Will retry in background...");
+                spawn_data_watcher(Arc::clone(&data), data_dir.clone());
+            }
+        }
+    } else {
+        let missing: Vec<&&str> = REQUIRED_DATA_FILES
+            .iter()
+            .filter(|f| !data_dir.join(f).exists())
+            .collect();
+        log::info!(
+            "Data files not yet available (missing: {}); will poll until ready",
+            missing
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        spawn_data_watcher(Arc::clone(&data), data_dir.clone());
+    }
 
     // Build AI context from metadata.json or PostGIS (if available)
     log::info!("Building AI context...");
@@ -236,7 +358,7 @@ pub async fn run_server() -> std::io::Result<()> {
         }
     } else {
         // No PostGIS -- load from pre-generated metadata
-        load_metadata_context(Path::new("data/generated"))
+        load_metadata_context(&data_dir)
     };
 
     log::info!("Opening conversations database...");
@@ -247,9 +369,7 @@ pub async fn run_server() -> std::io::Result<()> {
 
     let state = web::Data::new(AppState {
         db: db_conn,
-        sidebar_db: Arc::from(sidebar_db),
-        count_db: Arc::new(Mutex::new(count_db)),
-        h3_pool: Arc::new(h3_pool),
+        data,
         ai_context: Arc::new(ai_context),
         conversations_db: Arc::from(conversations_db),
     });
