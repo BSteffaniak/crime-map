@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FilterState, CategoryId } from "@/lib/types";
-import { DEFAULT_FILTERS } from "@/lib/types";
+import { CRIME_CATEGORIES, DEFAULT_FILTERS } from "@/lib/types";
 
 // -- URL serialization --
 
@@ -95,11 +95,25 @@ export function useFilters() {
   const toggleCategory = useCallback((id: CategoryId) => {
     setFilters((prev) => {
       const exists = prev.categories.includes(id);
+      const cat = CRIME_CATEGORIES[id];
+      const catSubIds = cat ? cat.subcategories.map((s) => s.id) : [];
+
+      if (exists) {
+        // Removing category — also remove all its subcategory IDs
+        const catSubSet = new Set<string>(catSubIds);
+        return {
+          ...prev,
+          categories: prev.categories.filter((c) => c !== id),
+          subcategories: prev.subcategories.filter((s) => !catSubSet.has(s)),
+        };
+      }
+      // Adding category — also add all its subcategory IDs
+      const existing = new Set(prev.subcategories);
+      const newSubs = catSubIds.filter((s) => !existing.has(s));
       return {
         ...prev,
-        categories: exists
-          ? prev.categories.filter((c) => c !== id)
-          : [...prev.categories, id],
+        categories: [...prev.categories, id],
+        subcategories: [...prev.subcategories, ...newSubs],
       };
     });
   }, []);
@@ -107,11 +121,26 @@ export function useFilters() {
   const toggleSubcategory = useCallback((id: string) => {
     setFilters((prev) => {
       const exists = prev.subcategories.includes(id);
+      const newSubcategories = exists
+        ? prev.subcategories.filter((s) => s !== id)
+        : [...prev.subcategories, id];
+
+      // If removing a subcategory, check if any sibling subcategories
+      // remain checked. If none do, also remove the parent category.
+      let newCategories = prev.categories;
+      if (exists) {
+        const remaining = new Set(newSubcategories);
+        newCategories = prev.categories.filter((catId) => {
+          const cat = CRIME_CATEGORIES[catId];
+          // Keep category if at least one of its subcategories is still checked
+          return cat.subcategories.some((sub) => remaining.has(sub.id as string));
+        });
+      }
+
       return {
         ...prev,
-        subcategories: exists
-          ? prev.subcategories.filter((s) => s !== id)
-          : [...prev.subcategories, id],
+        categories: newCategories,
+        subcategories: newSubcategories,
       };
     });
   }, []);
@@ -168,8 +197,8 @@ export function useFilters() {
 
   const activeFilterCount = useMemo(() => {
     let count = 0;
-    if (filters.categories.length > 0) count++;
-    if (filters.subcategories.length > 0) count++;
+    // Categories + subcategories are one conceptual "crime type" filter
+    if (filters.categories.length > 0 || filters.subcategories.length > 0) count++;
     if (filters.severityMin > 1) count++;
     if (filters.datePreset) count++;
     if (filters.arrestMade !== null) count++;
