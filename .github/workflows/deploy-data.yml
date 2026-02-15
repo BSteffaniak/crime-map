@@ -25,6 +25,9 @@ concurrency:
 env:
   DATABASE_URL: postgres://postgres:postgres@localhost:5432/crime_map
   RUST_LOG: crime_map=debug
+  DUCKDB_LIB_DIR: /usr/local/lib/duckdb
+  DUCKDB_INCLUDE_DIR: /usr/local/lib/duckdb
+  LD_LIBRARY_PATH: /usr/local/lib/duckdb
 
 jobs:
   deploy-data:
@@ -64,13 +67,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends cmake
-
-      - name: Build ingest and generate binaries
-        run: |
-          cargo build --release \
-            --bin crime_map_ingest \
-            --bin crime_map_generate \
-            --features duckdb-bundled
+          wget -q https://github.com/duckdb/duckdb/releases/download/v1.4.4/libduckdb-linux-amd64.zip
+          sudo mkdir -p /usr/local/lib/duckdb
+          sudo unzip -o libduckdb-linux-amd64.zip -d /usr/local/lib/duckdb
 
       - name: Run database migrations
         run: |
