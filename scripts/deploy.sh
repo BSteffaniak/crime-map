@@ -48,7 +48,7 @@ command_data() {
 
     # Start a background keepalive to prevent Fly auto-suspend during upload
     local fly_app
-    fly_app=$(fly status --json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Name'])" 2>/dev/null || echo "crime-map")
+    fly_app=$(fly status --json 2>/dev/null | jq -r '.Name' 2>/dev/null || echo "crime-map")
     echo "    Starting keepalive for ${fly_app}.fly.dev..."
     (while true; do curl -sf "https://${fly_app}.fly.dev/api/health" > /dev/null 2>&1; sleep 30; done) &
     local keepalive_pid=$!
@@ -137,7 +137,7 @@ EOF
 
     # Restart the machine to ensure clean data loading
     echo "==> Restarting machine to load new data..."
-    fly machine restart --skip-health-checks
+    fly machine restart "$(fly machine list --json | jq -r '.[0].id')" --skip-health-checks
     sleep 3
 
     # Wait for data to be ready
@@ -147,7 +147,7 @@ EOF
     while [ $attempts -lt $max_attempts ]; do
         local health
         health=$(curl -sf "https://${fly_app}.fly.dev/api/health" 2>/dev/null || echo "{}")
-        if echo "$health" | python3 -c "import sys,json; sys.exit(0 if json.load(sys.stdin).get('dataReady') else 1)" 2>/dev/null; then
+        if echo "$health" | jq -e '.dataReady' > /dev/null 2>&1; then
             echo "    Server reports dataReady=true"
             break
         fi
