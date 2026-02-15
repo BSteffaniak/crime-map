@@ -71,6 +71,12 @@ jobs:
           sudo mkdir -p /usr/local/lib/duckdb
           sudo unzip -o libduckdb-linux-amd64.zip -d /usr/local/lib/duckdb
 
+      - name: Install tippecanoe
+        run: |
+          git clone --depth 1 https://github.com/felt/tippecanoe.git /tmp/tippecanoe
+          make -j$(nproc) -C /tmp/tippecanoe
+          sudo make -C /tmp/tippecanoe install
+
       - name: Run database migrations
         run: |
           cargo ingest list-sources > /dev/null 2>&1 || true
