@@ -1,6 +1,14 @@
 terraform {
   required_version = ">= 1.6.0"
 
+  cloud {
+    hostname     = "app.terraform.io"
+    organization = "opencrimemap"
+    workspaces {
+      name = "crime-map-deploy"
+    }
+  }
+
   required_providers {
     fly = {
       source  = "andrewbaxter/fly"

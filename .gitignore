@@ -28,3 +28,10 @@ dist
 # Nix
 result
 .direnv
+
+# Terraform / OpenTofu
+**/.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+!*.tfvars.example
