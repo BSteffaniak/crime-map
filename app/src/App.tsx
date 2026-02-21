@@ -33,6 +33,7 @@ export default function App() {
     setDatePreset,
     setArrestFilter,
     toggleSource,
+    setSources,
     clearAll,
     activeFilterCount,
   } = useFilters();
@@ -139,6 +140,7 @@ export default function App() {
               onSetDatePreset={setDatePreset}
               onSetArrestFilter={setArrestFilter}
               onToggleSource={toggleSource}
+              onClearSources={() => setSources([])}
               onClearAll={clearAll}
               activeFilterCount={activeFilterCount}
             />

@@ -32,6 +32,7 @@ interface FilterPanelProps {
   onSetDatePreset: (preset: string | null) => void;
   onSetArrestFilter: (value: boolean | null) => void;
   onToggleSource: (sourceId: number) => void;
+  onClearSources: () => void;
   onClearAll: () => void;
   activeFilterCount: number;
 }
@@ -46,6 +47,7 @@ export default function FilterPanel({
   onSetDatePreset,
   onSetArrestFilter,
   onToggleSource,
+  onClearSources,
   onClearAll,
   activeFilterCount,
 }: FilterPanelProps) {
@@ -214,14 +216,19 @@ export default function FilterPanel({
 
       {/* Data Source Section */}
       <div className="px-4 py-3">
-        <h3 className="mb-2 text-sm font-medium text-muted-foreground">
-          Data Source
+        <div className="mb-2 flex items-center justify-between">
+          <h3 className="text-sm font-medium text-muted-foreground">
+            Data Source
+          </h3>
           {filters.sources.length > 0 && (
-            <span className="ml-1.5 text-xs text-blue-600 dark:text-blue-400">
-              ({filters.sources.length} selected)
-            </span>
+            <button
+              onClick={onClearSources}
+              className="text-xs text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300"
+            >
+              Clear ({filters.sources.length})
+            </button>
           )}
-        </h3>
+        </div>
 
         {/* Search input */}
         <input
