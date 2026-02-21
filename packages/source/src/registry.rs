@@ -171,11 +171,32 @@ const SOURCE_TOMLS: &[(&str, &str)] = &[
         "howard_county_ccm_md",
         include_str!("../sources/howard_county_ccm_md.toml"),
     ),
+    (
+        "hagerstown_md",
+        include_str!("../sources/hagerstown_md.toml"),
+    ),
+    ("frederick_md", include_str!("../sources/frederick_md.toml")),
+    (
+        "mount_airy_md",
+        include_str!("../sources/mount_airy_md.toml"),
+    ),
+    (
+        "annapolis_ccm_md",
+        include_str!("../sources/annapolis_ccm_md.toml"),
+    ),
+    (
+        "cambridge_ccm_md",
+        include_str!("../sources/cambridge_ccm_md.toml"),
+    ),
+    (
+        "montgomery_county_ccm_md",
+        include_str!("../sources/montgomery_county_ccm_md.toml"),
+    ),
 ];
 
 /// Total number of configured sources (used in tests).
 #[cfg(test)]
-const EXPECTED_SOURCE_COUNT: usize = 70;
+const EXPECTED_SOURCE_COUNT: usize = 76;
 
 /// Returns all configured source definitions, parsed from embedded TOML.
 ///

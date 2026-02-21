@@ -1,0 +1,47 @@
+id = "montgomery_county_ccm_md"
+name = "Montgomery County Police Department (CCM)"
+city = "Rockville"
+state = "MD"
+output_filename = "montgomery_county_ccm_crimes.json"
+
+[license]
+license_type = "proprietary"
+tos_url = "https://risk.lexisnexis.com/terms"
+attribution_required = true
+attribution_text = "LexisNexis Community Crime Map"
+allows_redistribution = false
+allows_scraping = false
+restricted = true
+notes = "Dormant source — registered on LexisNexis CCM (agency 77) but currently returns 0 records. Would be extremely high value if activated — large county. Will auto-ingest if the feed activates."
+
+[fetcher]
+type = "lexis_nexis_ccm"
+bbox = [-77.55, 38.90, -77.00, 39.35]
+agency_filter = "Montgomery County Police"
+
+[fields]
+incident_id = ["ReferenceID", "EntityID"]
+crime_type = ["Class", "UCRGroup"]
+
+[fields.occurred_at]
+type = "simple"
+field = "DateTime"
+
+[fields.lat]
+field = "Latitude"
+type = "string"
+
+[fields.lng]
+field = "Longitude"
+type = "string"
+
+[fields.description]
+type = "combine"
+fields = ["Crime", "LocationType"]
+separator = " — "
+
+[fields.arrest]
+type = "none"
+
+block_address = "AddressOfCrime"
+location_type = "LocationType"
