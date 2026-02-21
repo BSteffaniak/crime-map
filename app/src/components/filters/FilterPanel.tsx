@@ -51,24 +51,28 @@ export default function FilterPanel({
 }: FilterPanelProps) {
   const [sourceSearch, setSourceSearch] = useState("");
 
-  const filteredSources = useMemo(() => {
-    // Only show sources that have incidents in the viewport
-    const visible = sources.filter(
-      (s) => (sourceCounts[s.id] ?? 0) > 0 || filters.sources.includes(s.id),
-    );
+  const { pinnedSources, unpinnedSources } = useMemo(() => {
+    const selectedSet = new Set(filters.sources);
+    const q = sourceSearch.trim().toLowerCase();
 
-    // Sort by viewport count descending
-    const sorted = [...visible].sort(
-      (a, b) => (sourceCounts[b.id] ?? 0) - (sourceCounts[a.id] ?? 0),
-    );
+    const matchesSearch = (s: ApiSource) =>
+      !q ||
+      s.name.toLowerCase().includes(q) ||
+      s.coverageArea.toLowerCase().includes(q);
 
-    if (!sourceSearch.trim()) return sorted;
-    const q = sourceSearch.toLowerCase();
-    return sorted.filter(
-      (s) =>
-        s.name.toLowerCase().includes(q) ||
-        s.coverageArea.toLowerCase().includes(q),
-    );
+    // Pinned: selected sources, always shown (even if 0 in viewport after panning away)
+    const pinned = sources
+      .filter((s) => selectedSet.has(s.id) && matchesSearch(s))
+      .sort((a, b) => (sourceCounts[b.id] ?? 0) - (sourceCounts[a.id] ?? 0));
+
+    // Unpinned: visible-in-viewport sources that aren't selected
+    const unpinned = sources
+      .filter(
+        (s) => !selectedSet.has(s.id) && (sourceCounts[s.id] ?? 0) > 0 && matchesSearch(s),
+      )
+      .sort((a, b) => (sourceCounts[b.id] ?? 0) - (sourceCounts[a.id] ?? 0));
+
+    return { pinnedSources: pinned, unpinnedSources: unpinned };
   }, [sources, sourceCounts, sourceSearch, filters.sources]);
 
   return (
@@ -230,8 +234,35 @@ export default function FilterPanel({
 
         {/* Source list */}
         <div className="max-h-48 space-y-0.5 overflow-y-auto">
-          {filteredSources.map((source) => {
-            const isActive = filters.sources.includes(source.id);
+          {/* Pinned: selected sources always at top */}
+          {pinnedSources.map((source) => {
+            const viewportCount = sourceCounts[source.id] ?? 0;
+            return (
+              <label
+                key={source.id}
+                className="flex cursor-pointer items-center gap-2 rounded bg-blue-50 px-2 py-1 text-xs text-foreground hover:bg-blue-100 dark:bg-blue-900/20 dark:hover:bg-blue-900/30"
+              >
+                <input
+                  type="checkbox"
+                  checked
+                  onChange={() => onToggleSource(source.id)}
+                  className="h-3.5 w-3.5 rounded border-border"
+                />
+                <span className="font-medium">{source.name}</span>
+                <span className="ml-auto text-[10px] tabular-nums text-muted-foreground/60">
+                  {viewportCount.toLocaleString()}
+                </span>
+              </label>
+            );
+          })}
+
+          {/* Separator between pinned and unpinned */}
+          {pinnedSources.length > 0 && unpinnedSources.length > 0 && (
+            <div className="my-1 border-t border-border" />
+          )}
+
+          {/* Unpinned: visible-in-viewport sources */}
+          {unpinnedSources.map((source) => {
             const viewportCount = sourceCounts[source.id] ?? 0;
             return (
               <label
@@ -240,22 +271,22 @@ export default function FilterPanel({
               >
                 <input
                   type="checkbox"
-                  checked={isActive}
+                  checked={false}
                   onChange={() => onToggleSource(source.id)}
                   className="h-3.5 w-3.5 rounded border-border"
                 />
-                <span className={isActive ? "font-medium text-foreground" : ""}>
-                  {source.name}
-                </span>
+                <span>{source.name}</span>
                 <span className="ml-auto text-[10px] tabular-nums text-muted-foreground/60">
                   {viewportCount.toLocaleString()}
                 </span>
               </label>
             );
           })}
-          {filteredSources.length === 0 && (
+          {pinnedSources.length === 0 && unpinnedSources.length === 0 && (
             <p className="px-2 py-1 text-xs text-muted-foreground/60">
-              No sources match &quot;{sourceSearch}&quot;
+              {sourceSearch.trim()
+                ? <>No sources match &quot;{sourceSearch}&quot;</>
+                : "No sources in the current view"}
             </p>
           )}
         </div>
