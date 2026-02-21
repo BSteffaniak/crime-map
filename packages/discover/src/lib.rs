@@ -1467,6 +1467,11 @@ pub fn extract_source_info(
         }
         FetcherConfig::CityProtect { api_url, .. } => ("city_protect", api_url.clone()),
         FetcherConfig::PressRelease { listing_url, .. } => ("press_release", listing_url.clone()),
+        FetcherConfig::CrimeBulletin { url, .. } => ("crime_bulletin", url.clone()),
+        FetcherConfig::LexisNexisCcm { agency_filter, .. } => (
+            "lexisnexis_ccm",
+            format!("https://communitycrimemap.com (agency: {agency_filter})"),
+        ),
     }
 }
 

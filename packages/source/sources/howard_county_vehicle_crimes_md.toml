@@ -1,0 +1,47 @@
+id = "howard_county_vehicle_crimes_pd"
+name = "Howard County Police - Vehicle Crimes"
+city = "Columbia"
+state = "MD"
+output_filename = "howard_county_vehicle_crimes.json"
+
+[license]
+license_type = "open_data"
+attribution_required = true
+attribution_text = "Howard County Police Department"
+allows_redistribution = true
+restricted = false
+notes = "Third-party geocoded dataset derived from HCPD daily crime bulletins. Published on ArcGIS Online by GISDesignConcepts. Covers vehicle thefts and break-ins in Howard County (Columbia, Elkridge, Ellicott City, Jessup, etc.)."
+
+[fetcher]
+type = "arcgis"
+query_urls = [
+  "https://services7.arcgis.com/ROU2LwaFUeWH3laV/arcgis/rest/services/Vehicle_Crimes/FeatureServer/0/query",
+]
+page_size = 2000
+date_column = "IncidentDate"
+
+[fields]
+incident_id = ["GlobalID", "OBJECTID"]
+crime_type = ["CrimeType"]
+block_address = "Location"
+location_type = "City"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "IncidentDate"
+
+[fields.lat]
+field = "Latitude"
+type = "f64"
+
+[fields.lng]
+field = "Longitude"
+type = "f64"
+
+[fields.description]
+type = "combine"
+fields = ["CrimeType", "Description"]
+separator = " — "
+
+[fields.arrest]
+type = "none"

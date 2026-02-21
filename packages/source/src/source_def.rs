@@ -19,9 +19,11 @@ use crate::arcgis::{ArcGisConfig, fetch_arcgis};
 use crate::carto::{CartoConfig, fetch_carto};
 use crate::city_protect::{CityProtectConfig, fetch_city_protect};
 use crate::ckan::{CkanConfig, fetch_ckan};
+use crate::crime_bulletin::{CrimeBulletinConfig, fetch_crime_bulletin};
 use crate::csv_download::{CsvDownloadConfig, fetch_csv_download};
 use crate::html_table::{HtmlTableConfig, fetch_html_table};
 use crate::json_paginated::{JsonPaginatedConfig, fetch_json_paginated};
+use crate::lexisnexis_ccm::{LexisNexisCcmConfig, fetch_lexisnexis_ccm};
 use crate::odata::{ODataConfig, fetch_odata};
 use crate::parsing::parse_socrata_date;
 use crate::pdf_extract::{PdfExtractConfig, fetch_pdf_extract};
@@ -256,6 +258,25 @@ pub enum FetcherConfig {
         page_param: Option<String>,
         /// Maximum listing pages to crawl.
         max_pages: Option<u32>,
+    },
+    /// Daily crime-bulletin scraper (single-page accordion-style bulletins
+    /// with structured per-incident entries).
+    CrimeBulletin {
+        /// URL of the bulletin page.
+        url: String,
+        /// CSS selector for the accordion content containers.
+        content_selector: String,
+    },
+    /// `LexisNexis` Community Crime Map (CCM) incident API. Uses the
+    /// hidden REST API at `communitycrimemap.com` to fetch geocoded
+    /// incidents for a specific agency within a bounding box.
+    LexisNexisCcm {
+        /// Bounding box `[west, south, east, north]` for the agency's
+        /// jurisdiction.
+        bbox: [f64; 4],
+        /// Agency name filter — only incidents from agencies whose name
+        /// contains this string (case-insensitive) are kept.
+        agency_filter: String,
     },
 }
 
@@ -671,7 +692,9 @@ impl SourceDefinition {
             FetcherConfig::HtmlTable { .. }
             | FetcherConfig::CsvDownload { .. }
             | FetcherConfig::PdfExtract { .. }
-            | FetcherConfig::PressRelease { .. } => 0,
+            | FetcherConfig::PressRelease { .. }
+            | FetcherConfig::CrimeBulletin { .. }
+            | FetcherConfig::LexisNexisCcm { .. } => 0,
         }
     }
 
@@ -939,6 +962,38 @@ impl SourceDefinition {
                             article_selector,
                             page_param: page_param.as_deref().unwrap_or("page"),
                             max_pages: max_pages.unwrap_or(0),
+                            label: &name,
+                        },
+                        &options,
+                        &tx,
+                        &progress,
+                    )
+                    .await
+                }
+                FetcherConfig::CrimeBulletin {
+                    url,
+                    content_selector,
+                } => {
+                    fetch_crime_bulletin(
+                        &CrimeBulletinConfig {
+                            url,
+                            content_selector,
+                            label: &name,
+                        },
+                        &options,
+                        &tx,
+                        &progress,
+                    )
+                    .await
+                }
+                FetcherConfig::LexisNexisCcm {
+                    bbox,
+                    agency_filter,
+                } => {
+                    fetch_lexisnexis_ccm(
+                        &LexisNexisCcmConfig {
+                            bbox,
+                            agency_filter,
                             label: &name,
                         },
                         &options,

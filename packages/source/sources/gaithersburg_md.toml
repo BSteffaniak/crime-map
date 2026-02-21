@@ -1,0 +1,47 @@
+id = "gaithersburg_pd"
+name = "Gaithersburg Police Department"
+city = "Gaithersburg"
+state = "MD"
+output_filename = "gaithersburg_crimes.json"
+
+[license]
+license_type = "proprietary"
+tos_url = "https://risk.lexisnexis.com/terms"
+attribution_required = true
+attribution_text = "LexisNexis Community Crime Map"
+allows_redistribution = false
+allows_scraping = false
+restricted = true
+notes = "Data sourced from LexisNexis Community Crime Map. LexisNexis terms of service apply. Restricted source — requires --include-restricted to ingest."
+
+[fetcher]
+type = "lexis_nexis_ccm"
+bbox = [-77.25, 39.10, -77.15, 39.18]
+agency_filter = "Gaithersburg Police"
+
+[fields]
+incident_id = ["ReferenceID", "EntityID"]
+crime_type = ["Class", "UCRGroup"]
+
+[fields.occurred_at]
+type = "simple"
+field = "DateTime"
+
+[fields.lat]
+field = "Latitude"
+type = "string"
+
+[fields.lng]
+field = "Longitude"
+type = "string"
+
+[fields.description]
+type = "combine"
+fields = ["Crime", "LocationType"]
+separator = " — "
+
+[fields.arrest]
+type = "none"
+
+block_address = "AddressOfCrime"
+location_type = "LocationType"

@@ -86,6 +86,14 @@ const SOURCE_TOMLS: &[(&str, &str)] = &[
         include_str!("../sources/virginia_beach_va.toml"),
     ),
     ("annapolis_md", include_str!("../sources/annapolis_md.toml")),
+    (
+        "annapolis_gun_violence_md",
+        include_str!("../sources/annapolis_gun_violence_md.toml"),
+    ),
+    (
+        "howard_county_vehicle_crimes_md",
+        include_str!("../sources/howard_county_vehicle_crimes_md.toml"),
+    ),
     // ── CityProtect sources ──────────────────────────────────────────
     ("laurel_md", include_str!("../sources/laurel_md.toml")),
     ("bowie_md", include_str!("../sources/bowie_md.toml")),
@@ -123,11 +131,35 @@ const SOURCE_TOMLS: &[(&str, &str)] = &[
         "anne_arundel_county_md",
         include_str!("../sources/anne_arundel_county_md.toml"),
     ),
+    // ── Crime bulletin sources ───────────────────────────────────────
+    (
+        "howard_county_md",
+        include_str!("../sources/howard_county_md.toml"),
+    ),
+    // ── LexisNexis CCM sources ───────────────────────────────────────
+    (
+        "carroll_county_md",
+        include_str!("../sources/carroll_county_md.toml"),
+    ),
+    (
+        "westminster_md",
+        include_str!("../sources/westminster_md.toml"),
+    ),
+    (
+        "gaithersburg_md",
+        include_str!("../sources/gaithersburg_md.toml"),
+    ),
+    ("rockville_md", include_str!("../sources/rockville_md.toml")),
+    (
+        "takoma_park_md",
+        include_str!("../sources/takoma_park_md.toml"),
+    ),
+    ("hampstead_md", include_str!("../sources/hampstead_md.toml")),
 ];
 
 /// Total number of configured sources (used in tests).
 #[cfg(test)]
-const EXPECTED_SOURCE_COUNT: usize = 57;
+const EXPECTED_SOURCE_COUNT: usize = 66;
 
 /// Returns all configured source definitions, parsed from embedded TOML.
 ///

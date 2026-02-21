@@ -26,6 +26,9 @@ pub fn parse_socrata_date(s: &str) -> Option<DateTime<Utc>> {
         return Some(dt.with_timezone(&Utc));
     }
     // Try space-separated without timezone
+    if let Ok(naive) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f") {
+        return Some(naive.and_utc());
+    }
     if let Ok(naive) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
         return Some(naive.and_utc());
     }
@@ -88,6 +91,12 @@ mod tests {
     fn parses_space_separated_date() {
         let dt = parse_socrata_date("2024-01-15 14:30:00").unwrap();
         assert_eq!(dt.to_string(), "2024-01-15 14:30:00 UTC");
+    }
+
+    #[test]
+    fn parses_space_separated_date_with_fractional() {
+        let dt = parse_socrata_date("2025-01-31 21:01:00.000").unwrap();
+        assert_eq!(dt.to_string(), "2025-01-31 21:01:00 UTC");
     }
 
     #[test]

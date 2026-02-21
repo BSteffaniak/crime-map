@@ -1,0 +1,36 @@
+id = "howard_county_md"
+name = "Howard County PD Daily Crime Bulletin"
+city = "Columbia"
+state = "MD"
+output_filename = "howard_county_md_crimes.json"
+
+[license]
+license_type = "open_data"
+tos_url = "https://www.howardcountymd.gov/terms-use"
+attribution_required = true
+attribution_text = "Howard County Police Department"
+allows_redistribution = true
+allows_scraping = true
+restricted = false
+notes = "Public daily crime bulletins published on howardcountymd.gov/police/newsroom. Covers robberies, burglaries, vehicle thefts, theft from vehicles, carjackings, weapon violations, assaults."
+
+[fetcher]
+type = "crime_bulletin"
+url = "https://www.howardcountymd.gov/police/newsroom"
+content_selector = ".accordion__content .field__item"
+
+[fields]
+incident_id = ["incident_id"]
+crime_type = ["crime_type"]
+block_address = "block_address"
+
+[fields.occurred_at]
+type = "simple"
+field = "date"
+
+[fields.description]
+type = "single"
+field = "description"
+
+[fields.arrest]
+type = "none"

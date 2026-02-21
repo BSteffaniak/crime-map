@@ -1,0 +1,47 @@
+id = "annapolis_gun_violence_pd"
+name = "Annapolis Police - Gun Violence (2015-2022)"
+city = "Annapolis"
+state = "MD"
+output_filename = "annapolis_gun_violence.json"
+
+[license]
+license_type = "open_data"
+tos_url = "https://www.annapolis.gov/125/Terms-of-Use"
+attribution_required = true
+attribution_text = "City of Annapolis"
+allows_redistribution = true
+restricted = false
+notes = "Homicides, shootings, and shots fired incidents geocoded from APD data (2015-2022). Includes victim and suspect demographics."
+
+[fetcher]
+type = "arcgis"
+query_urls = [
+  "https://services.arcgis.com/7ww0md22RA7aTw3W/arcgis/rest/services/HOMICIDE_SHOOTING_SHOTSFIRED_2015_2022_Geocoded_Public_View/FeatureServer/4/query",
+]
+page_size = 2000
+date_column = "USER_Reported_On"
+
+[fields]
+incident_id = ["USER_Incident_Number"]
+crime_type = ["USER_Primary_Offense_Code"]
+block_address = "StName"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "USER_Reported_On"
+
+[fields.lat]
+field = "_geometry_y"
+type = "f64"
+
+[fields.lng]
+field = "_geometry_x"
+type = "f64"
+
+[fields.description]
+type = "combine"
+fields = ["USER_Primary_Offense_Code", "USER_Offense_Codes"]
+separator = " — "
+
+[fields.arrest]
+type = "none"
