@@ -5,6 +5,7 @@ import {
   type FilterState,
   type ApiSource,
 } from "@/lib/types";
+import type { SourceCounts } from "@/lib/source-counts/useSourceCounts";
 
 const DATE_PRESETS = [
   { id: "7d", label: "7 Days" },
@@ -24,6 +25,7 @@ const SEVERITY_LEVELS = [
 interface FilterPanelProps {
   filters: FilterState;
   sources: ApiSource[];
+  sourceCounts: SourceCounts;
   onToggleCategory: (id: CategoryId) => void;
   onToggleSubcategory: (id: string) => void;
   onSetSeverityMin: (value: number) => void;
@@ -37,6 +39,7 @@ interface FilterPanelProps {
 export default function FilterPanel({
   filters,
   sources,
+  sourceCounts,
   onToggleCategory,
   onToggleSubcategory,
   onSetSeverityMin,
@@ -49,14 +52,24 @@ export default function FilterPanel({
   const [sourceSearch, setSourceSearch] = useState("");
 
   const filteredSources = useMemo(() => {
-    if (!sourceSearch.trim()) return sources;
+    // Only show sources that have incidents in the viewport
+    const visible = sources.filter(
+      (s) => (sourceCounts[s.id] ?? 0) > 0 || filters.sources.includes(s.id),
+    );
+
+    // Sort by viewport count descending
+    const sorted = [...visible].sort(
+      (a, b) => (sourceCounts[b.id] ?? 0) - (sourceCounts[a.id] ?? 0),
+    );
+
+    if (!sourceSearch.trim()) return sorted;
     const q = sourceSearch.toLowerCase();
-    return sources.filter(
+    return sorted.filter(
       (s) =>
         s.name.toLowerCase().includes(q) ||
         s.coverageArea.toLowerCase().includes(q),
     );
-  }, [sources, sourceSearch]);
+  }, [sources, sourceCounts, sourceSearch, filters.sources]);
 
   return (
     <div className="flex h-full flex-col overflow-y-auto bg-background">
@@ -219,6 +232,7 @@ export default function FilterPanel({
         <div className="max-h-48 space-y-0.5 overflow-y-auto">
           {filteredSources.map((source) => {
             const isActive = filters.sources.includes(source.id);
+            const viewportCount = sourceCounts[source.id] ?? 0;
             return (
               <label
                 key={source.id}
@@ -234,7 +248,7 @@ export default function FilterPanel({
                   {source.name}
                 </span>
                 <span className="ml-auto text-[10px] tabular-nums text-muted-foreground/60">
-                  {source.recordCount.toLocaleString()}
+                  {viewportCount.toLocaleString()}
                 </span>
               </label>
             );

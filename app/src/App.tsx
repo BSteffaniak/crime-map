@@ -11,6 +11,7 @@ import { useFilters } from "@/hooks/useFilters";
 import { useSources } from "@/hooks/useSources";
 import { useTheme } from "@/hooks/useTheme";
 import { useHexbins } from "@/lib/hexbins/useHexbins";
+import { useSourceCounts } from "@/lib/source-counts/useSourceCounts";
 import type { BBox } from "@/lib/sidebar/types";
 import { DEFAULT_ZOOM } from "@/lib/map-config";
 
@@ -53,6 +54,7 @@ export default function App() {
   );
 
   const { hexbins } = useHexbins(bbox, zoom, filters, settledRef);
+  const { sourceCounts } = useSourceCounts(bbox, filters, settledRef);
 
   return (
     <div className="relative h-dvh w-screen overflow-hidden bg-background text-foreground">
@@ -130,6 +132,7 @@ export default function App() {
             <FilterPanel
               filters={filters}
               sources={sources}
+              sourceCounts={sourceCounts}
               onToggleCategory={toggleCategory}
               onToggleSubcategory={toggleSubcategory}
               onSetSeverityMin={setSeverityMin}

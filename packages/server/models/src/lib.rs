@@ -376,3 +376,40 @@ pub struct ApiSource {
     /// Human-readable portal URL for the dataset.
     pub portal_url: Option<String>,
 }
+
+/// Query parameters for the source-counts endpoint.
+///
+/// Returns per-source incident counts within a viewport, filtered by
+/// the same dimensions as the sidebar and hexbin endpoints.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceCountsQueryParams {
+    /// Bounding box as `west,south,east,north`.
+    pub bbox: Option<String>,
+    /// Start date for temporal filtering (ISO 8601).
+    pub from: Option<String>,
+    /// End date for temporal filtering (ISO 8601).
+    pub to: Option<String>,
+    /// Comma-separated list of category names to include.
+    pub categories: Option<String>,
+    /// Comma-separated list of subcategory names to include.
+    pub subcategories: Option<String>,
+    /// Minimum severity value (1-5).
+    pub severity_min: Option<u8>,
+    /// Filter by arrest status.
+    pub arrest_made: Option<bool>,
+}
+
+impl From<&SourceCountsQueryParams> for CountFilterParams {
+    fn from(p: &SourceCountsQueryParams) -> Self {
+        Self {
+            from: p.from.clone(),
+            to: p.to.clone(),
+            categories: p.categories.clone(),
+            subcategories: p.subcategories.clone(),
+            severity_min: p.severity_min,
+            arrest_made: p.arrest_made,
+            sources: None, // Don't filter by source — we want counts for ALL sources
+        }
+    }
+}

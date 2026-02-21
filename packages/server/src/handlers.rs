@@ -10,7 +10,7 @@ use crime_map_database_models::{BoundingBox, IncidentQuery};
 use crime_map_server_models::{
     ApiCategoryNode, ApiHealth, ApiIncident, ApiSource, ApiSubcategoryNode, ClusterEntry,
     ClusterQueryParams, CountFilterParams, HexbinEntry, HexbinQueryParams, IncidentQueryParams,
-    SidebarIncident, SidebarQueryParams, SidebarResponse,
+    SidebarIncident, SidebarQueryParams, SidebarResponse, SourceCountsQueryParams,
 };
 use moosicbox_json_utils::database::ToValue as _;
 use serde::Deserialize;
@@ -444,6 +444,107 @@ fn execute_duckdb_count(
         .map_err(|e| format!("DuckDB query failed: {e}"))?;
 
     Ok(total)
+}
+
+/// Executes a `DuckDB` query against the `count_summary` table to get
+/// per-source incident counts within the viewport and active filters.
+///
+/// Returns a map of `source_id` -> `count` for all sources that have
+/// at least one matching incident.
+fn execute_duckdb_source_counts(
+    db_conn: &duckdb::Connection,
+    params: &CountFilterParams,
+    bbox: Option<&BoundingBox>,
+) -> Result<BTreeMap<i32, u64>, String> {
+    let mut conditions: Vec<String> = Vec::new();
+    let mut bind_values: Vec<DuckValue> = Vec::new();
+
+    build_count_conditions(params, bbox, &mut conditions, &mut bind_values);
+
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    };
+
+    let sql = format!(
+        "SELECT source_id, CAST(SUM(cnt) AS BIGINT) AS count
+         FROM count_summary{where_clause}
+         GROUP BY source_id
+         HAVING SUM(cnt) > 0"
+    );
+
+    let mut stmt = db_conn
+        .prepare(&sql)
+        .map_err(|e| format!("DuckDB source counts prepare failed: {e}"))?;
+
+    let boxed_params: Vec<Box<dyn duckdb::ToSql>> =
+        bind_values.into_iter().map(duck_value_to_boxed).collect();
+    let param_refs: Vec<&dyn duckdb::ToSql> = boxed_params.iter().map(AsRef::as_ref).collect();
+
+    let mut rows = stmt
+        .query(param_refs.as_slice())
+        .map_err(|e| format!("DuckDB source counts query failed: {e}"))?;
+
+    let mut result = BTreeMap::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("DuckDB source counts row error: {e}"))?
+    {
+        let source_id: i32 = row.get(0).map_err(|e| format!("get source_id: {e}"))?;
+        let count: i64 = row.get(1).map_err(|e| format!("get count: {e}"))?;
+        #[allow(clippy::cast_sign_loss)]
+        let count_u64 = count as u64;
+        result.insert(source_id, count_u64);
+    }
+
+    Ok(result)
+}
+
+/// `GET /api/source-counts`
+///
+/// Returns per-source incident counts within the current viewport,
+/// filtered by the same dimensions as the sidebar and hexbin endpoints.
+/// Used by the filter panel to show only sources visible in the viewport
+/// with their viewport-scoped counts.
+pub async fn source_counts(
+    state: web::Data<AppState>,
+    params: web::Query<SourceCountsQueryParams>,
+) -> HttpResponse {
+    let Some(data) = state.data.get() else {
+        return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+            "error": "Data files are still loading. Please try again shortly."
+        }));
+    };
+
+    let bbox = params.bbox.as_deref().and_then(parse_bbox);
+    let count_db = data.count_db.clone();
+    let params_owned = params.into_inner();
+
+    let result = web::block(move || {
+        let conn = count_db
+            .lock()
+            .map_err(|e| format!("Failed to lock DuckDB connection: {e}"))?;
+        let filter_params = CountFilterParams::from(&params_owned);
+        execute_duckdb_source_counts(&conn, &filter_params, bbox.as_ref())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(counts)) => HttpResponse::Ok().json(counts),
+        Ok(Err(e)) => {
+            log::error!("Source counts query failed: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to query source counts"
+            }))
+        }
+        Err(e) => {
+            log::error!("Source counts blocking error: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to query source counts"
+            }))
+        }
+    }
 }
 
 /// Shared hexbin configuration loaded from `config/hexbins.json` at
