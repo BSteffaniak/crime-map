@@ -1,0 +1,46 @@
+id = "hyattsville_md"
+name = "Hyattsville City Police Department (CityProtect)"
+city = "Hyattsville"
+state = "MD"
+output_filename = "hyattsville_md_crimes.json"
+
+[license]
+license_type = "tos_restricted"
+tos_url = "https://cityprotect.com/terms"
+attribution_required = true
+attribution_text = "Hyattsville City Police Department via CityProtect"
+allows_redistribution = true
+restricted = false
+notes = "Public-facing crime data via Motorola CityProtect platform."
+
+[fetcher]
+type = "city_protect"
+api_url = "https://ce-portal-service.commandcentral.com/api/v1.0/public/incidents"
+agency_id = "hyattsville.org"
+bbox = [-76.97, 38.94, -76.93, 38.97]
+page_size = 2000
+
+[fields]
+incident_id = ["ccn", "id"]
+crime_type = ["parentIncidentType", "incidentType"]
+block_address = "blockizedAddress"
+
+[fields.occurred_at]
+type = "simple"
+field = "date"
+
+[fields.lat]
+field = "_city_protect_lat"
+type = "f64"
+
+[fields.lng]
+field = "_city_protect_lng"
+type = "f64"
+
+[fields.description]
+type = "combine"
+fields = ["parentIncidentType", "incidentType"]
+separator = " — "
+
+[fields.arrest]
+type = "none"

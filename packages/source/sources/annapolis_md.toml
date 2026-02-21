@@ -1,0 +1,50 @@
+id = "annapolis_pd"
+name = "Annapolis Police Department"
+city = "Annapolis"
+state = "MD"
+output_filename = "annapolis_crimes.json"
+
+[license]
+license_type = "open_data"
+tos_url = "https://www.annapolis.gov/125/Terms-of-Use"
+attribution_required = true
+attribution_text = "City of Annapolis"
+allows_redistribution = true
+restricted = false
+notes = "City GIS data license states: 'The material is in the public domain and may be copied without permission. Citation to the source is requested.'"
+
+[fetcher]
+type = "arcgis"
+query_urls = [
+  "https://services.arcgis.com/7ww0md22RA7aTw3W/arcgis/rest/services/APD_Crime_V2/FeatureServer/0/query",
+]
+page_size = 2000
+date_column = "FormattedDate"
+
+[fields]
+incident_id = ["Case_Number"]
+crime_type = ["Crime_Description", "Occurred_Incident_Type"]
+block_address = "Street_Name"
+location_type = "Ward"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "FormattedDate"
+
+[fields.lat]
+field = "_geometry_y"
+type = "f64"
+
+[fields.lng]
+field = "_geometry_x"
+type = "f64"
+
+[fields.description]
+type = "combine"
+fields = ["Crime_Description", "Occurred_Incident_Type"]
+separator = " — "
+
+[fields.arrest]
+type = "string_contains"
+field = "Disposition"
+contains = "Arrest"

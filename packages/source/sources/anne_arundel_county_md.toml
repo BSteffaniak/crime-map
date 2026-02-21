@@ -1,0 +1,42 @@
+id = "anne_arundel_county_md"
+name = "Anne Arundel County PD Press Releases"
+city = "Millersville"
+state = "MD"
+output_filename = "anne_arundel_county_md_crimes.json"
+
+[license]
+license_type = "open_data"
+tos_url = "https://www.aacounty.org/terms-and-conditions-use"
+attribution_required = true
+attribution_text = "Anne Arundel County Police Department"
+allows_redistribution = true
+allows_scraping = true
+restricted = false
+notes = "Public press releases published on aacounty.org. Major incidents only (robberies, homicides, fatal crashes, shootings, assaults, drug investigations)."
+
+[fetcher]
+type = "press_release"
+listing_url = "https://www.aacounty.org/police-department/about-us/news"
+base_url = "https://www.aacounty.org"
+link_selector = "a[href*='/police-department/about-us/news/']"
+link_filter = "press-release"
+article_selector = "article"
+page_param = "page"
+max_pages = 70
+
+[fields]
+incident_id = ["case_number"]
+crime_type = ["crime_type"]
+block_address = "block_address"
+
+[fields.occurred_at]
+type = "simple"
+field = "date"
+
+[fields.description]
+type = "combine"
+fields = ["crime_type", "district"]
+separator = " — "
+
+[fields.arrest]
+type = "none"

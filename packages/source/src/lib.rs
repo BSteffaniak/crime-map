@@ -14,6 +14,7 @@
 
 pub mod arcgis;
 pub mod carto;
+pub mod city_protect;
 pub mod ckan;
 pub mod csv_download;
 pub mod html_table;
@@ -21,6 +22,7 @@ pub mod json_paginated;
 pub mod odata;
 pub mod parsing;
 pub mod pdf_extract;
+pub mod press_release;
 pub mod progress;
 pub mod registry;
 pub mod socrata;

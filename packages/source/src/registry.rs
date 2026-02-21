@@ -85,6 +85,27 @@ const SOURCE_TOMLS: &[(&str, &str)] = &[
         "virginia_beach_va",
         include_str!("../sources/virginia_beach_va.toml"),
     ),
+    ("annapolis_md", include_str!("../sources/annapolis_md.toml")),
+    // ── CityProtect sources ──────────────────────────────────────────
+    ("laurel_md", include_str!("../sources/laurel_md.toml")),
+    ("bowie_md", include_str!("../sources/bowie_md.toml")),
+    ("greenbelt_md", include_str!("../sources/greenbelt_md.toml")),
+    (
+        "hyattsville_md",
+        include_str!("../sources/hyattsville_md.toml"),
+    ),
+    (
+        "harford_county_md",
+        include_str!("../sources/harford_county_md.toml"),
+    ),
+    (
+        "charles_county_md",
+        include_str!("../sources/charles_county_md.toml"),
+    ),
+    (
+        "calvert_county_md",
+        include_str!("../sources/calvert_county_md.toml"),
+    ),
     // ── Carto sources ────────────────────────────────────────────────
     ("philly", include_str!("../sources/philly.toml")),
     // ── CKAN sources ─────────────────────────────────────────────────
@@ -97,11 +118,16 @@ const SOURCE_TOMLS: &[(&str, &str)] = &[
     ("phoenix", include_str!("../sources/phoenix.toml")),
     // ── OData sources ────────────────────────────────────────────────
     ("arlington_va", include_str!("../sources/arlington_va.toml")),
+    // ── Press release sources ────────────────────────────────────────
+    (
+        "anne_arundel_county_md",
+        include_str!("../sources/anne_arundel_county_md.toml"),
+    ),
 ];
 
 /// Total number of configured sources (used in tests).
 #[cfg(test)]
-const EXPECTED_SOURCE_COUNT: usize = 48;
+const EXPECTED_SOURCE_COUNT: usize = 57;
 
 /// Returns all configured source definitions, parsed from embedded TOML.
 ///

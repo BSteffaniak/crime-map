@@ -1465,6 +1465,8 @@ pub fn extract_source_info(
         FetcherConfig::PdfExtract { urls, .. } => {
             ("pdf_extract", urls.first().cloned().unwrap_or_default())
         }
+        FetcherConfig::CityProtect { api_url, .. } => ("city_protect", api_url.clone()),
+        FetcherConfig::PressRelease { listing_url, .. } => ("press_release", listing_url.clone()),
     }
 }
 

@@ -1,0 +1,46 @@
+id = "charles_county_md"
+name = "Charles County Sheriff's Office (CityProtect)"
+city = "La Plata"
+state = "MD"
+output_filename = "charles_county_md_crimes.json"
+
+[license]
+license_type = "tos_restricted"
+tos_url = "https://cityprotect.com/terms"
+attribution_required = true
+attribution_text = "Charles County Sheriff's Office via CityProtect"
+allows_redistribution = true
+restricted = false
+notes = "Public-facing crime data via Motorola CityProtect platform."
+
+[fetcher]
+type = "city_protect"
+api_url = "https://ce-portal-service.commandcentral.com/api/v1.0/public/incidents"
+agency_id = "ccso.us"
+bbox = [-77.40, 38.25, -76.85, 38.70]
+page_size = 2000
+
+[fields]
+incident_id = ["ccn", "id"]
+crime_type = ["parentIncidentType", "incidentType"]
+block_address = "blockizedAddress"
+
+[fields.occurred_at]
+type = "simple"
+field = "date"
+
+[fields.lat]
+field = "_city_protect_lat"
+type = "f64"
+
+[fields.lng]
+field = "_city_protect_lng"
+type = "f64"
+
+[fields.description]
+type = "combine"
+fields = ["parentIncidentType", "incidentType"]
+separator = " — "
+
+[fields.arrest]
+type = "none"

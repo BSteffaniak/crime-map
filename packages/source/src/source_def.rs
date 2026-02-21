@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 
 use crate::arcgis::{ArcGisConfig, fetch_arcgis};
 use crate::carto::{CartoConfig, fetch_carto};
+use crate::city_protect::{CityProtectConfig, fetch_city_protect};
 use crate::ckan::{CkanConfig, fetch_ckan};
 use crate::csv_download::{CsvDownloadConfig, fetch_csv_download};
 use crate::html_table::{HtmlTableConfig, fetch_html_table};
@@ -24,6 +25,7 @@ use crate::json_paginated::{JsonPaginatedConfig, fetch_json_paginated};
 use crate::odata::{ODataConfig, fetch_odata};
 use crate::parsing::parse_socrata_date;
 use crate::pdf_extract::{PdfExtractConfig, fetch_pdf_extract};
+use crate::press_release::{PressReleaseConfig, fetch_press_release};
 use crate::socrata::{SocrataConfig, fetch_socrata};
 use crate::type_mapping::map_crime_type;
 use crate::{FetchOptions, SourceError};
@@ -221,6 +223,39 @@ pub enum FetcherConfig {
         delimiter: Option<String>,
         /// Number of header lines to skip.
         skip_header_lines: Option<usize>,
+    },
+    /// `CityProtect` / Motorola `CommandCentral` incident API (POST-based
+    /// JSON endpoint with geographic bounding-box filtering).
+    CityProtect {
+        /// `CityProtect` incidents API URL.
+        api_url: String,
+        /// `CityProtect` agency ID (e.g., `"381"`).
+        agency_id: String,
+        /// Bounding box `[west, south, east, north]` for the agency's
+        /// jurisdiction.
+        bbox: [f64; 4],
+        /// Records per page (default 2000).
+        page_size: u64,
+        /// Override incident type IDs filter (default: all types).
+        incident_type_ids: Option<String>,
+    },
+    /// Press release / news-bulletin scraper (crawls paginated listing pages
+    /// and parses individual press release HTML for structured incident data).
+    PressRelease {
+        /// Base URL of the press release listing page.
+        listing_url: String,
+        /// Base domain for resolving relative URLs.
+        base_url: String,
+        /// CSS selector for links on listing pages.
+        link_selector: String,
+        /// URL substring filter — only follow links containing this string.
+        link_filter: String,
+        /// CSS selector for the article body on individual pages.
+        article_selector: String,
+        /// Pagination query parameter name (default `"page"`).
+        page_param: Option<String>,
+        /// Maximum listing pages to crawl.
+        max_pages: Option<u32>,
     },
 }
 
@@ -630,11 +665,13 @@ impl SourceDefinition {
             | FetcherConfig::Ckan { page_size, .. }
             | FetcherConfig::Carto { page_size, .. }
             | FetcherConfig::Odata { page_size, .. }
-            | FetcherConfig::JsonPaginated { page_size, .. } => *page_size,
+            | FetcherConfig::JsonPaginated { page_size, .. }
+            | FetcherConfig::CityProtect { page_size, .. } => *page_size,
             // Non-paginated fetchers: return total-file-at-once sizes
             FetcherConfig::HtmlTable { .. }
             | FetcherConfig::CsvDownload { .. }
-            | FetcherConfig::PdfExtract { .. } => 0,
+            | FetcherConfig::PdfExtract { .. }
+            | FetcherConfig::PressRelease { .. } => 0,
         }
     }
 
@@ -855,6 +892,54 @@ impl SourceDefinition {
                             column_names: column_names.as_deref(),
                             delimiter: delimiter.as_deref(),
                             skip_header_lines: *skip_header_lines,
+                        },
+                        &options,
+                        &tx,
+                        &progress,
+                    )
+                    .await
+                }
+                FetcherConfig::CityProtect {
+                    api_url,
+                    agency_id,
+                    bbox,
+                    page_size,
+                    incident_type_ids,
+                } => {
+                    fetch_city_protect(
+                        &CityProtectConfig {
+                            api_url,
+                            bbox,
+                            agency_id,
+                            page_size: *page_size,
+                            incident_type_ids: incident_type_ids.as_deref(),
+                            label: &name,
+                        },
+                        &options,
+                        &tx,
+                        &progress,
+                    )
+                    .await
+                }
+                FetcherConfig::PressRelease {
+                    listing_url,
+                    base_url,
+                    link_selector,
+                    link_filter,
+                    article_selector,
+                    page_param,
+                    max_pages,
+                } => {
+                    fetch_press_release(
+                        &PressReleaseConfig {
+                            listing_url,
+                            base_url,
+                            link_selector,
+                            link_filter,
+                            article_selector,
+                            page_param: page_param.as_deref().unwrap_or("page"),
+                            max_pages: max_pages.unwrap_or(0),
+                            label: &name,
                         },
                         &options,
                         &tx,

@@ -15,7 +15,9 @@ crime_map_source_models = { workspace = true }
 
 chrono = { workspace = true }
 log = { workspace = true }
+regex = { workspace = true }
 reqwest = { workspace = true }
+scraper = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
