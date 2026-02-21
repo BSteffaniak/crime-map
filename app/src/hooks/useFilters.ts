@@ -22,6 +22,9 @@ function serializeFilters(filters: FilterState): string {
   if (filters.arrestMade !== null) {
     params.set("arrest", String(filters.arrestMade));
   }
+  if (filters.sources.length > 0) {
+    params.set("sources", filters.sources.join(","));
+  }
 
   return params.toString();
 }
@@ -75,6 +78,14 @@ function parseFiltersFromUrl(): FilterState {
   const arrest = params.get("arrest");
   if (arrest === "true") filters.arrestMade = true;
   else if (arrest === "false") filters.arrestMade = false;
+
+  const sources = params.get("sources");
+  if (sources) {
+    filters.sources = sources
+      .split(",")
+      .map((s) => parseInt(s, 10))
+      .filter((n) => !isNaN(n));
+  }
 
   return filters;
 }
@@ -191,6 +202,22 @@ export function useFilters() {
     setFilters((prev) => ({ ...prev, arrestMade: value }));
   }, []);
 
+  const toggleSource = useCallback((sourceId: number) => {
+    setFilters((prev) => {
+      const exists = prev.sources.includes(sourceId);
+      return {
+        ...prev,
+        sources: exists
+          ? prev.sources.filter((s) => s !== sourceId)
+          : [...prev.sources, sourceId],
+      };
+    });
+  }, []);
+
+  const setSources = useCallback((sourceIds: number[]) => {
+    setFilters((prev) => ({ ...prev, sources: sourceIds }));
+  }, []);
+
   const clearAll = useCallback(() => {
     setFilters(DEFAULT_FILTERS);
   }, []);
@@ -202,6 +229,7 @@ export function useFilters() {
     if (filters.severityMin > 1) count++;
     if (filters.datePreset) count++;
     if (filters.arrestMade !== null) count++;
+    if (filters.sources.length > 0) count++;
     return count;
   }, [filters]);
 
@@ -212,6 +240,8 @@ export function useFilters() {
     setSeverityMin,
     setDatePreset,
     setArrestFilter,
+    toggleSource,
+    setSources,
     clearAll,
     activeFilterCount,
   };

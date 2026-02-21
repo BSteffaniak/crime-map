@@ -58,6 +58,11 @@ export function buildIncidentFilter(
     clauses.push(["==", ["get", "arrest"], false]);
   }
 
+  // Source filter
+  if (filters.sources.length > 0) {
+    clauses.push(["in", ["get", "src"], ["literal", filters.sources]]);
+  }
+
   if (clauses.length === 0) return null;
   if (clauses.length === 1) return clauses[0];
   return ["all", ...clauses] as FilterSpecification;

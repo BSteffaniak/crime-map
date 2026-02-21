@@ -5,14 +5,16 @@ import ThemeToggle from "@/components/map/ThemeToggle";
 import FilterPanel from "@/components/filters/FilterPanel";
 import IncidentSidebar from "@/components/sidebar/IncidentSidebar";
 import AiChat from "@/components/ai/AiChat";
+import SourcesPanel from "@/components/sidebar/SourcesPanel";
 import SidebarPanel from "@/components/sidebar/SidebarPanel";
 import { useFilters } from "@/hooks/useFilters";
+import { useSources } from "@/hooks/useSources";
 import { useTheme } from "@/hooks/useTheme";
 import { useHexbins } from "@/lib/hexbins/useHexbins";
 import type { BBox } from "@/lib/sidebar/types";
 import { DEFAULT_ZOOM } from "@/lib/map-config";
 
-type SidebarTab = "filters" | "incidents" | "ai";
+type SidebarTab = "filters" | "incidents" | "sources" | "ai";
 
 export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -29,9 +31,12 @@ export default function App() {
     setSeverityMin,
     setDatePreset,
     setArrestFilter,
+    toggleSource,
     clearAll,
     activeFilterCount,
   } = useFilters();
+
+  const sources = useSources();
 
   const handleBoundsChange = useCallback(
     (bounds: { getWest(): number; getSouth(): number; getEast(): number; getNorth(): number }, newZoom: number, options: { settled: boolean }) => {
@@ -80,41 +85,36 @@ export default function App() {
       <SidebarPanel open={sidebarOpen} onClose={() => setSidebarOpen(false)}>
         {/* Tab bar */}
         <div className="flex flex-shrink-0 border-b border-border">
-          <button
-            onClick={() => setSidebarTab("filters")}
-            className={`flex-1 px-4 py-2.5 text-sm font-medium transition-colors ${
-              sidebarTab === "filters"
-                ? "border-b-2 border-blue-600 text-blue-600 dark:border-blue-400 dark:text-blue-400"
-                : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            Filters
-            {activeFilterCount > 0 && (
-              <span className="ml-1.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-blue-100 text-xs text-blue-700 dark:bg-blue-900 dark:text-blue-300">
-                {activeFilterCount}
-              </span>
-            )}
-          </button>
-          <button
-            onClick={() => setSidebarTab("incidents")}
-            className={`flex-1 px-4 py-2.5 text-sm font-medium transition-colors ${
-              sidebarTab === "incidents"
-                ? "border-b-2 border-blue-600 text-blue-600 dark:border-blue-400 dark:text-blue-400"
-                : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            Incidents
-          </button>
-          <button
-            onClick={() => setSidebarTab("ai")}
-            className={`flex-1 px-4 py-2.5 text-sm font-medium transition-colors ${
-              sidebarTab === "ai"
-                ? "border-b-2 border-blue-600 text-blue-600 dark:border-blue-400 dark:text-blue-400"
-                : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            Ask AI
-          </button>
+          {(
+            [
+              { id: "filters" as const, label: "Filters" },
+              { id: "incidents" as const, label: "Incidents" },
+              { id: "sources" as const, label: "Sources" },
+              { id: "ai" as const, label: "Ask AI" },
+            ] as const
+          ).map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setSidebarTab(tab.id)}
+              className={`flex-1 px-3 py-2.5 text-sm font-medium transition-colors ${
+                sidebarTab === tab.id
+                  ? "border-b-2 border-blue-600 text-blue-600 dark:border-blue-400 dark:text-blue-400"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {tab.label}
+              {tab.id === "filters" && activeFilterCount > 0 && (
+                <span className="ml-1.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-blue-100 text-xs text-blue-700 dark:bg-blue-900 dark:text-blue-300">
+                  {activeFilterCount}
+                </span>
+              )}
+              {tab.id === "sources" && sources.length > 0 && (
+                <span className="ml-1 text-[10px] text-muted-foreground">
+                  {sources.length}
+                </span>
+              )}
+            </button>
+          ))}
           <button
             onClick={() => setSidebarOpen(false)}
             className="flex items-center justify-center px-3 text-muted-foreground transition-colors hover:text-foreground"
@@ -129,16 +129,20 @@ export default function App() {
           {sidebarTab === "filters" ? (
             <FilterPanel
               filters={filters}
+              sources={sources}
               onToggleCategory={toggleCategory}
               onToggleSubcategory={toggleSubcategory}
               onSetSeverityMin={setSeverityMin}
               onSetDatePreset={setDatePreset}
               onSetArrestFilter={setArrestFilter}
+              onToggleSource={toggleSource}
               onClearAll={clearAll}
               activeFilterCount={activeFilterCount}
             />
           ) : sidebarTab === "incidents" ? (
-            <IncidentSidebar bbox={bbox} filters={filters} settledRef={settledRef} />
+            <IncidentSidebar bbox={bbox} filters={filters} settledRef={settledRef} sources={sources} />
+          ) : sidebarTab === "sources" ? (
+            <SourcesPanel sources={sources} />
           ) : (
             <AiChat />
           )}

@@ -1,7 +1,9 @@
+import { useState, useMemo } from "react";
 import {
   CRIME_CATEGORIES,
   type CategoryId,
   type FilterState,
+  type ApiSource,
 } from "@/lib/types";
 
 const DATE_PRESETS = [
@@ -21,25 +23,41 @@ const SEVERITY_LEVELS = [
 
 interface FilterPanelProps {
   filters: FilterState;
+  sources: ApiSource[];
   onToggleCategory: (id: CategoryId) => void;
   onToggleSubcategory: (id: string) => void;
   onSetSeverityMin: (value: number) => void;
   onSetDatePreset: (preset: string | null) => void;
   onSetArrestFilter: (value: boolean | null) => void;
+  onToggleSource: (sourceId: number) => void;
   onClearAll: () => void;
   activeFilterCount: number;
 }
 
 export default function FilterPanel({
   filters,
+  sources,
   onToggleCategory,
   onToggleSubcategory,
   onSetSeverityMin,
   onSetDatePreset,
   onSetArrestFilter,
+  onToggleSource,
   onClearAll,
   activeFilterCount,
 }: FilterPanelProps) {
+  const [sourceSearch, setSourceSearch] = useState("");
+
+  const filteredSources = useMemo(() => {
+    if (!sourceSearch.trim()) return sources;
+    const q = sourceSearch.toLowerCase();
+    return sources.filter(
+      (s) =>
+        s.name.toLowerCase().includes(q) ||
+        s.coverageArea.toLowerCase().includes(q),
+    );
+  }, [sources, sourceSearch]);
+
   return (
     <div className="flex h-full flex-col overflow-y-auto bg-background">
       {/* Header */}
@@ -152,7 +170,7 @@ export default function FilterPanel({
       </div>
 
       {/* Arrest Status Section */}
-      <div className="px-4 py-3">
+      <div className="border-b border-border px-4 py-3">
         <h3 className="mb-2 text-sm font-medium text-muted-foreground">
           Arrest Status
         </h3>
@@ -174,6 +192,58 @@ export default function FilterPanel({
               {option.label}
             </button>
           ))}
+        </div>
+      </div>
+
+      {/* Data Source Section */}
+      <div className="px-4 py-3">
+        <h3 className="mb-2 text-sm font-medium text-muted-foreground">
+          Data Source
+          {filters.sources.length > 0 && (
+            <span className="ml-1.5 text-xs text-blue-600 dark:text-blue-400">
+              ({filters.sources.length} selected)
+            </span>
+          )}
+        </h3>
+
+        {/* Search input */}
+        <input
+          type="text"
+          placeholder="Search sources..."
+          value={sourceSearch}
+          onChange={(e) => setSourceSearch(e.target.value)}
+          className="mb-2 w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+        />
+
+        {/* Source list */}
+        <div className="max-h-48 space-y-0.5 overflow-y-auto">
+          {filteredSources.map((source) => {
+            const isActive = filters.sources.includes(source.id);
+            return (
+              <label
+                key={source.id}
+                className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-accent/50"
+              >
+                <input
+                  type="checkbox"
+                  checked={isActive}
+                  onChange={() => onToggleSource(source.id)}
+                  className="h-3.5 w-3.5 rounded border-border"
+                />
+                <span className={isActive ? "font-medium text-foreground" : ""}>
+                  {source.name}
+                </span>
+                <span className="ml-auto text-[10px] tabular-nums text-muted-foreground/60">
+                  {source.recordCount.toLocaleString()}
+                </span>
+              </label>
+            );
+          })}
+          {filteredSources.length === 0 && (
+            <p className="px-2 py-1 text-xs text-muted-foreground/60">
+              No sources match &quot;{sourceSearch}&quot;
+            </p>
+          )}
         </div>
       </div>
     </div>

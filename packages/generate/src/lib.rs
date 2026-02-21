@@ -618,6 +618,8 @@ async fn insert_sidebar_row(
     row: &switchy_database::Row,
 ) -> Result<i64, Box<dyn std::error::Error>> {
     let id: i64 = row.to_value("id").unwrap_or(0);
+    let source_id: i32 = row.to_value("source_id").unwrap_or(0);
+    let source_name: String = row.to_value("source_name").unwrap_or_default();
     let lng: f64 = row.to_value("longitude").unwrap_or(0.0);
     let lat: f64 = row.to_value("latitude").unwrap_or(0.0);
     let source_incident_id: String = row.to_value("source_incident_id").unwrap_or_default();
@@ -639,12 +641,15 @@ async fn insert_sidebar_row(
     let arrest_int = arrest_made.map(|b| DatabaseValue::Int32(i32::from(b)));
 
     txn.exec_raw_params(
-        "INSERT INTO incidents (id, source_incident_id, subcategory, category,
+        "INSERT INTO incidents (id, source_id, source_name, source_incident_id,
+            subcategory, category,
             severity, longitude, latitude, occurred_at, description,
             block_address, city, state, arrest_made, location_type)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
         &[
             DatabaseValue::Int64(id),
+            DatabaseValue::Int32(source_id),
+            DatabaseValue::String(source_name),
             DatabaseValue::String(source_incident_id),
             DatabaseValue::String(subcategory),
             DatabaseValue::String(category),
@@ -703,6 +708,8 @@ async fn generate_sidebar_db(
         .exec_raw(
             "CREATE TABLE incidents (
                 id INTEGER PRIMARY KEY,
+                source_id INTEGER NOT NULL,
+                source_name TEXT NOT NULL,
                 source_incident_id TEXT,
                 subcategory TEXT NOT NULL,
                 category TEXT NOT NULL,
@@ -790,6 +797,11 @@ async fn generate_sidebar_db(
         .exec_raw("CREATE INDEX idx_incidents_occurred_at ON incidents(occurred_at DESC)")
         .await?;
 
+    // Create source index for source filtering
+    sqlite
+        .exec_raw("CREATE INDEX idx_incidents_source_id ON incidents(source_id)")
+        .await?;
+
     // Analyze for query planner
     sqlite.exec_raw("ANALYZE").await?;
 
@@ -842,7 +854,8 @@ fn build_batch_query(
     params.push(DatabaseValue::Int64(batch_limit));
 
     let query = format!(
-        "SELECT i.id, i.source_incident_id,
+        "SELECT i.id, i.source_id, cs.name as source_name,
+                i.source_incident_id,
                 c.name as subcategory, c.severity,
                 pc.name as category,
                 i.occurred_at, i.description, i.block_address,
@@ -853,6 +866,7 @@ fn build_batch_query(
          FROM crime_incidents i
          JOIN crime_categories c ON i.category_id = c.id
          LEFT JOIN crime_categories pc ON c.parent_id = pc.id
+         JOIN crime_sources cs ON i.source_id = cs.id
          WHERE {where_clause}
          ORDER BY i.id ASC
          LIMIT {limit_placeholder}"
@@ -903,6 +917,7 @@ async fn generate_count_db(
     duck.execute_batch(
         "CREATE TABLE incidents (
             id BIGINT PRIMARY KEY,
+            source_id INTEGER NOT NULL,
             subcategory VARCHAR NOT NULL,
             severity INTEGER NOT NULL,
             longitude DOUBLE NOT NULL,
@@ -928,6 +943,7 @@ async fn generate_count_db(
          SELECT
              CAST(FLOOR(longitude * 1000) AS INTEGER) AS cell_lng,
              CAST(FLOOR(latitude * 1000) AS INTEGER) AS cell_lat,
+             source_id,
              subcategory,
              category,
              severity,
@@ -1016,6 +1032,7 @@ async fn generate_h3_db(
         // This avoids string cloning per resolution and lets DuckDB aggregate.
         duck.execute_batch(
             "CREATE TABLE h3_staging (
+                source_id INTEGER NOT NULL,
                 category VARCHAR NOT NULL,
                 subcategory VARCHAR NOT NULL,
                 severity TINYINT NOT NULL,
@@ -1062,13 +1079,14 @@ async fn generate_h3_db(
             duck.execute_batch("BEGIN TRANSACTION")?;
 
             let mut stmt = duck.prepare(
-                "INSERT INTO h3_staging (category, subcategory, severity, arrest, day, lng, lat,
+                "INSERT INTO h3_staging (source_id, category, subcategory, severity, arrest, day, lng, lat,
                     h3_r4, h3_r5, h3_r6, h3_r7, h3_r8, h3_r9)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )?;
 
             for row in &rows {
                 let id: i64 = row.to_value("id").unwrap_or(0);
+                let source_id: i32 = row.to_value("source_id").unwrap_or(0);
                 let lng: f64 = row.to_value("longitude").unwrap_or(0.0);
                 let lat: f64 = row.to_value("latitude").unwrap_or(0.0);
                 let category: String = row.to_value("category").unwrap_or_default();
@@ -1101,6 +1119,7 @@ async fn generate_h3_db(
                     .collect();
 
                 stmt.execute(duckdb::params![
+                    source_id,
                     category,
                     subcategory,
                     severity,
@@ -1146,21 +1165,22 @@ async fn generate_h3_db(
     duck.execute_batch(
         "CREATE TABLE h3_counts AS
          WITH unpivoted AS (
-             SELECT h3_r4 AS h3_index, 4 AS resolution, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
+             SELECT h3_r4 AS h3_index, 4 AS resolution, source_id, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
              UNION ALL
-             SELECT h3_r5, 5, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
+             SELECT h3_r5, 5, source_id, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
              UNION ALL
-             SELECT h3_r6, 6, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
+             SELECT h3_r6, 6, source_id, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
              UNION ALL
-             SELECT h3_r7, 7, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
+             SELECT h3_r7, 7, source_id, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
              UNION ALL
-             SELECT h3_r8, 8, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
+             SELECT h3_r8, 8, source_id, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
              UNION ALL
-             SELECT h3_r9, 9, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
+             SELECT h3_r9, 9, source_id, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
          )
          SELECT
              CAST(h3_index AS UBIGINT) AS h3_index,
              CAST(resolution AS TINYINT) AS resolution,
+             source_id,
              category,
              subcategory,
              CAST(severity AS TINYINT) AS severity,
@@ -1170,7 +1190,7 @@ async fn generate_h3_db(
              SUM(lng) AS sum_lng,
              SUM(lat) AS sum_lat
          FROM unpivoted
-         GROUP BY h3_index, resolution, category, subcategory, severity, arrest, day
+         GROUP BY h3_index, resolution, source_id, category, subcategory, severity, arrest, day
          ORDER BY resolution, h3_index",
     )?;
 
@@ -1299,9 +1319,9 @@ async fn populate_duckdb_incidents(
             duck.execute_batch("BEGIN TRANSACTION")?;
 
             let mut stmt = duck.prepare(
-                "INSERT INTO incidents (id, subcategory, severity, longitude, latitude,
+                "INSERT INTO incidents (id, source_id, subcategory, severity, longitude, latitude,
                     occurred_at, arrest_made, category)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )?;
 
             for row in &rows {
@@ -1341,6 +1361,7 @@ fn insert_duckdb_row(
     row: &switchy_database::Row,
 ) -> Result<i64, Box<dyn std::error::Error>> {
     let id: i64 = row.to_value("id").unwrap_or(0);
+    let source_id: i32 = row.to_value("source_id").unwrap_or(0);
     let subcategory: String = row.to_value("subcategory").unwrap_or_default();
     let category: String = row.to_value("category").unwrap_or_default();
     let severity: i32 = row.to_value("severity").unwrap_or(1);
@@ -1355,6 +1376,7 @@ fn insert_duckdb_row(
 
     stmt.execute(duckdb::params![
         id,
+        source_id,
         subcategory,
         severity,
         lng,
@@ -1483,6 +1505,8 @@ async fn export_geojsonseq(
 
         for row in &rows {
             let id: i64 = row.to_value("id").unwrap_or(0);
+            let source_id: i32 = row.to_value("source_id").unwrap_or(0);
+            let source_name: String = row.to_value("source_name").unwrap_or_default();
             let lng: f64 = row.to_value("longitude").unwrap_or(0.0);
             let lat: f64 = row.to_value("latitude").unwrap_or(0.0);
             let source_incident_id: String = row.to_value("source_incident_id").unwrap_or_default();
@@ -1511,6 +1535,8 @@ async fn export_geojsonseq(
                 },
                 "properties": {
                     "id": id,
+                    "src": source_id,
+                    "src_name": source_name,
                     "sid": source_incident_id,
                     "subcategory": subcategory,
                     "category": category,

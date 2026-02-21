@@ -1,6 +1,7 @@
 import { type MutableRefObject, useCallback, useEffect, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { categoryColor, type FilterState } from "@/lib/types";
+import { ExternalLink } from "lucide-react";
+import { categoryColor, type FilterState, type ApiSource } from "@/lib/types";
 import { useSidebar } from "@/lib/sidebar/useSidebar";
 import type { SidebarIncident } from "@/lib/sidebar/types";
 import type { BBox } from "@/lib/sidebar/types";
@@ -14,11 +15,16 @@ interface IncidentSidebarProps {
   bbox: BBox | null;
   filters: FilterState;
   settledRef: MutableRefObject<boolean>;
+  sources: ApiSource[];
 }
 
-export default function IncidentSidebar({ bbox, filters, settledRef }: IncidentSidebarProps) {
+export default function IncidentSidebar({ bbox, filters, settledRef, sources }: IncidentSidebarProps) {
   const { features, totalCount, hasMore, loading, loadMore } =
     useSidebar(bbox, filters, settledRef);
+
+  // Build a map from source ID to portal URL for quick lookup
+  const portalUrlMap = useRef(new Map<number, string | null>());
+  portalUrlMap.current = new Map(sources.map((s) => [s.id, s.portalUrl]));
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const loadingMoreRef = useRef(false);
@@ -95,7 +101,10 @@ export default function IncidentSidebar({ bbox, filters, settledRef }: IncidentS
                   className="absolute left-0 top-0 w-full"
                   style={{ transform: `translateY(${virtualRow.start}px)` }}
                 >
-                  <IncidentCard incident={incident} />
+                  <IncidentCard
+                    incident={incident}
+                    portalUrl={portalUrlMap.current.get(incident.sourceId) ?? null}
+                  />
                 </div>
               );
             })}
@@ -113,7 +122,13 @@ export default function IncidentSidebar({ bbox, filters, settledRef }: IncidentS
   );
 }
 
-function IncidentCard({ incident }: { incident: SidebarIncident }) {
+function IncidentCard({
+  incident,
+  portalUrl,
+}: {
+  incident: SidebarIncident;
+  portalUrl: string | null;
+}) {
   return (
     <div className="border-b border-border px-4 py-3 transition-colors hover:bg-accent/50">
       <div className="flex items-start justify-between">
@@ -155,11 +170,29 @@ function IncidentCard({ incident }: { incident: SidebarIncident }) {
         )}
       </div>
 
-      {incident.arrestMade && (
-        <span className="mt-1 ml-[18px] inline-block rounded-full bg-green-100 px-2 py-0.5 text-xs text-green-700 dark:bg-green-900/30 dark:text-green-400">
-          Arrest made
-        </span>
-      )}
+      <div className="mt-1 ml-[18px] flex items-center gap-2">
+        {incident.arrestMade && (
+          <span className="inline-block rounded-full bg-green-100 px-2 py-0.5 text-xs text-green-700 dark:bg-green-900/30 dark:text-green-400">
+            Arrest made
+          </span>
+        )}
+        {portalUrl ? (
+          <a
+            href={portalUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-700 transition-colors hover:bg-blue-100 dark:bg-blue-900/30 dark:text-blue-400 dark:hover:bg-blue-900/50"
+            title={`View dataset: ${incident.sourceName}`}
+          >
+            {incident.sourceName}
+            <ExternalLink className="h-2.5 w-2.5" />
+          </a>
+        ) : (
+          <span className="inline-block rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600 dark:bg-gray-800 dark:text-gray-400">
+            {incident.sourceName}
+          </span>
+        )}
+      </div>
     </div>
   );
 }

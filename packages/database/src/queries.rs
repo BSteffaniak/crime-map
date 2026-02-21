@@ -27,14 +27,16 @@ pub async fn upsert_source(
     source_type: &str,
     api_url: Option<&str>,
     coverage_area: &str,
+    portal_url: Option<&str>,
 ) -> Result<i32, DbError> {
     let rows = db
         .query_raw_params(
-            "INSERT INTO crime_sources (name, source_type, api_url, coverage_area)
-             VALUES ($1, $2, $3, $4)
+            "INSERT INTO crime_sources (name, source_type, api_url, coverage_area, portal_url)
+             VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (name) DO UPDATE SET
                  source_type = EXCLUDED.source_type,
-                 api_url = EXCLUDED.api_url
+                 api_url = EXCLUDED.api_url,
+                 portal_url = EXCLUDED.portal_url
              RETURNING id",
             &[
                 DatabaseValue::String(name.to_string()),
@@ -43,6 +45,9 @@ pub async fn upsert_source(
                     DatabaseValue::String(u.to_string())
                 }),
                 DatabaseValue::String(coverage_area.to_string()),
+                portal_url.map_or(DatabaseValue::Null, |u| {
+                    DatabaseValue::String(u.to_string())
+                }),
             ],
         )
         .await?;

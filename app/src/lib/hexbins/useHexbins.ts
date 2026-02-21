@@ -96,6 +96,11 @@ function buildQueryString(
     params.set("arrestMade", String(filters.arrestMade));
   }
 
+  // Source filter
+  if (filters.sources.length > 0) {
+    params.set("sources", filters.sources.join(","));
+  }
+
   return params.toString();
 }
 

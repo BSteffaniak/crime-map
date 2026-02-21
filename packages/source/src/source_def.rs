@@ -62,6 +62,11 @@ pub struct SourceDefinition {
     /// coordinates. Defaults to `false`.
     #[serde(default)]
     pub re_geocode: bool,
+    /// Optional URL to the human-readable data portal page for this source.
+    /// If not set, one may be derived from the fetcher config (e.g., Socrata
+    /// dataset pages from the API URL).
+    #[serde(default)]
+    pub portal_url: Option<String>,
 }
 
 // ── License metadata ─────────────────────────────────────────────────────
@@ -281,6 +286,43 @@ pub enum FetcherConfig {
 }
 
 // ── Field mapping ────────────────────────────────────────────────────────
+
+impl FetcherConfig {
+    /// Attempts to derive a human-readable portal URL from the fetcher
+    /// configuration.
+    ///
+    /// Currently supports:
+    /// - **Socrata**: `/resource/{id}.json` -> `/d/{id}`
+    /// - **CKAN**: Returns the base `api_url` (the dataset host)
+    /// - **`ArcGIS`**: Strips `/query` suffix to get the service page
+    /// - **`CrimeBulletin`**: Returns the bulletin page URL directly
+    /// - **`PressRelease`**: Returns the listing page URL
+    #[must_use]
+    fn derive_portal_url(&self) -> Option<String> {
+        match self {
+            Self::Socrata { api_url, .. } => {
+                // https://data.cityofchicago.org/resource/ijzp-q8t2.json
+                // -> https://data.cityofchicago.org/d/ijzp-q8t2
+                api_url.find("/resource/").map(|idx| {
+                    let base = &api_url[..idx];
+                    let rest = &api_url[idx + "/resource/".len()..];
+                    let dataset_id = rest.strip_suffix(".json").unwrap_or(rest);
+                    format!("{base}/d/{dataset_id}")
+                })
+            }
+            Self::Arcgis { query_urls, .. } => {
+                // Use first URL, strip /query suffix
+                query_urls
+                    .first()
+                    .map(|url| url.strip_suffix("/query").unwrap_or(url).to_string())
+            }
+            Self::Ckan { api_url, .. } => Some(api_url.clone()),
+            Self::CrimeBulletin { url, .. } => Some(url.clone()),
+            Self::PressRelease { listing_url, .. } => Some(listing_url.clone()),
+            _ => None,
+        }
+    }
+}
 
 /// Maps source-specific JSON field names to canonical incident fields.
 #[derive(Debug, Deserialize)]
@@ -675,6 +717,20 @@ impl SourceDefinition {
     #[must_use]
     pub const fn re_geocode(&self) -> bool {
         self.re_geocode
+    }
+
+    /// Returns the portal URL for this source.
+    ///
+    /// If a `portal_url` is explicitly set in the TOML, that value is
+    /// returned. Otherwise, a URL is derived from the fetcher config when
+    /// possible (e.g., Socrata API URLs are transformed from
+    /// `/resource/{id}.json` to `/d/{id}`).
+    #[must_use]
+    pub fn portal_url(&self) -> Option<String> {
+        if let Some(ref url) = self.portal_url {
+            return Some(url.clone());
+        }
+        self.fetcher.derive_portal_url()
     }
 
     /// Returns the configured page size for this source's fetcher.

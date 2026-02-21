@@ -96,12 +96,14 @@ pub async fn sync_source(
     log::info!("Syncing source: {} ({})", source.name(), source.id());
 
     // Register/upsert the source in the database
+    let portal_url = source.portal_url();
     let source_id = queries::upsert_source(
         db,
         source.name(),
         "CITY_API",
         Option::None,
         &format!("{} data", source.name()),
+        portal_url.as_deref(),
     )
     .await?;
 

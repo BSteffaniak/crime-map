@@ -3,6 +3,8 @@
 /** A crime incident as returned by the sidebar API. */
 export interface SidebarIncident {
   id: number;
+  sourceId: number;
+  sourceName: string;
   sourceIncidentId: string | null;
   subcategory: string;
   category: string;

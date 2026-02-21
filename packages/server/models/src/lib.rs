@@ -168,6 +168,8 @@ pub struct SidebarQueryParams {
     pub severity_min: Option<u8>,
     /// Filter by arrest status.
     pub arrest_made: Option<bool>,
+    /// Comma-separated list of source IDs to include.
+    pub sources: Option<String>,
 }
 
 /// Response from the sidebar endpoint.
@@ -188,6 +190,10 @@ pub struct SidebarResponse {
 pub struct SidebarIncident {
     /// Unique incident ID.
     pub id: i64,
+    /// Database source ID (foreign key to `crime_sources`).
+    pub source_id: i32,
+    /// Human-readable data source name.
+    pub source_name: String,
     /// Source-specific incident ID.
     pub source_incident_id: Option<String>,
     /// Specific subcategory.
@@ -232,6 +238,8 @@ pub struct CountFilterParams {
     pub severity_min: Option<u8>,
     /// Filter by arrest status.
     pub arrest_made: Option<bool>,
+    /// Comma-separated list of source IDs to include.
+    pub sources: Option<String>,
 }
 
 impl From<&SidebarQueryParams> for CountFilterParams {
@@ -243,6 +251,7 @@ impl From<&SidebarQueryParams> for CountFilterParams {
             subcategories: p.subcategories.clone(),
             severity_min: p.severity_min,
             arrest_made: p.arrest_made,
+            sources: p.sources.clone(),
         }
     }
 }
@@ -256,6 +265,7 @@ impl From<&ClusterQueryParams> for CountFilterParams {
             subcategories: p.subcategories.clone(),
             severity_min: p.severity_min,
             arrest_made: p.arrest_made,
+            sources: p.sources.clone(),
         }
     }
 }
@@ -269,6 +279,7 @@ impl From<&HexbinQueryParams> for CountFilterParams {
             subcategories: p.subcategories.clone(),
             severity_min: p.severity_min,
             arrest_made: p.arrest_made,
+            sources: p.sources.clone(),
         }
     }
 }
@@ -295,6 +306,8 @@ pub struct ClusterQueryParams {
     pub severity_min: Option<u8>,
     /// Filter by arrest status.
     pub arrest_made: Option<bool>,
+    /// Comma-separated list of source IDs to include.
+    pub sources: Option<String>,
 }
 
 /// A single cluster entry in the clusters endpoint response.
@@ -329,6 +342,8 @@ pub struct HexbinQueryParams {
     pub severity_min: Option<u8>,
     /// Filter by arrest status.
     pub arrest_made: Option<bool>,
+    /// Comma-separated list of source IDs to include.
+    pub sources: Option<String>,
 }
 
 /// A single hexbin entry in the hexbins endpoint response.
@@ -342,4 +357,22 @@ pub struct HexbinEntry {
     pub vertices: Vec<[f64; 2]>,
     /// Filtered incident count in this hexagonal cell.
     pub count: u64,
+}
+
+/// A data source as returned by the `GET /api/sources` endpoint.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiSource {
+    /// Database primary key.
+    pub id: i32,
+    /// Human-readable source name.
+    pub name: String,
+    /// Type of data provider.
+    pub source_type: String,
+    /// Total number of records from this source.
+    pub record_count: i64,
+    /// Coverage area description.
+    pub coverage_area: String,
+    /// Human-readable portal URL for the dataset.
+    pub portal_url: Option<String>,
 }

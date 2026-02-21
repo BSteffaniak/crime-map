@@ -101,6 +101,7 @@ export interface FilterState {
   dateTo: string | null;
   datePreset: string | null;
   arrestMade: boolean | null;
+  sources: number[];
 }
 
 export const DEFAULT_FILTERS: FilterState = {
@@ -111,6 +112,7 @@ export const DEFAULT_FILTERS: FilterState = {
   dateTo: null,
   datePreset: null,
   arrestMade: null,
+  sources: [],
 };
 
 /** Severity color for the given 1-5 value. */
@@ -133,4 +135,14 @@ export function severityColor(value: number): string {
 export function categoryColor(category: string): string {
   const cat = CRIME_CATEGORIES[category as CategoryId];
   return cat?.color ?? "#6b7280";
+}
+
+/** A data source as returned by GET /api/sources. */
+export interface ApiSource {
+  id: number;
+  name: string;
+  sourceType: string;
+  recordCount: number;
+  coverageArea: string;
+  portalUrl: string | null;
 }

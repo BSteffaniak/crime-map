@@ -8,9 +8,9 @@ use crime_map_crime_models::{CrimeCategory, CrimeSubcategory};
 use crime_map_database::queries;
 use crime_map_database_models::{BoundingBox, IncidentQuery};
 use crime_map_server_models::{
-    ApiCategoryNode, ApiHealth, ApiIncident, ApiSubcategoryNode, ClusterEntry, ClusterQueryParams,
-    CountFilterParams, HexbinEntry, HexbinQueryParams, IncidentQueryParams, SidebarIncident,
-    SidebarQueryParams, SidebarResponse,
+    ApiCategoryNode, ApiHealth, ApiIncident, ApiSource, ApiSubcategoryNode, ClusterEntry,
+    ClusterQueryParams, CountFilterParams, HexbinEntry, HexbinQueryParams, IncidentQueryParams,
+    SidebarIncident, SidebarQueryParams, SidebarResponse,
 };
 use moosicbox_json_utils::database::ToValue as _;
 use serde::Deserialize;
@@ -129,21 +129,15 @@ pub async fn sources(state: web::Data<AppState>) -> HttpResponse {
         .await
     {
         Ok(rows) => {
-            let sources: Vec<serde_json::Value> = rows
+            let sources: Vec<ApiSource> = rows
                 .iter()
-                .map(|row| {
-                    let id: i32 = row.to_value("id").unwrap_or(0);
-                    let name: String = row.to_value("name").unwrap_or_default();
-                    let source_type: String = row.to_value("source_type").unwrap_or_default();
-                    let record_count: i64 = row.to_value("record_count").unwrap_or(0);
-                    let coverage_area: String = row.to_value("coverage_area").unwrap_or_default();
-                    serde_json::json!({
-                        "id": id,
-                        "name": name,
-                        "sourceType": source_type,
-                        "recordCount": record_count,
-                        "coverageArea": coverage_area,
-                    })
+                .map(|row| ApiSource {
+                    id: row.to_value("id").unwrap_or(0),
+                    name: row.to_value("name").unwrap_or_default(),
+                    source_type: row.to_value("source_type").unwrap_or_default(),
+                    record_count: row.to_value("record_count").unwrap_or(0),
+                    coverage_area: row.to_value("coverage_area").unwrap_or_default(),
+                    portal_url: row.to_value("portal_url").unwrap_or(None),
                 })
                 .collect();
             HttpResponse::Ok().json(sources)
@@ -246,6 +240,8 @@ fn parse_sidebar_row(row: &Row) -> SidebarIncident {
 
     SidebarIncident {
         id: row.to_value("id").unwrap_or(0),
+        source_id: row.to_value("source_id").unwrap_or(0),
+        source_name: row.to_value("source_name").unwrap_or_default(),
         source_incident_id: row.to_value("source_incident_id").unwrap_or(None),
         subcategory: row.to_value("subcategory").unwrap_or_default(),
         category: row.to_value("category").unwrap_or_default(),
@@ -331,6 +327,31 @@ fn build_features_query(
         feat_idx += 1;
     }
 
+    // Source filter — source IDs are integers, stored as source_id in SQLite
+    if let Some(ref sources_raw) = params.sources {
+        let source_ids: Vec<&str> = sources_raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !source_ids.is_empty() {
+            let placeholders: Vec<String> = source_ids
+                .iter()
+                .map(|_| {
+                    let p = format!("${feat_idx}");
+                    feat_idx += 1;
+                    p
+                })
+                .collect();
+            conditions.push(format!("source_id IN ({})", placeholders.join(", ")));
+            for id_str in &source_ids {
+                if let Ok(id) = id_str.parse::<i32>() {
+                    feature_params.push(DatabaseValue::Int32(id));
+                }
+            }
+        }
+    }
+
     let where_clause = if conditions.is_empty() {
         String::new()
     } else {
@@ -338,7 +359,8 @@ fn build_features_query(
     };
 
     let query = format!(
-        "SELECT id, source_incident_id, subcategory, category, severity,
+        "SELECT id, source_id, source_name, source_incident_id,
+                subcategory, category, severity,
                 longitude, latitude, occurred_at, description, block_address,
                 city, state, arrest_made, location_type
          FROM incidents{where_clause}
@@ -1028,6 +1050,14 @@ fn build_count_conditions(
         conditions.push("arrest = ?".to_string());
         bind_values.push(DuckValue::Int(i32::from(arrest)));
     }
+
+    // Source ID filter — integer-based
+    add_count_int_in_filter(
+        params.sources.as_deref(),
+        "source_id",
+        conditions,
+        bind_values,
+    );
 }
 
 /// Adds an `IN (...)` filter for a comma-separated parameter to the `DuckDB`
@@ -1052,6 +1082,32 @@ fn add_count_in_filter(
     conditions.push(format!("{column} IN ({})", placeholders.join(", ")));
     for item in &items {
         bind_values.push(DuckValue::Str((*item).to_string()));
+    }
+}
+
+/// Adds an `IN (...)` filter for a comma-separated integer parameter to the
+/// `DuckDB` count query conditions and bind values.
+fn add_count_int_in_filter(
+    param_value: Option<&str>,
+    column: &str,
+    conditions: &mut Vec<String>,
+    bind_values: &mut Vec<DuckValue>,
+) {
+    let Some(raw) = param_value else { return };
+    let items: Vec<i32> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse::<i32>().ok())
+        .collect();
+    if items.is_empty() {
+        return;
+    }
+
+    let placeholders: Vec<&str> = items.iter().map(|_| "?").collect();
+    conditions.push(format!("{column} IN ({})", placeholders.join(", ")));
+    for item in items {
+        bind_values.push(DuckValue::Int(item));
     }
 }
 
@@ -1114,6 +1170,13 @@ fn build_h3_conditions(
         conditions.push("h.arrest = ?".to_string());
         bind_values.push(DuckValue::Int(i32::from(arrest)));
     }
+
+    add_count_int_in_filter(
+        params.sources.as_deref(),
+        "h.source_id",
+        conditions,
+        bind_values,
+    );
 }
 
 /// Extracts the date portion (`YYYY-MM-DD`) from a date or RFC 3339 string.

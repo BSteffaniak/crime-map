@@ -474,6 +474,7 @@ function MapInteractions() {
             <div class="text-gray-500 dark:text-gray-400 text-xs mt-1">${props.date ?? ""}</div>
             ${props.addr ? `<div class="text-gray-500 dark:text-gray-400 text-xs">${props.addr}</div>` : ""}
             <div class="text-gray-500 dark:text-gray-400 text-xs">${props.city ?? ""}, ${props.state ?? ""}</div>
+            ${props.src_name ? `<div class="text-blue-600 dark:text-blue-400 text-xs mt-1">Source: ${props.src_name}</div>` : ""}
           </div>`,
         )
         .addTo(map);

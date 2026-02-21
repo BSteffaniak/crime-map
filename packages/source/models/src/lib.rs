@@ -114,6 +114,8 @@ pub struct SourceRecord {
     pub source_type: SourceType,
     /// API endpoint URL, if applicable.
     pub api_url: Option<String>,
+    /// Human-readable portal URL for the dataset.
+    pub portal_url: Option<String>,
     /// When this source was last synced.
     pub last_synced_at: Option<DateTime<Utc>>,
     /// Total number of records from this source.
