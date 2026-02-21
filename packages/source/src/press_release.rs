@@ -45,6 +45,9 @@ pub struct PressReleaseConfig<'a> {
     pub page_param: &'a str,
     /// Maximum listing pages to crawl.
     pub max_pages: u32,
+    /// Parse mode: `"structured"` (default, Anne Arundel style) or
+    /// `"drupal_narrative"` (Howard County style, single-incident prose).
+    pub parse_mode: &'a str,
     /// Label for log messages.
     pub label: &'a str,
 }
@@ -69,62 +72,117 @@ struct ParsedIncident {
 }
 
 /// Extract a date from a narrative paragraph. Looks for patterns like:
-/// "On February 20, 2026, at 2:05 a.m." or "On February 20, 2026, at
-/// approximately 1:10 a.m."
+/// "On February 20, 2026, at 2:05 a.m."
+/// "On February 20, 2026, at approximately 1:10 a.m."
+/// "at approximately 3:30 a.m. on Dec. 19"
+/// "on Dec. 19, 2025"
 fn extract_date_from_narrative(narrative: &str) -> Option<String> {
-    let re = Regex::new(
-        r"(?i)On\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),\s+(\d{4}),?\s+at\s+(?:approximately\s+)?(\d{1,2}:\d{2})\s*(a\.m\.|p\.m\.|am|pm)"
+    // Full month names and abbreviations
+    let month_pattern = r"(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan\.?|Feb\.?|Mar\.?|Apr\.?|May\.?|Jun\.?|Jul\.?|Aug\.?|Sep\.?|Sept\.?|Oct\.?|Nov\.?|Dec\.?)";
+
+    // Pattern 1: "On MONTH DAY, YEAR, at TIME am/pm"
+    let re1 = Regex::new(
+        &format!(r"(?i)On\s+({month_pattern})\s+(\d{{1,2}}),\s+(\d{{4}}),?\s+at\s+(?:approximately\s+)?(\d{{1,2}}:\d{{2}})\s*(a\.m\.|p\.m\.|am|pm)")
     ).ok()?;
 
-    let caps = re.captures(narrative)?;
-    let month_str = &caps[1];
-    let day: u32 = caps[2].parse().ok()?;
-    let year: u32 = caps[3].parse().ok()?;
-    let time_str = &caps[4];
-    let ampm = caps[5].to_lowercase().replace('.', "");
+    if let Some(caps) = re1.captures(narrative) {
+        let month = parse_month_name(&caps[1])?;
+        let day: u32 = caps[2].parse().ok()?;
+        let year: u32 = caps[3].parse().ok()?;
+        let (hour, minute) = parse_time_ampm(&caps[4], &caps[5])?;
+        return Some(format!(
+            "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00"
+        ));
+    }
 
-    let month = match month_str.to_lowercase().as_str() {
-        "january" => 1,
-        "february" => 2,
-        "march" => 3,
-        "april" => 4,
-        "may" => 5,
-        "june" => 6,
-        "july" => 7,
-        "august" => 8,
-        "september" => 9,
-        "october" => 10,
-        "november" => 11,
-        "december" => 12,
-        _ => return None,
-    };
+    // Pattern 2: "at TIME am/pm on MONTH DAY" (reversed, common in HC press releases)
+    let re2 = Regex::new(
+        &format!(r"(?i)at\s+(?:approximately\s+)?(\d{{1,2}}:\d{{2}})\s*(a\.m\.|p\.m\.|am|pm)\s+on\s+({month_pattern})\s+(\d{{1,2}})(?:,\s*(\d{{4}}))?")
+    ).ok()?;
 
+    if let Some(caps) = re2.captures(narrative) {
+        let month = parse_month_name(&caps[3])?;
+        let day: u32 = caps[4].parse().ok()?;
+        // Year may be absent; try to extract from elsewhere in the text
+        let year: u32 = caps
+            .get(5)
+            .and_then(|m| m.as_str().parse().ok())
+            .or_else(|| extract_year_from_text(narrative))?;
+        let (hour, minute) = parse_time_ampm(&caps[1], &caps[2])?;
+        return Some(format!(
+            "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00"
+        ));
+    }
+
+    // Pattern 3: "on MONTH DAY, YEAR" (date only, no time)
+    let re3 = Regex::new(&format!(
+        r"(?i)on\s+({month_pattern})\s+(\d{{1,2}}),?\s+(\d{{4}})"
+    ))
+    .ok()?;
+
+    if let Some(caps) = re3.captures(narrative) {
+        let month = parse_month_name(&caps[1])?;
+        let day: u32 = caps[2].parse().ok()?;
+        let year: u32 = caps[3].parse().ok()?;
+        return Some(format!("{year:04}-{month:02}-{day:02}T00:00:00"));
+    }
+
+    None
+}
+
+/// Parse a month name (full or abbreviated) to its numeric value.
+fn parse_month_name(s: &str) -> Option<u32> {
+    let normalized = s.to_lowercase().replace('.', "");
+    match normalized.as_str() {
+        "january" | "jan" => Some(1),
+        "february" | "feb" => Some(2),
+        "march" | "mar" => Some(3),
+        "april" | "apr" => Some(4),
+        "may" => Some(5),
+        "june" | "jun" => Some(6),
+        "july" | "jul" => Some(7),
+        "august" | "aug" => Some(8),
+        "september" | "sep" | "sept" => Some(9),
+        "october" | "oct" => Some(10),
+        "november" | "nov" => Some(11),
+        "december" | "dec" => Some(12),
+        _ => None,
+    }
+}
+
+/// Parse a time string like "3:30" with an AM/PM indicator.
+fn parse_time_ampm(time_str: &str, ampm_str: &str) -> Option<(u32, u32)> {
     let parts: Vec<&str> = time_str.split(':').collect();
     let mut hour: u32 = parts.first()?.parse().ok()?;
     let minute: u32 = parts.get(1)?.parse().ok()?;
+    let ampm = ampm_str.to_lowercase().replace('.', "");
 
     if ampm == "pm" && hour != 12 {
         hour += 12;
     } else if ampm == "am" && hour == 12 {
         hour = 0;
     }
+    Some((hour, minute))
+}
 
-    Some(format!(
-        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00"
-    ))
+/// Extract a four-digit year from narrative text as a fallback.
+fn extract_year_from_text(text: &str) -> Option<u32> {
+    let re = Regex::new(r"\b(20\d{2})\b").ok()?;
+    re.captures(text).and_then(|caps| caps[1].parse().ok())
 }
 
 /// Extract an address from a narrative. Looks for patterns like:
 /// "the 4000 block of Ritchie Highway in Brooklyn Park"
 /// "in the 600 block of Admiral Drive in Annapolis"
+/// "the 3400 block of Huntsmans Run for a report"
 /// "on Solomons Island Road near Poplar Point Road"
 fn extract_address_from_narrative(narrative: &str) -> (Option<String>, Option<String>) {
-    // Pattern 1: "the N block of STREET in CITY"
-    let block_re = Regex::new(
-        r"(?i)(?:in\s+)?the\s+(\d+)\s+block\s+of\s+([A-Z][A-Za-z\s]+?)\s+in\s+([A-Z][A-Za-z\s]+?)(?:\s+for|\s+when|\s*[,.])"
+    // Pattern 1: "the N block of STREET in CITY" (with city)
+    let block_city_re = Regex::new(
+        r"(?i)(?:in\s+)?the\s+(\d+)\s+block\s+of\s+([A-Z][A-Za-z'\s]+?)\s+in\s+([A-Z][A-Za-z\s]+?)(?:\s+for|\s+when|\s+and|\s+where|\s*[,.])"
     ).ok();
 
-    if let Some(re) = &block_re
+    if let Some(re) = &block_city_re
         && let Some(caps) = re.captures(narrative)
     {
         let block = &caps[1];
@@ -136,9 +194,27 @@ fn extract_address_from_narrative(narrative: &str) -> (Option<String>, Option<St
         );
     }
 
-    // Pattern 2: "on STREET near STREET" or "on STREET in CITY"
+    // Pattern 2: "the N block of STREET" (without city — stop at prepositions,
+    // punctuation, or common narrative words)
+    let block_re = Regex::new(
+        r"(?i)(?:in\s+)?the\s+(\d+)\s+block\s+of\s+([A-Z][A-Za-z'\s]+?)(?:\s+(?:for|when|and|where|after|that|who|which|he|she|they|police|a\s|an\s|the\s)|\s*[,.;])"
+    ).ok();
+
+    if let Some(re) = &block_re
+        && let Some(caps) = re.captures(narrative)
+    {
+        let block = &caps[1];
+        let street = caps[2].trim();
+        // Only accept if the street name looks valid (at least 2 words or ends
+        // with a known suffix, or is a proper name like "Huntsmans Run")
+        if street.len() >= 3 {
+            return (Some(format!("{block} block of {street}")), None);
+        }
+    }
+
+    // Pattern 3: "on STREET near STREET" or "on STREET in CITY"
     let on_re = Regex::new(
-        r"(?i)on\s+([A-Z][A-Za-z\s]+?(?:Road|Street|Highway|Boulevard|Avenue|Drive|Lane|Way|Place|Court|Circle|Pike|Terrace|Parkway|Trail))\s+(?:near|in)\s+([A-Z][A-Za-z\s]+?)(?:\s+for|\s+when|\s*[,.])"
+        r"(?i)on\s+([A-Z][A-Za-z'\s]+?(?:Road|Street|Highway|Boulevard|Avenue|Drive|Lane|Way|Place|Court|Circle|Pike|Terrace|Parkway|Trail|Run|Path|Point))\s+(?:near|in)\s+([A-Z][A-Za-z\s]+?)(?:\s+for|\s+when|\s+and|\s*[,.])"
     ).ok();
 
     if let Some(re) = &on_re
@@ -149,7 +225,130 @@ fn extract_address_from_narrative(narrative: &str) -> (Option<String>, Option<St
         return (Some(street.to_string()), Some(location.to_string()));
     }
 
+    // Pattern 4: "a residence/business/location in CITY" (common in HC press
+    // releases that don't give a specific address)
+    let location_in_re = Regex::new(
+        r"(?i)(?:a\s+)?(?:residence|home|business|apartment|hotel|motel|parking\s+lot|location)\s+in\s+([A-Z][A-Za-z\s]+?)(?:\s+for|\s+when|\s+and|\s+where|\s*[,.])"
+    ).ok();
+
+    if let Some(re) = &location_in_re
+        && let Some(caps) = re.captures(narrative)
+    {
+        let city = caps[1].trim();
+        return (None, Some(city.to_string()));
+    }
+
     (None, None)
+}
+
+/// Parse a Drupal narrative press release page (Howard County style) into
+/// zero or one incidents.
+///
+/// These pages contain a single incident described in prose, with a title,
+/// a `<time>` element, and body paragraphs.
+fn parse_drupal_narrative(html: &str) -> Vec<ParsedIncident> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let document = Html::parse_document(html);
+
+    // ── Title ────────────────────────────────────────────────────────
+    let title = {
+        let hero_title_sel = Selector::parse("h1.hero__title").ok();
+        let h1_sel = Selector::parse("h1").ok();
+
+        hero_title_sel
+            .as_ref()
+            .and_then(|sel| document.select(sel).next())
+            .or_else(|| h1_sel.as_ref().and_then(|sel| document.select(sel).next()))
+            .map(|el| el.text().collect::<String>().trim().to_string())
+            .unwrap_or_default()
+    };
+
+    if title.is_empty() {
+        return Vec::new();
+    }
+
+    // ── Date from <time datetime="..."> ──────────────────────────────
+    let date_str = {
+        let time_sel = Selector::parse("time[datetime]").ok();
+        time_sel
+            .as_ref()
+            .and_then(|sel| document.select(sel).next())
+            .and_then(|el| el.value().attr("datetime").map(String::from))
+    };
+
+    // ── Body text ────────────────────────────────────────────────────
+    let body_text = {
+        let content_sel = Selector::parse(".field--name-field-content p").ok();
+        let fallback_sel = Selector::parse(".paragraph--rich-text p").ok();
+
+        let paragraphs: Vec<String> = content_sel
+            .as_ref()
+            .map(|sel| {
+                document
+                    .select(sel)
+                    .map(|p| p.text().collect::<String>().trim().replace('\u{a0}', " "))
+                    .filter(|t| !t.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| !v.is_empty())
+            .or_else(|| {
+                fallback_sel.as_ref().map(|sel| {
+                    document
+                        .select(sel)
+                        .map(|p| p.text().collect::<String>().trim().replace('\u{a0}', " "))
+                        .filter(|t| !t.is_empty())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .unwrap_or_default();
+
+        paragraphs.join("\n")
+    };
+
+    if body_text.is_empty() {
+        return Vec::new();
+    }
+
+    // ── Synthetic case number from hash of title + date ──────────────
+    let case_number = {
+        let mut hasher = DefaultHasher::new();
+        title.hash(&mut hasher);
+        if let Some(ref d) = date_str {
+            d.hash(&mut hasher);
+        }
+        let hash_val = hasher.finish();
+        format!("HC-{hash_val:016x}")[..11].to_string()
+    };
+
+    // ── Crime type from title ────────────────────────────────────────
+    let crime_type = title.clone();
+
+    // ── Address / city from narrative ─────────────────────────────────
+    let (address, city) = extract_address_from_narrative(&body_text);
+
+    // Also try to find the city in the title if not found in narrative
+    let city = city.or_else(|| {
+        // Look for "in CityName" at end of title — use greedy .* to match
+        // the LAST "in" before the city name (e.g., "Suspect in custody in
+        // domestic fatal stabbing in Ellicott City" -> "Ellicott City")
+        let re = Regex::new(r"(?i).*\bin\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)*)\s*$").ok()?;
+        re.captures(&title).map(|caps| caps[1].trim().to_string())
+    });
+
+    // ── Date: prefer <time> attribute, fall back to narrative ─────────
+    let date = date_str.or_else(|| extract_date_from_narrative(&body_text));
+
+    vec![ParsedIncident {
+        district: String::new(),
+        crime_type,
+        case_number,
+        narrative: body_text,
+        date,
+        address,
+        city,
+    }]
 }
 
 /// Parse a single press release page into zero or more incidents.
@@ -368,6 +567,8 @@ pub async fn fetch_press_release(
 
         let listing_url = if page_num == 0 {
             config.listing_url.to_string()
+        } else if config.listing_url.contains('?') {
+            format!("{}&{}={page_num}", config.listing_url, config.page_param)
         } else {
             format!("{}?{}={page_num}", config.listing_url, config.page_param)
         };
@@ -448,7 +649,11 @@ pub async fn fetch_press_release(
             }
 
             let release_html = resp.text().await?;
-            let incidents = parse_press_release(&release_html, config.article_selector);
+            let incidents = if config.parse_mode == "drupal_narrative" {
+                parse_drupal_narrative(&release_html)
+            } else {
+                parse_press_release(&release_html, config.article_selector)
+            };
 
             if incidents.is_empty() {
                 continue;

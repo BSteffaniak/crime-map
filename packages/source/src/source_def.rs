@@ -263,6 +263,9 @@ pub enum FetcherConfig {
         page_param: Option<String>,
         /// Maximum listing pages to crawl.
         max_pages: Option<u32>,
+        /// Parse mode: `"structured"` (default, Anne Arundel style) or
+        /// `"drupal_narrative"` (Howard County style, single-incident prose).
+        parse_mode: Option<String>,
     },
     /// Daily crime-bulletin scraper (single-page accordion-style bulletins
     /// with structured per-incident entries).
@@ -1008,6 +1011,7 @@ impl SourceDefinition {
                     article_selector,
                     page_param,
                     max_pages,
+                    parse_mode,
                 } => {
                     fetch_press_release(
                         &PressReleaseConfig {
@@ -1018,6 +1022,7 @@ impl SourceDefinition {
                             article_selector,
                             page_param: page_param.as_deref().unwrap_or("page"),
                             max_pages: max_pages.unwrap_or(0),
+                            parse_mode: parse_mode.as_deref().unwrap_or("structured"),
                             label: &name,
                         },
                         &options,

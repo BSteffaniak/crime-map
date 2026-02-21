@@ -1,0 +1,47 @@
+id = "howard_county_ccm_md"
+name = "Howard County PD (LexisNexis CCM)"
+city = "Columbia"
+state = "MD"
+output_filename = "howard_county_ccm_crimes.json"
+
+[license]
+license_type = "unknown"
+tos_url = "https://risk.lexisnexis.com/terms"
+attribution_required = true
+attribution_text = "Howard County Police Department via LexisNexis Community Crime Map"
+allows_redistribution = false
+allows_scraping = false
+restricted = true
+notes = "Agency registered but currently returns 0 records. Dormant — will auto-activate if data feed starts."
+
+[fetcher]
+type = "lexis_nexis_ccm"
+bbox = [-77.18, 39.10, -76.70, 39.37]
+agency_filter = "Howard County"
+
+[fields]
+incident_id = ["ReferenceID", "EntityID"]
+crime_type = ["Class", "UCRGroup"]
+
+[fields.occurred_at]
+type = "simple"
+field = "DateTime"
+
+[fields.lat]
+field = "Latitude"
+type = "string"
+
+[fields.lng]
+field = "Longitude"
+type = "string"
+
+[fields.description]
+type = "combine"
+fields = ["Crime", "LocationType"]
+separator = " — "
+
+[fields.arrest]
+type = "none"
+
+block_address = "AddressOfCrime"
+location_type = "LocationType"

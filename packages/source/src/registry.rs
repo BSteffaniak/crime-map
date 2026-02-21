@@ -94,6 +94,10 @@ const SOURCE_TOMLS: &[(&str, &str)] = &[
         "howard_county_vehicle_crimes_md",
         include_str!("../sources/howard_county_vehicle_crimes_md.toml"),
     ),
+    (
+        "anne_arundel_overdose_md",
+        include_str!("../sources/anne_arundel_overdose_md.toml"),
+    ),
     // ── CityProtect sources ──────────────────────────────────────────
     ("laurel_md", include_str!("../sources/laurel_md.toml")),
     ("bowie_md", include_str!("../sources/bowie_md.toml")),
@@ -131,6 +135,10 @@ const SOURCE_TOMLS: &[(&str, &str)] = &[
         "anne_arundel_county_md",
         include_str!("../sources/anne_arundel_county_md.toml"),
     ),
+    (
+        "howard_county_press_releases_md",
+        include_str!("../sources/howard_county_press_releases_md.toml"),
+    ),
     // ── Crime bulletin sources ───────────────────────────────────────
     (
         "howard_county_md",
@@ -155,11 +163,19 @@ const SOURCE_TOMLS: &[(&str, &str)] = &[
         include_str!("../sources/takoma_park_md.toml"),
     ),
     ("hampstead_md", include_str!("../sources/hampstead_md.toml")),
+    (
+        "anne_arundel_ccm_md",
+        include_str!("../sources/anne_arundel_ccm_md.toml"),
+    ),
+    (
+        "howard_county_ccm_md",
+        include_str!("../sources/howard_county_ccm_md.toml"),
+    ),
 ];
 
 /// Total number of configured sources (used in tests).
 #[cfg(test)]
-const EXPECTED_SOURCE_COUNT: usize = 66;
+const EXPECTED_SOURCE_COUNT: usize = 70;
 
 /// Returns all configured source definitions, parsed from embedded TOML.
 ///

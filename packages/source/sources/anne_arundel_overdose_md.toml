@@ -1,0 +1,46 @@
+id = "anne_arundel_overdose_md"
+name = "Anne Arundel County Overdose Incidents (2019)"
+city = "Annapolis"
+state = "MD"
+output_filename = "anne_arundel_overdose_crimes.json"
+
+[license]
+license_type = "open_data"
+attribution_required = true
+attribution_text = "Anne Arundel County"
+allows_redistribution = true
+restricted = false
+notes = "416 geocoded overdose incidents from 2019 via ArcGIS. Includes fatality status, drug type, demographics, and district."
+
+[fetcher]
+type = "arcgis"
+query_urls = [
+  "https://services2.arcgis.com/nUoGCkM6W8Wqdvvh/arcgis/rest/services/Overdose_Incidents/FeatureServer/0/query",
+]
+page_size = 2000
+date_column = "USER_DATE"
+
+[fields]
+incident_id = ["FID"]
+crime_type = ["USER_OVERD", "DRUG"]
+block_address = "ZIPCODE"
+
+[fields.occurred_at]
+type = "epoch_ms"
+field = "USER_DATE"
+
+[fields.lat]
+field = "_geometry_y"
+type = "f64"
+
+[fields.lng]
+field = "_geometry_x"
+type = "f64"
+
+[fields.description]
+type = "combine"
+fields = ["USER_FATAL", "DRUG", "USER_OVERD", "USER_DISTR"]
+separator = " — "
+
+[fields.arrest]
+type = "none"

@@ -3,17 +3,24 @@
 //! Common date and coordinate parsing functions used across multiple source
 //! implementations.
 
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 
-/// Parses a datetime string commonly found in Socrata and CKAN APIs.
+/// Parses a datetime string commonly found in Socrata, CKAN, and Drupal APIs.
 ///
 /// Supports the following formats:
+/// - `2024-01-15T14:30:00Z` (RFC 3339 / ISO 8601 with `Z` suffix)
+/// - `2024-01-15T14:30:00+00:00` (RFC 3339 with offset)
 /// - `2024-01-15T14:30:00.000` (Socrata with fractional seconds)
 /// - `2024-01-15T14:30:00` (Socrata without fractional seconds)
 /// - `2024-01-15 14:30:00+00` (CKAN with timezone offset)
 /// - `2024-01-15 14:30:00` (space-separated without timezone)
+/// - `2024-01-15` (date-only, midnight UTC)
 #[must_use]
 pub fn parse_socrata_date(s: &str) -> Option<DateTime<Utc>> {
+    // Try RFC 3339 first (handles "2026-02-08T12:00:00Z" and "+00:00" offsets)
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Some(dt.with_timezone(&Utc));
+    }
     // Try ISO 8601 with 'T' separator and optional fractional seconds
     if let Ok(naive) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f") {
         return Some(naive.and_utc());
@@ -31,6 +38,10 @@ pub fn parse_socrata_date(s: &str) -> Option<DateTime<Utc>> {
     }
     if let Ok(naive) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
         return Some(naive.and_utc());
+    }
+    // Try date-only (midnight UTC)
+    if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return date.and_hms_opt(0, 0, 0).map(|naive| naive.and_utc());
     }
     None
 }
@@ -79,6 +90,24 @@ mod tests {
     #[test]
     fn rejects_invalid_date() {
         assert!(parse_socrata_date("not-a-date").is_none());
+    }
+
+    #[test]
+    fn parses_rfc3339_with_z() {
+        let dt = parse_socrata_date("2026-02-08T12:00:00Z").unwrap();
+        assert_eq!(dt.to_string(), "2026-02-08 12:00:00 UTC");
+    }
+
+    #[test]
+    fn parses_rfc3339_with_offset() {
+        let dt = parse_socrata_date("2026-02-08T12:00:00+00:00").unwrap();
+        assert_eq!(dt.to_string(), "2026-02-08 12:00:00 UTC");
+    }
+
+    #[test]
+    fn parses_date_only() {
+        let dt = parse_socrata_date("2026-02-08").unwrap();
+        assert_eq!(dt.to_string(), "2026-02-08 00:00:00 UTC");
     }
 
     #[test]
