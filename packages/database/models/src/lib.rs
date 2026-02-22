@@ -83,8 +83,9 @@ pub struct IncidentRow {
     pub longitude: f64,
     /// Latitude (WGS84).
     pub latitude: f64,
-    /// When the crime occurred.
-    pub occurred_at: DateTime<Utc>,
+    /// When the crime occurred. `None` when the source record had no
+    /// parseable date.
+    pub occurred_at: Option<DateTime<Utc>>,
     /// When the crime was reported.
     pub reported_at: Option<DateTime<Utc>>,
     /// Short description.

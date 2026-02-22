@@ -230,7 +230,14 @@ pub async fn insert_incidents(
             params.push(DatabaseValue::Int32(*cat_id));
             params.push(DatabaseValue::Real64(incident.longitude.unwrap_or(0.0)));
             params.push(DatabaseValue::Real64(incident.latitude.unwrap_or(0.0)));
-            params.push(DatabaseValue::DateTime(incident.occurred_at.naive_utc()));
+            params.push(
+                incident
+                    .occurred_at
+                    .as_ref()
+                    .map_or(DatabaseValue::Null, |dt| {
+                        DatabaseValue::DateTime(dt.naive_utc())
+                    }),
+            );
             params.push(
                 incident
                     .reported_at
@@ -496,12 +503,11 @@ pub async fn query_incidents(
         let severity = CrimeSeverity::from_value(u8::try_from(severity_val).unwrap_or(1))
             .unwrap_or(CrimeSeverity::Minimal);
 
-        let occurred_at_naive: chrono::NaiveDateTime =
-            row.to_value("occurred_at").unwrap_or_default();
-        let occurred_at = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
-            occurred_at_naive,
-            chrono::Utc,
-        );
+        let occurred_at_naive: Option<chrono::NaiveDateTime> =
+            row.to_value("occurred_at").unwrap_or(None);
+        let occurred_at = occurred_at_naive.map(|naive| {
+            chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc)
+        });
 
         let reported_at_naive: Option<chrono::NaiveDateTime> =
             row.to_value("reported_at").unwrap_or(None);

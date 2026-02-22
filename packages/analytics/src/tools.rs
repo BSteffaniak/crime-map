@@ -708,9 +708,10 @@ pub async fn get_trend(
         "SELECT date_trunc('{trunc}', i.occurred_at)::date::text as period, COUNT(*) as cnt
          FROM crime_incidents i
          {cat_join}
-         {wc}
+         {wc}{and_or_where} i.occurred_at IS NOT NULL
          GROUP BY period
-         ORDER BY period"
+         ORDER BY period",
+        and_or_where = if wc.is_empty() { " WHERE" } else { " AND" }
     );
 
     let rows = db.query_raw_params(&sql, &db_params).await?;

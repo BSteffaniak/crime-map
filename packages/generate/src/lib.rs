@@ -647,10 +647,11 @@ async fn insert_sidebar_row(
     let block_address: Option<String> = row.to_value("block_address").unwrap_or(None);
     let location_type: Option<String> = row.to_value("location_type").unwrap_or(None);
 
-    let occurred_at_naive: chrono::NaiveDateTime = row.to_value("occurred_at").unwrap_or_default();
-    let occurred_at =
-        chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(occurred_at_naive, chrono::Utc)
-            .to_rfc3339();
+    let occurred_at_naive: Option<chrono::NaiveDateTime> =
+        row.to_value("occurred_at").unwrap_or(None);
+    let occurred_at = occurred_at_naive.map(|naive| {
+        chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc).to_rfc3339()
+    });
 
     let arrest_int = arrest_made.map(|b| DatabaseValue::Int32(i32::from(b)));
 
@@ -670,7 +671,7 @@ async fn insert_sidebar_row(
             DatabaseValue::Int32(severity),
             DatabaseValue::Real64(lng),
             DatabaseValue::Real64(lat),
-            DatabaseValue::String(occurred_at),
+            occurred_at.map_or(DatabaseValue::Null, DatabaseValue::String),
             description.map_or(DatabaseValue::Null, DatabaseValue::String),
             block_address.map_or(DatabaseValue::Null, DatabaseValue::String),
             DatabaseValue::String(city),
@@ -730,7 +731,7 @@ async fn generate_sidebar_db(
                 severity INTEGER NOT NULL,
                 longitude REAL NOT NULL,
                 latitude REAL NOT NULL,
-                occurred_at TEXT NOT NULL,
+                occurred_at TEXT,
                 description TEXT,
                 block_address TEXT,
                 city TEXT,
@@ -936,7 +937,7 @@ async fn generate_count_db(
             severity INTEGER NOT NULL,
             longitude DOUBLE NOT NULL,
             latitude DOUBLE NOT NULL,
-            occurred_at VARCHAR NOT NULL,
+            occurred_at VARCHAR,
             arrest_made INTEGER,
             category VARCHAR NOT NULL
         )",
@@ -1107,9 +1108,11 @@ async fn generate_h3_db(
                 let subcategory: String = row.to_value("subcategory").unwrap_or_default();
                 let severity: i32 = row.to_value("severity").unwrap_or(1);
                 let arrest_made: Option<bool> = row.to_value("arrest_made").unwrap_or(None);
-                let occurred_at_naive: chrono::NaiveDateTime =
-                    row.to_value("occurred_at").unwrap_or_default();
-                let day = occurred_at_naive.format("%Y-%m-%d").to_string();
+                let occurred_at_naive: Option<chrono::NaiveDateTime> =
+                    row.to_value("occurred_at").unwrap_or(None);
+                let day = occurred_at_naive
+                    .map(|naive| naive.format("%Y-%m-%d").to_string())
+                    .unwrap_or_default();
 
                 let arrest_int: i32 = match arrest_made {
                     Some(true) => 1,
@@ -1383,8 +1386,10 @@ fn insert_duckdb_row(
     let lat: f64 = row.to_value("latitude").unwrap_or(0.0);
     let arrest_made: Option<bool> = row.to_value("arrest_made").unwrap_or(None);
 
-    let occurred_at_naive: chrono::NaiveDateTime = row.to_value("occurred_at").unwrap_or_default();
-    let occurred_at_str = occurred_at_naive.format("%Y-%m-%d %H:%M:%S").to_string();
+    let occurred_at_naive: Option<chrono::NaiveDateTime> =
+        row.to_value("occurred_at").unwrap_or(None);
+    let occurred_at_str: Option<String> =
+        occurred_at_naive.map(|naive| naive.format("%Y-%m-%d %H:%M:%S").to_string());
 
     let arrest_int: Option<i32> = arrest_made.map(i32::from);
 
@@ -1774,13 +1779,12 @@ async fn export_geojsonseq(
             let description: Option<String> = row.to_value("description").unwrap_or(None);
             let block_address: Option<String> = row.to_value("block_address").unwrap_or(None);
 
-            let occurred_at_naive: chrono::NaiveDateTime =
-                row.to_value("occurred_at").unwrap_or_default();
-            let occurred_at = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
-                occurred_at_naive,
-                chrono::Utc,
-            )
-            .to_rfc3339();
+            let occurred_at_naive: Option<chrono::NaiveDateTime> =
+                row.to_value("occurred_at").unwrap_or(None);
+            let occurred_at: Option<String> = occurred_at_naive.map(|naive| {
+                chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc)
+                    .to_rfc3339()
+            });
 
             let feature = serde_json::json!({
                 "type": "Feature",

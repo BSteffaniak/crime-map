@@ -248,7 +248,7 @@ fn parse_sidebar_row(row: &Row) -> SidebarIncident {
         severity: row.to_value("severity").unwrap_or(1),
         longitude: row.to_value("longitude").unwrap_or(0.0),
         latitude: row.to_value("latitude").unwrap_or(0.0),
-        occurred_at: row.to_value("occurred_at").unwrap_or_default(),
+        occurred_at: row.to_value("occurred_at").unwrap_or(None),
         description: row.to_value("description").unwrap_or(None),
         block_address: row.to_value("block_address").unwrap_or(None),
         city: row.to_value("city").unwrap_or(None),

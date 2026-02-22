@@ -31,8 +31,9 @@ pub struct ApiIncident {
     pub longitude: f64,
     /// Latitude.
     pub latitude: f64,
-    /// When the crime occurred (ISO 8601).
-    pub occurred_at: DateTime<Utc>,
+    /// When the crime occurred (ISO 8601). `None` if the source had no
+    /// parseable date.
+    pub occurred_at: Option<DateTime<Utc>>,
     /// Short description.
     pub description: Option<String>,
     /// Block-level address.
@@ -206,8 +207,9 @@ pub struct SidebarIncident {
     pub longitude: f64,
     /// Latitude.
     pub latitude: f64,
-    /// When the crime occurred (ISO 8601).
-    pub occurred_at: String,
+    /// When the crime occurred (ISO 8601). `None` if the source had no
+    /// parseable date.
+    pub occurred_at: Option<String>,
     /// Short description.
     pub description: Option<String>,
     /// Block-level address.

@@ -80,8 +80,9 @@ pub struct NormalizedIncident {
     pub longitude: Option<f64>,
     /// Latitude (WGS84). `None` if the source lacks coordinates.
     pub latitude: Option<f64>,
-    /// When the crime occurred.
-    pub occurred_at: DateTime<Utc>,
+    /// When the crime occurred. `None` when the source record has a missing
+    /// or unparseable date field.
+    pub occurred_at: Option<DateTime<Utc>>,
     /// When the crime was reported (may differ from occurrence).
     pub reported_at: Option<DateTime<Utc>>,
     /// Short description of the incident.

@@ -1101,7 +1101,12 @@ impl SourceDefinition {
             let subcategory = map_crime_type(crime_str);
 
             // ── Dates ────────────────────────────────────────────────
-            let occurred_at = fields.occurred_at.extract(record).unwrap_or_else(Utc::now);
+            let occurred_at = fields.occurred_at.extract(record);
+            if occurred_at.is_none() {
+                log::warn!(
+                    "Failed to parse occurred_at for incident {source_incident_id}, storing with NULL date"
+                );
+            }
 
             let reported_at = fields
                 .reported_at
