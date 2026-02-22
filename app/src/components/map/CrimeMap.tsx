@@ -24,7 +24,7 @@ import {
 import { severityColor, type FilterState } from "@/lib/types";
 import { buildIncidentFilter } from "@/lib/map-filters/expressions";
 import type { HexbinEntry } from "@/lib/hexbins/types";
-import BoundaryLayers, { BOUNDARY_FILL_LAYER_IDS } from "@/components/map/BoundaryLayers";
+import BoundaryLayers from "@/components/map/BoundaryLayers";
 
 interface CrimeMapProps {
   filters: FilterState;
@@ -475,10 +475,79 @@ function IncidentPointsLayer({
   return null;
 }
 
+/**
+ * Boundary layer IDs ordered from most specific (smallest geography) to least
+ * specific (largest). Used to display boundary names in the unified tooltip
+ * with the most granular info first.
+ */
+const BOUNDARY_SPECIFICITY_ORDER: readonly string[] = [
+  "tracts-fill",
+  "neighborhoods-fill",
+  "places-fill",
+  "counties-fill",
+  "states-fill",
+];
+
+/** Format a large number compactly (e.g. 1234 → "1.2K"). */
+function formatCount(count: number): string {
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
+  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}K`;
+  return String(count);
+}
+
+/** Format a population number compactly (e.g. 5150233 → "5.2M"). */
+function formatPopulation(pop: number): string {
+  if (pop >= 1_000_000) return `${(pop / 1_000_000).toFixed(1)}M`;
+  if (pop >= 1_000) return `${(pop / 1_000).toFixed(1)}K`;
+  return String(pop);
+}
+
+/** Build the HTML for the unified hover tooltip from features at the cursor. */
+function buildHoverHtml(
+  hexFeature: maplibregl.GeoJSONFeature | undefined,
+  boundaryFeatures: maplibregl.GeoJSONFeature[],
+): string {
+  const parts: string[] = [];
+
+  // Hexbin incident count
+  if (hexFeature?.properties) {
+    const count = hexFeature.properties.count as number;
+    const formatted = formatCount(count);
+    parts.push(
+      `<div class="font-semibold">${formatted} incident${count !== 1 ? "s" : ""}</div>`,
+    );
+  }
+
+  // Boundary names (already in specificity order)
+  if (boundaryFeatures.length > 0) {
+    // Add separator if we also have hex data
+    if (parts.length > 0) {
+      parts.push(
+        `<div class="my-1 border-t border-gray-200 dark:border-gray-700"></div>`,
+      );
+    }
+    for (const feat of boundaryFeatures) {
+      const props = feat.properties;
+      if (!props) continue;
+      const name = (props.name || props.full_name || "Unknown") as string;
+      const extra = props.state ? `, ${props.state}` : "";
+      const population = props.population
+        ? ` &middot; Pop. ${formatPopulation(Number(props.population))}`
+        : "";
+      parts.push(
+        `<div class="text-gray-600 dark:text-gray-400">${name}${extra}${population}</div>`,
+      );
+    }
+  }
+
+  return `<div class="text-xs font-medium px-2 py-1.5 bg-white dark:bg-gray-900 rounded-md shadow-md border border-border">${parts.join("")}</div>`;
+}
+
 /** Click + hover interactions for hexbin and incident point layers. */
 function MapInteractions({ layers }: { layers: Record<string, boolean> }) {
   const { map, isLoaded } = useMap();
   const popupRef = useRef<maplibregl.Popup | null>(null);
+  const popupOpenRef = useRef(false);
   const hoverPopupRef = useRef<maplibregl.Popup | null>(null);
 
   useEffect(() => {
@@ -520,7 +589,7 @@ function MapInteractions({ layers }: { layers: Record<string, boolean> }) {
 
       popupRef.current?.remove();
 
-      popupRef.current = new maplibregl.Popup({ offset: 10, maxWidth: "320px" })
+      const popup = new maplibregl.Popup({ offset: 10, maxWidth: "320px" })
         .setLngLat(coords)
         .setHTML(
           `<div class="text-sm bg-white dark:bg-gray-900 rounded-lg shadow-lg p-3 border border-border">
@@ -534,43 +603,91 @@ function MapInteractions({ layers }: { layers: Record<string, boolean> }) {
           </div>`,
         )
         .addTo(map);
+
+      popupRef.current = popup;
+      popupOpenRef.current = true;
+
+      // Hide the hover tooltip while the click popup is open
+      hoverPopupRef.current?.remove();
+
+      popup.on("close", () => {
+        popupOpenRef.current = false;
+      });
     };
 
-    // Hover tooltip on hexbin
+    // ── Unified hover tooltip ────────────────────────────────────────
+    // A single popup follows the cursor and consolidates info from the
+    // hexbin layer and all active boundary layers.
     const hoverPopup = new maplibregl.Popup({
       closeButton: false,
       closeOnClick: false,
       offset: 15,
-      className: "hex-hover-popup",
+      className: "unified-hover-popup",
     });
     hoverPopupRef.current = hoverPopup;
 
-    const onHexMouseMove = (e: maplibregl.MapLayerMouseEvent) => {
-      if (!e.features || e.features.length === 0) {
+    // Determine which hover-interactive layers are currently active
+    const activeBoundaryFillIds = BOUNDARY_SPECIFICITY_ORDER.filter((id) => {
+      const baseId = id.replace("-fill", "");
+      return layers[baseId] && map.getLayer(id);
+    });
+
+    const hasHexLayer = !!map.getLayer("hexbin-fill");
+
+    /**
+     * Unified mousemove handler: queries all interactive layers at the
+     * cursor and builds a single consolidated tooltip.
+     */
+    const onHoverMouseMove = (e: maplibregl.MapLayerMouseEvent) => {
+      // Suppress hover tooltip while a click popup is open
+      if (popupOpenRef.current) {
         hoverPopup.remove();
         return;
       }
 
-      const props = e.features[0].properties;
-      if (!props) return;
+      // Query hexbin features at cursor
+      let hexFeature: maplibregl.GeoJSONFeature | undefined;
+      if (hasHexLayer) {
+        const hexHits = map.queryRenderedFeatures(e.point, {
+          layers: ["hexbin-fill"],
+        });
+        if (hexHits.length > 0) hexFeature = hexHits[0];
+      }
 
-      const count = props.count as number;
-      const formatted =
-        count >= 1_000_000
-          ? `${(count / 1_000_000).toFixed(1)}M`
-          : count >= 1_000
-            ? `${(count / 1_000).toFixed(1)}K`
-            : String(count);
+      // Query all active boundary layers at cursor, preserving
+      // specificity order (most specific first)
+      const boundaryFeatures: maplibregl.GeoJSONFeature[] = [];
+      const seenNames = new Set<string>();
+      for (const layerId of activeBoundaryFillIds) {
+        const hits = map.queryRenderedFeatures(e.point, {
+          layers: [layerId],
+        });
+        if (hits.length > 0 && hits[0].properties) {
+          const name =
+            (hits[0].properties.name as string) ||
+            (hits[0].properties.full_name as string) ||
+            "";
+          // Deduplicate in case overlapping layers produce the same name
+          if (name && !seenNames.has(name)) {
+            seenNames.add(name);
+            boundaryFeatures.push(hits[0]);
+          }
+        }
+      }
+
+      // Nothing to show — hide tooltip
+      if (!hexFeature && boundaryFeatures.length === 0) {
+        hoverPopup.remove();
+        return;
+      }
 
       hoverPopup
         .setLngLat(e.lngLat)
-        .setHTML(
-          `<div class="text-xs font-medium px-2 py-1 bg-white dark:bg-gray-900 rounded-md shadow-md border border-border">${formatted} incident${count !== 1 ? "s" : ""}</div>`,
-        )
+        .setHTML(buildHoverHtml(hexFeature, boundaryFeatures))
         .addTo(map);
     };
 
-    const onHexMouseLeave = () => {
+    const onHoverMouseLeave = () => {
       hoverPopup.remove();
     };
 
@@ -582,86 +699,48 @@ function MapInteractions({ layers }: { layers: Record<string, boolean> }) {
       map.getCanvas().style.cursor = "";
     };
 
-    // Boundary hover tooltip
-    const boundaryHoverPopup = new maplibregl.Popup({
-      closeButton: false,
-      closeOnClick: false,
-      offset: 15,
-      className: "boundary-hover-popup",
-    });
-
-    const onBoundaryMouseMove = (e: maplibregl.MapLayerMouseEvent) => {
-      if (!e.features || e.features.length === 0) {
-        boundaryHoverPopup.remove();
-        return;
-      }
-
-      const feature = e.features[0];
-      const props = feature.properties;
-      if (!props) return;
-
-      const name = props.name || props.full_name || "Unknown";
-      const population = props.population
-        ? ` &middot; Pop. ${Number(props.population).toLocaleString()}`
-        : "";
-      const extra = props.state ? `, ${props.state}` : "";
-
-      boundaryHoverPopup
-        .setLngLat(e.lngLat)
-        .setHTML(
-          `<div class="text-xs font-medium px-2 py-1 bg-white dark:bg-gray-900 rounded-md shadow-md border border-border">${name}${extra}${population}</div>`,
-        )
-        .addTo(map);
-    };
-
-    const onBoundaryMouseLeave = () => {
-      boundaryHoverPopup.remove();
-    };
-
-    // Bind boundary events for all visible boundary fill layers
-    for (const layerId of BOUNDARY_FILL_LAYER_IDS) {
-      // Extract the base id (e.g., "states" from "states-fill")
-      const baseId = layerId.replace("-fill", "");
-      if (layers[baseId] && map.getLayer(layerId)) {
-        map.on("mousemove", layerId, onBoundaryMouseMove);
-        map.on("mouseleave", layerId, onBoundaryMouseLeave);
-      }
-    }
-
-    // Bind events (guard with getLayer to avoid errors if layer not yet added)
-    if (map.getLayer("hexbin-fill")) {
+    // ── Bind events ──────────────────────────────────────────────────
+    // Hexbin layer
+    if (hasHexLayer) {
       map.on("click", "hexbin-fill", onHexClick);
-      map.on("mousemove", "hexbin-fill", onHexMouseMove);
-      map.on("mouseleave", "hexbin-fill", onHexMouseLeave);
+      map.on("mousemove", "hexbin-fill", onHoverMouseMove);
+      map.on("mouseleave", "hexbin-fill", onHoverMouseLeave);
       map.on("mouseenter", "hexbin-fill", onLayerEnter);
       map.on("mouseleave", "hexbin-fill", onLayerLeave);
     }
+
+    // Incident points layer
     if (map.getLayer("incidents-points")) {
       map.on("click", "incidents-points", onPointClick);
       map.on("mouseenter", "incidents-points", onLayerEnter);
       map.on("mouseleave", "incidents-points", onLayerLeave);
     }
 
+    // Boundary fill layers — all share the unified handler
+    for (const layerId of activeBoundaryFillIds) {
+      map.on("mousemove", layerId, onHoverMouseMove);
+      map.on("mouseleave", layerId, onHoverMouseLeave);
+    }
+
     return () => {
       try {
         map.off("click", "hexbin-fill", onHexClick);
-        map.off("mousemove", "hexbin-fill", onHexMouseMove);
-        map.off("mouseleave", "hexbin-fill", onHexMouseLeave);
+        map.off("mousemove", "hexbin-fill", onHoverMouseMove);
+        map.off("mouseleave", "hexbin-fill", onHoverMouseLeave);
         map.off("mouseenter", "hexbin-fill", onLayerEnter);
         map.off("mouseleave", "hexbin-fill", onLayerLeave);
         map.off("click", "incidents-points", onPointClick);
         map.off("mouseenter", "incidents-points", onLayerEnter);
         map.off("mouseleave", "incidents-points", onLayerLeave);
-        for (const layerId of BOUNDARY_FILL_LAYER_IDS) {
-          map.off("mousemove", layerId, onBoundaryMouseMove);
-          map.off("mouseleave", layerId, onBoundaryMouseLeave);
+        for (const layerId of activeBoundaryFillIds) {
+          map.off("mousemove", layerId, onHoverMouseMove);
+          map.off("mouseleave", layerId, onHoverMouseLeave);
         }
       } catch {
         // ignore
       }
       popupRef.current?.remove();
       hoverPopupRef.current?.remove();
-      boundaryHoverPopup.remove();
     };
   }, [isLoaded, map, layers]);
 
