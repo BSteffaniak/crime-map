@@ -57,6 +57,9 @@ enum Commands {
         /// If not specified, ingests tracts for all 50 states + DC.
         #[arg(long)]
         states: Option<String>,
+        /// Force re-import even if tracts already exist for a state.
+        #[arg(long)]
+        force: bool,
     },
     /// Ingest neighborhood boundaries from city open data portals
     Neighborhoods {
@@ -71,6 +74,25 @@ enum Commands {
         /// If not specified, ingests places for all 50 states + DC.
         #[arg(long)]
         states: Option<String>,
+        /// Force re-import even if places already exist for a state.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Ingest county boundaries from `TIGERweb`
+    Counties {
+        /// Comma-separated list of state FIPS codes (e.g., "06" for CA, "36" for NY).
+        /// If not specified, ingests counties for all 50 states + DC.
+        #[arg(long)]
+        states: Option<String>,
+        /// Force re-import even if counties already exist for a state.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Ingest US state boundaries from `TIGERweb`
+    States {
+        /// Force re-import even if state boundaries already exist.
+        #[arg(long)]
+        force: bool,
     },
     /// Assign census place and tract GEOIDs to existing incidents via spatial lookup
     Attribute {
@@ -192,7 +214,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             source_bar.finish(format!("Synced {num_sources} source(s)"));
         }
-        Commands::Tracts { states } => {
+        Commands::Tracts { states, force } => {
             let db = db::connect_from_env().await?;
             run_migrations(db.as_ref()).await?;
 
@@ -200,11 +222,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let total = if let Some(states_str) = states {
                 let fips_codes: Vec<&str> = states_str.split(',').map(str::trim).collect();
                 log::info!("Ingesting census tracts for states: {states_str}");
-                crime_map_geography::ingest::ingest_tracts_for_states(db.as_ref(), &fips_codes)
-                    .await?
+                crime_map_geography::ingest::ingest_tracts_for_states(
+                    db.as_ref(),
+                    &fips_codes,
+                    force,
+                )
+                .await?
             } else {
                 log::info!("Ingesting census tracts for all states...");
-                crime_map_geography::ingest::ingest_all_tracts(db.as_ref()).await?
+                crime_map_geography::ingest::ingest_all_tracts(db.as_ref(), force).await?
             };
 
             let elapsed = start.elapsed();
@@ -262,7 +288,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 elapsed.as_secs_f64()
             );
         }
-        Commands::Places { states } => {
+        Commands::Places { states, force } => {
             let db = db::connect_from_env().await?;
             run_migrations(db.as_ref()).await?;
 
@@ -270,16 +296,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let total = if let Some(states_str) = states {
                 let fips_codes: Vec<&str> = states_str.split(',').map(str::trim).collect();
                 log::info!("Ingesting Census places for states: {states_str}");
-                crime_map_geography::ingest::ingest_places_for_states(db.as_ref(), &fips_codes)
-                    .await?
+                crime_map_geography::ingest::ingest_places_for_states(
+                    db.as_ref(),
+                    &fips_codes,
+                    force,
+                )
+                .await?
             } else {
                 log::info!("Ingesting Census places for all states...");
-                crime_map_geography::ingest::ingest_all_places(db.as_ref()).await?
+                crime_map_geography::ingest::ingest_all_places(db.as_ref(), force).await?
             };
 
             let elapsed = start.elapsed();
             log::info!(
                 "Census place ingestion complete: {total} places in {:.1}s",
+                elapsed.as_secs_f64()
+            );
+        }
+        Commands::Counties { states, force } => {
+            let db = db::connect_from_env().await?;
+            run_migrations(db.as_ref()).await?;
+
+            let start = Instant::now();
+            let total = if let Some(states_str) = states {
+                let fips_codes: Vec<&str> = states_str.split(',').map(str::trim).collect();
+                log::info!("Ingesting county boundaries for states: {states_str}");
+                crime_map_geography::ingest::ingest_counties_for_states(
+                    db.as_ref(),
+                    &fips_codes,
+                    force,
+                )
+                .await?
+            } else {
+                log::info!("Ingesting county boundaries for all states...");
+                crime_map_geography::ingest::ingest_all_counties(db.as_ref(), force).await?
+            };
+
+            let elapsed = start.elapsed();
+            log::info!(
+                "County boundary ingestion complete: {total} counties in {:.1}s",
+                elapsed.as_secs_f64()
+            );
+        }
+        Commands::States { force } => {
+            let db = db::connect_from_env().await?;
+            run_migrations(db.as_ref()).await?;
+
+            let start = Instant::now();
+            log::info!("Ingesting US state boundaries...");
+            let total = crime_map_geography::ingest::ingest_all_states(db.as_ref(), force).await?;
+
+            let elapsed = start.elapsed();
+            log::info!(
+                "State boundary ingestion complete: {total} states in {:.1}s",
                 elapsed.as_secs_f64()
             );
         }

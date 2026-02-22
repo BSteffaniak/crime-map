@@ -55,6 +55,9 @@ pub const OUTPUT_H3_DB: &str = "h3_duckdb";
 /// Output name constant for the server metadata JSON file.
 pub const OUTPUT_METADATA: &str = "metadata";
 
+/// Output name constant for the boundaries `PMTiles` file.
+pub const OUTPUT_BOUNDARIES_PMTILES: &str = "boundaries_pmtiles";
+
 /// Per-source fingerprint capturing the data state at generation time.
 ///
 /// Since `crime_incidents` is insert-only (`ON CONFLICT DO NOTHING`),
@@ -131,6 +134,7 @@ pub struct GenerateArgs {
 ///
 /// Returns an error if the database query, file I/O, or any generation
 /// step fails.
+#[allow(clippy::too_many_lines)]
 pub async fn run_with_cache(
     db: &dyn Database,
     args: &GenerateArgs,
@@ -239,6 +243,15 @@ pub async fn run_with_cache(
         progress.set_position(0);
         generate_metadata(db, source_ids, dir).await?;
         record_output(manifest, OUTPUT_METADATA);
+        save_manifest(dir, manifest)?;
+    }
+
+    if needs.get(OUTPUT_BOUNDARIES_PMTILES) == Some(&true) {
+        progress.set_message("Generating boundaries PMTiles...".to_string());
+        progress.set_total(0);
+        progress.set_position(0);
+        generate_boundaries_pmtiles(db, dir, &progress).await?;
+        record_output(manifest, OUTPUT_BOUNDARIES_PMTILES);
         save_manifest(dir, manifest)?;
     }
 
@@ -428,6 +441,7 @@ fn output_file_path(dir: &Path, output_name: &str) -> PathBuf {
         OUTPUT_COUNT_DB => dir.join("counts.duckdb"),
         OUTPUT_H3_DB => dir.join("h3.duckdb"),
         OUTPUT_METADATA => dir.join("metadata.json"),
+        OUTPUT_BOUNDARIES_PMTILES => dir.join("boundaries.pmtiles"),
         _ => dir.join(output_name),
     }
 }
@@ -1465,6 +1479,247 @@ async fn generate_metadata(
     std::fs::rename(&tmp_path, &path)?;
 
     log::info!("Server metadata generated: {}", path.display());
+    Ok(())
+}
+
+// ============================================================
+// Boundary PMTiles generation
+// ============================================================
+
+/// Boundary layer names for tippecanoe's `--named-layer` parameter.
+const BOUNDARY_LAYERS: &[(&str, &str)] = &[
+    ("states", "states.geojsonseq"),
+    ("counties", "counties.geojsonseq"),
+    ("places", "places.geojsonseq"),
+    ("tracts", "tracts.geojsonseq"),
+    ("neighborhoods", "neighborhoods.geojsonseq"),
+];
+
+/// Generates `boundaries.pmtiles` containing administrative boundary
+/// polygons from `PostGIS`.
+///
+/// Exports 5 `GeoJSONSeq` files (states, counties, places, tracts,
+/// neighborhoods), then runs tippecanoe with multiple named layers
+/// to produce a single `PMTiles` archive.
+///
+/// # Errors
+///
+/// Returns an error if any export or tippecanoe invocation fails.
+async fn generate_boundaries_pmtiles(
+    db: &dyn Database,
+    dir: &Path,
+    progress: &Arc<dyn ProgressCallback>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    log::info!("Exporting boundary layers to GeoJSONSeq...");
+
+    export_boundary_layer(db, dir, "states", progress).await?;
+    export_boundary_layer(db, dir, "counties", progress).await?;
+    export_boundary_layer(db, dir, "places", progress).await?;
+    export_boundary_layer(db, dir, "tracts", progress).await?;
+    export_boundary_layer(db, dir, "neighborhoods", progress).await?;
+
+    log::info!("Running tippecanoe to generate boundaries PMTiles...");
+
+    let output_path = dir.join("boundaries.pmtiles");
+    let mut cmd = Command::new("tippecanoe");
+    cmd.args([
+        "-o",
+        &output_path.to_string_lossy(),
+        "--force",
+        "--no-feature-limit",
+        "--no-tile-size-limit",
+        "--minimum-zoom=0",
+        "--maximum-zoom=14",
+        "--coalesce-densest-as-needed",
+        "--simplification=10",
+        "--simplify-only-low-zooms",
+    ]);
+
+    // Add each layer as a named-layer with its GeoJSONSeq file
+    for &(layer_name, filename) in BOUNDARY_LAYERS {
+        let layer_path = dir.join(filename);
+        if layer_path.exists() {
+            let arg = format!(
+                "--named-layer={layer_name}:{}",
+                layer_path.to_string_lossy()
+            );
+            cmd.arg(arg);
+        }
+    }
+
+    let status = cmd.status()?;
+    if !status.success() {
+        return Err("tippecanoe failed for boundaries".into());
+    }
+
+    // Clean up intermediate GeoJSONSeq files
+    for &(_, filename) in BOUNDARY_LAYERS {
+        let path = dir.join(filename);
+        if path.exists()
+            && let Err(e) = std::fs::remove_file(&path)
+        {
+            log::warn!("Failed to remove {}: {e}", path.display());
+        }
+    }
+
+    log::info!("Boundaries PMTiles generated: {}", output_path.display());
+    Ok(())
+}
+
+/// Exports a single boundary layer from `PostGIS` as `GeoJSONSeq`.
+///
+/// Each feature is a polygon/multipolygon with name/identifier properties.
+#[allow(clippy::too_many_lines)]
+async fn export_boundary_layer(
+    db: &dyn Database,
+    dir: &Path,
+    layer: &str,
+    progress: &Arc<dyn ProgressCallback>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let filename = format!("{layer}.geojsonseq");
+    let output_path = dir.join(&filename);
+    let file = std::fs::File::create(&output_path)?;
+    let mut writer = BufWriter::new(file);
+
+    let query = match layer {
+        "states" => {
+            "SELECT fips, name, abbr, population,
+                    land_area_sq_mi,
+                    ST_AsGeoJSON(boundary::geometry) as geojson
+             FROM census_states
+             WHERE boundary IS NOT NULL
+             ORDER BY fips"
+        }
+        "counties" => {
+            "SELECT geoid, name, full_name, state_fips, state_abbr,
+                    county_fips, population, land_area_sq_mi,
+                    ST_AsGeoJSON(boundary::geometry) as geojson
+             FROM census_counties
+             WHERE boundary IS NOT NULL
+             ORDER BY geoid"
+        }
+        "places" => {
+            "SELECT geoid, name, full_name, state_fips, state_abbr,
+                    place_type, population, land_area_sq_mi,
+                    ST_AsGeoJSON(boundary::geometry) as geojson
+             FROM census_places
+             WHERE boundary IS NOT NULL
+             ORDER BY geoid"
+        }
+        "tracts" => {
+            "SELECT geoid, name, state_fips, county_fips, state_abbr,
+                    county_name, population, land_area_sq_mi,
+                    ST_AsGeoJSON(boundary::geometry) as geojson
+             FROM census_tracts
+             WHERE boundary IS NOT NULL
+             ORDER BY geoid"
+        }
+        "neighborhoods" => {
+            "SELECT id, name, city, state,
+                    ST_AsGeoJSON(boundary::geometry) as geojson
+             FROM neighborhoods
+             WHERE boundary IS NOT NULL
+             ORDER BY id"
+        }
+        _ => return Err(format!("Unknown boundary layer: {layer}").into()),
+    };
+
+    let rows = db.query_raw_params(query, &[]).await?;
+
+    let mut count = 0u64;
+
+    for row in &rows {
+        let geojson_str: String = row.to_value("geojson").unwrap_or_default();
+        if geojson_str.is_empty() {
+            continue;
+        }
+
+        let geometry: serde_json::Value = serde_json::from_str(&geojson_str)?;
+
+        let properties = match layer {
+            "states" => {
+                let fips: String = row.to_value("fips").unwrap_or_default();
+                let name: String = row.to_value("name").unwrap_or_default();
+                let abbr: String = row.to_value("abbr").unwrap_or_default();
+                let population: Option<i64> = row.to_value("population").unwrap_or(None);
+                serde_json::json!({
+                    "name": name,
+                    "abbr": abbr,
+                    "fips": fips,
+                    "population": population,
+                })
+            }
+            "counties" => {
+                let geoid: String = row.to_value("geoid").unwrap_or_default();
+                let name: String = row.to_value("name").unwrap_or_default();
+                let full_name: String = row.to_value("full_name").unwrap_or_default();
+                let state_abbr: Option<String> = row.to_value("state_abbr").unwrap_or(None);
+                let population: Option<i32> = row.to_value("population").unwrap_or(None);
+                serde_json::json!({
+                    "name": name,
+                    "full_name": full_name,
+                    "geoid": geoid,
+                    "state": state_abbr,
+                    "population": population,
+                })
+            }
+            "places" => {
+                let geoid: String = row.to_value("geoid").unwrap_or_default();
+                let name: String = row.to_value("name").unwrap_or_default();
+                let full_name: String = row.to_value("full_name").unwrap_or_default();
+                let state_abbr: Option<String> = row.to_value("state_abbr").unwrap_or(None);
+                let place_type: String = row.to_value("place_type").unwrap_or_default();
+                let population: Option<i32> = row.to_value("population").unwrap_or(None);
+                serde_json::json!({
+                    "name": name,
+                    "full_name": full_name,
+                    "geoid": geoid,
+                    "state": state_abbr,
+                    "type": place_type,
+                    "population": population,
+                })
+            }
+            "tracts" => {
+                let geoid: String = row.to_value("geoid").unwrap_or_default();
+                let name: String = row.to_value("name").unwrap_or_default();
+                let state_abbr: Option<String> = row.to_value("state_abbr").unwrap_or(None);
+                let county_name: Option<String> = row.to_value("county_name").unwrap_or(None);
+                let population: Option<i32> = row.to_value("population").unwrap_or(None);
+                serde_json::json!({
+                    "name": name,
+                    "geoid": geoid,
+                    "state": state_abbr,
+                    "county": county_name,
+                    "population": population,
+                })
+            }
+            "neighborhoods" => {
+                let name: String = row.to_value("name").unwrap_or_default();
+                let city: String = row.to_value("city").unwrap_or_default();
+                let state: String = row.to_value("state").unwrap_or_default();
+                serde_json::json!({
+                    "name": name,
+                    "city": city,
+                    "state": state,
+                })
+            }
+            _ => serde_json::json!({}),
+        };
+
+        let feature = serde_json::json!({
+            "type": "Feature",
+            "geometry": geometry,
+            "properties": properties,
+        });
+
+        serde_json::to_writer(&mut writer, &feature)?;
+        writer.write_all(b"\n")?;
+        count += 1;
+    }
+
+    writer.flush()?;
+    progress.inc(count);
+    log::info!("Exported {count} {layer} boundary features to {filename}");
     Ok(())
 }
 

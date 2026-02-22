@@ -10,6 +10,52 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A US state row as stored in the database.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CensusState {
+    /// Two-digit state FIPS code (e.g. "06" for California).
+    pub fips: String,
+    /// State name (e.g. "California").
+    pub name: String,
+    /// State abbreviation (e.g. "CA").
+    pub abbr: String,
+    /// Land area in square miles.
+    pub land_area_sq_mi: Option<f64>,
+    /// Population from ACS estimates.
+    pub population: Option<i64>,
+    /// Centroid longitude.
+    pub centroid_lon: Option<f64>,
+    /// Centroid latitude.
+    pub centroid_lat: Option<f64>,
+}
+
+/// A county row as stored in the database.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CensusCounty {
+    /// Census GEOID (state FIPS + county FIPS, e.g. "06037" for LA County).
+    pub geoid: String,
+    /// County name (e.g. "Los Angeles").
+    pub name: String,
+    /// Full name including suffix (e.g. "Los Angeles County").
+    pub full_name: String,
+    /// Two-digit state FIPS code.
+    pub state_fips: String,
+    /// Three-digit county FIPS code.
+    pub county_fips: String,
+    /// State abbreviation (e.g. "CA").
+    pub state_abbr: Option<String>,
+    /// Land area in square miles.
+    pub land_area_sq_mi: Option<f64>,
+    /// Population from ACS estimates.
+    pub population: Option<i32>,
+    /// Centroid longitude.
+    pub centroid_lon: Option<f64>,
+    /// Centroid latitude.
+    pub centroid_lat: Option<f64>,
+}
+
 /// A census tract row as stored in the database.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

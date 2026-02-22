@@ -24,12 +24,14 @@ import {
 import { severityColor, type FilterState } from "@/lib/types";
 import { buildIncidentFilter } from "@/lib/map-filters/expressions";
 import type { HexbinEntry } from "@/lib/hexbins/types";
+import BoundaryLayers, { BOUNDARY_FILL_LAYER_IDS } from "@/components/map/BoundaryLayers";
 
 interface CrimeMapProps {
   filters: FilterState;
   hexbins: HexbinEntry[];
   zoom: number;
   mapTheme: MapTheme;
+  layers: Record<string, boolean>;
   onBoundsChange?: (bounds: maplibregl.LngLatBounds, zoom: number, options: { settled: boolean }) => void;
 }
 
@@ -157,9 +159,11 @@ function buildOutlineOpacityExpr(
 function HeatmapLayer({
   filters,
   uiTheme,
+  visible,
 }: {
   filters: FilterState;
   uiTheme: "light" | "dark";
+  visible: boolean;
 }) {
   const { map, isLoaded } = useMap();
 
@@ -179,6 +183,9 @@ function HeatmapLayer({
         type: "heatmap",
         source: "incidents",
         "source-layer": "incidents",
+        layout: {
+          visibility: visible ? "visible" : "none",
+        },
         paint: {
           "heatmap-weight": [
             "interpolate",
@@ -244,7 +251,19 @@ function HeatmapLayer({
         // Style may have been swapped
       }
     };
-  }, [isLoaded, map, uiTheme, filters]);
+  }, [isLoaded, map, uiTheme, filters, visible]);
+
+  // Toggle visibility when `visible` changes without full re-render
+  useEffect(() => {
+    if (!isLoaded || !map) return;
+    try {
+      if (map.getLayer("incidents-heat")) {
+        map.setLayoutProperty("incidents-heat", "visibility", visible ? "visible" : "none");
+      }
+    } catch {
+      // ignore
+    }
+  }, [isLoaded, map, visible]);
 
   return null;
 }
@@ -254,10 +273,12 @@ function HexbinLayer({
   hexbins,
   zoom,
   uiTheme,
+  visible,
 }: {
   hexbins: HexbinEntry[];
   zoom: number;
   uiTheme: "light" | "dark";
+  visible: boolean;
 }) {
   const { map, isLoaded } = useMap();
   const sourceAddedRef = useRef(false);
@@ -278,6 +299,9 @@ function HexbinLayer({
         id: "hexbin-fill",
         type: "fill",
         source: "hexbins",
+        layout: {
+          visibility: visible ? "visible" : "none",
+        },
         paint: {
           "fill-color": hexFillColor(uiTheme),
           "fill-opacity": 0,
@@ -291,6 +315,9 @@ function HexbinLayer({
         id: "hexbin-outline",
         type: "line",
         source: "hexbins",
+        layout: {
+          visibility: visible ? "visible" : "none",
+        },
         paint: {
           "line-color": hexOutlineColor(uiTheme),
           "line-width": [
@@ -318,7 +345,19 @@ function HexbinLayer({
       }
       sourceAddedRef.current = false;
     };
-  }, [isLoaded, map, uiTheme]);
+  }, [isLoaded, map, uiTheme]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Toggle visibility when `visible` changes
+  useEffect(() => {
+    if (!isLoaded || !map) return;
+    const visibility = visible ? "visible" : "none";
+    try {
+      if (map.getLayer("hexbin-fill")) map.setLayoutProperty("hexbin-fill", "visibility", visibility);
+      if (map.getLayer("hexbin-outline")) map.setLayoutProperty("hexbin-outline", "visibility", visibility);
+    } catch {
+      // ignore
+    }
+  }, [isLoaded, map, visible]);
 
   // Update hexbin GeoJSON data + opacity expressions when hexbins or zoom change
   useEffect(() => {
@@ -346,9 +385,11 @@ function HexbinLayer({
 function IncidentPointsLayer({
   filters,
   uiTheme,
+  visible,
 }: {
   filters: FilterState;
   uiTheme: "light" | "dark";
+  visible: boolean;
 }) {
   const { map, isLoaded } = useMap();
 
@@ -371,6 +412,9 @@ function IncidentPointsLayer({
         source: "incidents",
         "source-layer": "incidents",
         minzoom: POINTS_MIN_ZOOM,
+        layout: {
+          visibility: visible ? "visible" : "none",
+        },
         paint: {
           "circle-radius": [
             "interpolate",
@@ -414,13 +458,25 @@ function IncidentPointsLayer({
         // Style may have been swapped
       }
     };
-  }, [isLoaded, map, uiTheme, filters]);
+  }, [isLoaded, map, uiTheme, filters, visible]);
+
+  // Toggle visibility when `visible` changes
+  useEffect(() => {
+    if (!isLoaded || !map) return;
+    try {
+      if (map.getLayer("incidents-points")) {
+        map.setLayoutProperty("incidents-points", "visibility", visible ? "visible" : "none");
+      }
+    } catch {
+      // ignore
+    }
+  }, [isLoaded, map, visible]);
 
   return null;
 }
 
 /** Click + hover interactions for hexbin and incident point layers. */
-function MapInteractions() {
+function MapInteractions({ layers }: { layers: Record<string, boolean> }) {
   const { map, isLoaded } = useMap();
   const popupRef = useRef<maplibregl.Popup | null>(null);
   const hoverPopupRef = useRef<maplibregl.Popup | null>(null);
@@ -526,6 +582,52 @@ function MapInteractions() {
       map.getCanvas().style.cursor = "";
     };
 
+    // Boundary hover tooltip
+    const boundaryHoverPopup = new maplibregl.Popup({
+      closeButton: false,
+      closeOnClick: false,
+      offset: 15,
+      className: "boundary-hover-popup",
+    });
+
+    const onBoundaryMouseMove = (e: maplibregl.MapLayerMouseEvent) => {
+      if (!e.features || e.features.length === 0) {
+        boundaryHoverPopup.remove();
+        return;
+      }
+
+      const feature = e.features[0];
+      const props = feature.properties;
+      if (!props) return;
+
+      const name = props.name || props.full_name || "Unknown";
+      const population = props.population
+        ? ` &middot; Pop. ${Number(props.population).toLocaleString()}`
+        : "";
+      const extra = props.state ? `, ${props.state}` : "";
+
+      boundaryHoverPopup
+        .setLngLat(e.lngLat)
+        .setHTML(
+          `<div class="text-xs font-medium px-2 py-1 bg-white dark:bg-gray-900 rounded-md shadow-md border border-border">${name}${extra}${population}</div>`,
+        )
+        .addTo(map);
+    };
+
+    const onBoundaryMouseLeave = () => {
+      boundaryHoverPopup.remove();
+    };
+
+    // Bind boundary events for all visible boundary fill layers
+    for (const layerId of BOUNDARY_FILL_LAYER_IDS) {
+      // Extract the base id (e.g., "states" from "states-fill")
+      const baseId = layerId.replace("-fill", "");
+      if (layers[baseId] && map.getLayer(layerId)) {
+        map.on("mousemove", layerId, onBoundaryMouseMove);
+        map.on("mouseleave", layerId, onBoundaryMouseLeave);
+      }
+    }
+
     // Bind events (guard with getLayer to avoid errors if layer not yet added)
     if (map.getLayer("hexbin-fill")) {
       map.on("click", "hexbin-fill", onHexClick);
@@ -550,13 +652,18 @@ function MapInteractions() {
         map.off("click", "incidents-points", onPointClick);
         map.off("mouseenter", "incidents-points", onLayerEnter);
         map.off("mouseleave", "incidents-points", onLayerLeave);
+        for (const layerId of BOUNDARY_FILL_LAYER_IDS) {
+          map.off("mousemove", layerId, onBoundaryMouseMove);
+          map.off("mouseleave", layerId, onBoundaryMouseLeave);
+        }
       } catch {
         // ignore
       }
       popupRef.current?.remove();
       hoverPopupRef.current?.remove();
+      boundaryHoverPopup.remove();
     };
-  }, [isLoaded, map]);
+  }, [isLoaded, map, layers]);
 
   return null;
 }
@@ -650,7 +757,7 @@ function BoundsTracker({
 // Main CrimeMap component
 // ---------------------------------------------------------------------------
 
-export default function CrimeMap({ filters, hexbins, zoom, mapTheme, onBoundsChange }: CrimeMapProps) {
+export default function CrimeMap({ filters, hexbins, zoom, mapTheme, layers, onBoundsChange }: CrimeMapProps) {
   const uiTheme = baseUiTheme(mapTheme);
   // Memoize the style so the Map component gets a stable reference per theme
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -676,10 +783,11 @@ export default function CrimeMap({ filters, hexbins, zoom, mapTheme, onBoundsCha
         showLocate
         showCompass
       />
-      <HeatmapLayer filters={filters} uiTheme={uiTheme} />
-      <HexbinLayer hexbins={hexbins} zoom={zoom} uiTheme={uiTheme} />
-      <IncidentPointsLayer filters={filters} uiTheme={uiTheme} />
-      <MapInteractions />
+      <HeatmapLayer filters={filters} uiTheme={uiTheme} visible={!!layers.heatmap} />
+      <HexbinLayer hexbins={hexbins} zoom={zoom} uiTheme={uiTheme} visible={!!layers.hexbins} />
+      <IncidentPointsLayer filters={filters} uiTheme={uiTheme} visible={!!layers.points} />
+      <BoundaryLayers uiTheme={uiTheme} layers={layers} />
+      <MapInteractions layers={layers} />
       <BoundsTracker onBoundsChange={handleBoundsChange} />
     </Map>
   );

@@ -227,3 +227,55 @@ export function hexOutlineColor(theme: "light" | "dark"): string {
 export function pointStrokeColor(theme: "light" | "dark"): string {
   return theme === "dark" ? "#1a1a2e" : "#ffffff";
 }
+
+// ---------------------------------------------------------------------------
+// Boundaries PMTiles
+// ---------------------------------------------------------------------------
+
+/**
+ * PMTiles URL for boundary data. Configurable via `VITE_BOUNDARIES_TILES_URL`
+ * environment variable at build time.
+ */
+export const BOUNDARIES_PMTILES_URL: string =
+  import.meta.env.VITE_BOUNDARIES_TILES_URL ?? "pmtiles:///tiles/boundaries.pmtiles";
+
+// ---------------------------------------------------------------------------
+// Map layer configuration
+// ---------------------------------------------------------------------------
+
+/** A configurable map layer that users can toggle on/off. */
+export interface MapLayerConfig {
+  /** Unique identifier (e.g. "heatmap", "states"). */
+  id: string;
+  /** Display label (e.g. "Heatmap", "State Boundaries"). */
+  label: string;
+  /** Grouping for the UI. */
+  group: "crime" | "boundaries";
+  /** Whether this layer is visible by default. */
+  defaultVisible: boolean;
+  /** Minimum zoom level at which this layer is useful. */
+  minZoom?: number;
+}
+
+/** Registry of all toggleable map layers. */
+export const MAP_LAYERS: MapLayerConfig[] = [
+  // Crime data layers
+  { id: "heatmap", label: "Heatmap", group: "crime", defaultVisible: true },
+  { id: "hexbins", label: "Hex Density", group: "crime", defaultVisible: true },
+  { id: "points", label: "Incident Points", group: "crime", defaultVisible: true, minZoom: POINTS_MIN_ZOOM },
+  // Boundary layers
+  { id: "states", label: "State Boundaries", group: "boundaries", defaultVisible: false },
+  { id: "counties", label: "County Boundaries", group: "boundaries", defaultVisible: false, minZoom: 4 },
+  { id: "places", label: "City/Town Boundaries", group: "boundaries", defaultVisible: false, minZoom: 7 },
+  { id: "tracts", label: "Census Tracts", group: "boundaries", defaultVisible: false, minZoom: 9 },
+  { id: "neighborhoods", label: "Neighborhoods", group: "boundaries", defaultVisible: false, minZoom: 9 },
+];
+
+/** Returns the default layer visibility map. */
+export function defaultLayerVisibility(): Record<string, boolean> {
+  const result: Record<string, boolean> = {};
+  for (const layer of MAP_LAYERS) {
+    result[layer.id] = layer.defaultVisible;
+  }
+  return result;
+}

@@ -7,8 +7,8 @@
 use dialoguer::{Confirm, Input, MultiSelect};
 
 use crate::{
-    GenerateArgs, OUTPUT_COUNT_DB, OUTPUT_H3_DB, OUTPUT_INCIDENTS_DB, OUTPUT_INCIDENTS_PMTILES,
-    OUTPUT_METADATA, output_dir, resolve_source_ids, run_with_cache,
+    GenerateArgs, OUTPUT_BOUNDARIES_PMTILES, OUTPUT_COUNT_DB, OUTPUT_H3_DB, OUTPUT_INCIDENTS_DB,
+    OUTPUT_INCIDENTS_PMTILES, OUTPUT_METADATA, output_dir, resolve_source_ids, run_with_cache,
 };
 use crime_map_database::db;
 
@@ -19,6 +19,7 @@ const OUTPUT_CHOICES: &[(&str, &str)] = &[
     ("Count DuckDB", OUTPUT_COUNT_DB),
     ("H3 Hexbin DuckDB", OUTPUT_H3_DB),
     ("Server Metadata", OUTPUT_METADATA),
+    ("Boundaries PMTiles", OUTPUT_BOUNDARIES_PMTILES),
 ];
 
 /// Runs the interactive generation menu.

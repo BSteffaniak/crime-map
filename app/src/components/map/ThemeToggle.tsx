@@ -68,7 +68,7 @@ export default function ThemeToggle({ mapTheme, onSelect }: ThemeToggleProps) {
 
       {/* Dropdown panel */}
       {open && (
-        <div className="mt-1 w-full min-w-[140px] overflow-hidden rounded-md border border-border bg-background shadow-lg">
+        <div className="absolute left-0 top-full z-50 mt-1 w-full min-w-[140px] overflow-hidden rounded-md border border-border bg-background shadow-lg">
           {MAP_THEMES.map((theme) => {
             const active = theme === mapTheme;
             return (

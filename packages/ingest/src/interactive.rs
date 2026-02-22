@@ -381,11 +381,11 @@ async fn ingest_census_tracts(
     let start = Instant::now();
     let total = if states_str.trim().is_empty() {
         log::info!("Ingesting census tracts for all states...");
-        crime_map_geography::ingest::ingest_all_tracts(db).await?
+        crime_map_geography::ingest::ingest_all_tracts(db, false).await?
     } else {
         let fips_codes: Vec<&str> = states_str.split(',').map(str::trim).collect();
         log::info!("Ingesting census tracts for states: {states_str}");
-        crime_map_geography::ingest::ingest_tracts_for_states(db, &fips_codes).await?
+        crime_map_geography::ingest::ingest_tracts_for_states(db, &fips_codes, false).await?
     };
 
     let elapsed = start.elapsed();
@@ -409,11 +409,11 @@ async fn ingest_census_places(
     let start = Instant::now();
     let total = if states_str.trim().is_empty() {
         log::info!("Ingesting Census places for all states...");
-        crime_map_geography::ingest::ingest_all_places(db).await?
+        crime_map_geography::ingest::ingest_all_places(db, false).await?
     } else {
         let fips_codes: Vec<&str> = states_str.split(',').map(str::trim).collect();
         log::info!("Ingesting Census places for states: {states_str}");
-        crime_map_geography::ingest::ingest_places_for_states(db, &fips_codes).await?
+        crime_map_geography::ingest::ingest_places_for_states(db, &fips_codes, false).await?
     };
 
     let elapsed = start.elapsed();

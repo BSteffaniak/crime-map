@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from "react";
 import { SlidersHorizontal, X } from "lucide-react";
 import CrimeMap from "@/components/map/CrimeMap";
 import ThemeToggle from "@/components/map/ThemeToggle";
+import LayerToggle from "@/components/map/LayerToggle";
 import FilterPanel from "@/components/filters/FilterPanel";
 import IncidentSidebar from "@/components/sidebar/IncidentSidebar";
 import AiChat from "@/components/ai/AiChat";
@@ -10,6 +11,7 @@ import SidebarPanel from "@/components/sidebar/SidebarPanel";
 import { useFilters } from "@/hooks/useFilters";
 import { useSources } from "@/hooks/useSources";
 import { useTheme } from "@/hooks/useTheme";
+import { useLayers } from "@/hooks/useLayers";
 import { useHexbins } from "@/lib/hexbins/useHexbins";
 import { useSourceCounts } from "@/lib/source-counts/useSourceCounts";
 import type { BBox } from "@/lib/sidebar/types";
@@ -24,6 +26,7 @@ export default function App() {
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
   const settledRef = useRef(true);
   const { mapTheme, setMapTheme } = useTheme();
+  const { layers, toggleLayer } = useLayers();
 
   const {
     filters,
@@ -60,7 +63,7 @@ export default function App() {
   return (
     <div className="relative h-dvh w-screen overflow-hidden bg-background text-foreground">
       {/* Map — always full viewport */}
-      <CrimeMap filters={filters} hexbins={hexbins} zoom={zoom} mapTheme={mapTheme} onBoundsChange={handleBoundsChange} />
+      <CrimeMap filters={filters} hexbins={hexbins} zoom={zoom} mapTheme={mapTheme} layers={layers} onBoundsChange={handleBoundsChange} />
 
       {/* Floating controls — top-left */}
       <div className="absolute top-3 left-2 z-10 flex items-start gap-2">
@@ -82,6 +85,7 @@ export default function App() {
         )}
 
         <ThemeToggle mapTheme={mapTheme} onSelect={setMapTheme} />
+        <LayerToggle layers={layers} zoom={zoom} onToggle={toggleLayer} />
       </div>
 
       {/* Floating sidebar panel */}
