@@ -8,7 +8,7 @@ Interactive map visualizing public crime data from US cities. Rust backend with 
 Browser (MapLibre GL JS)
   |
   |-- Zoom 0-7:   Heatmap layer (PMTiles vector tiles)
-  |-- Zoom 8-11:  Cluster layer (cluster PMTiles vector tiles)
+  |-- Zoom 8-11:  Hexbin layer (H3 hexbin analytics via DuckDB)
   |-- Zoom 12+:   Individual points (PMTiles vector tiles)
   |
 Actix-Web API server (port 8080)
@@ -170,9 +170,11 @@ cargo ingest sync-all             Sync all sources
 ```
 cargo generate all                Generate all output files
 cargo generate pmtiles            Generate PMTiles (heatmap + point layers)
-cargo generate clusters           Generate clustered PMTiles (zoom 8-11)
 cargo generate sidebar            Generate sidebar SQLite database (R-tree spatial index)
 cargo generate count-db           Generate DuckDB count database (pre-aggregated summary)
+cargo generate h3-db              Generate DuckDB H3 hexbin database
+cargo generate boundaries         Generate boundary PMTiles + SQLite search database
+cargo generate merge              Merge partitioned artifacts into unified outputs
   --limit <N>                     Max records to export (for testing)
   --sources <IDS>                 Comma-separated source IDs to include
   --force                         Regenerate even if source data hasn't changed
