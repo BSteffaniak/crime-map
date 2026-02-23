@@ -15,6 +15,7 @@ import type { FilterState, CategoryId } from "../types";
 import { CRIME_CATEGORIES } from "../types";
 import type { BBox, SidebarIncident, SidebarResponse } from "./types";
 import { VIEWPORT_DEBOUNCE_MS } from "../map-config";
+import { appendBoundaryParams } from "../boundary-params";
 
 /** Number of features per page. */
 const PAGE_SIZE = 50;
@@ -88,6 +89,9 @@ function buildQueryString(
   if (filters.sources.length > 0) {
     params.set("sources", filters.sources.join(","));
   }
+
+  // Boundary filters
+  appendBoundaryParams(params, filters);
 
   return params.toString();
 }

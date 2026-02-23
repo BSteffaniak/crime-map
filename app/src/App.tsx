@@ -14,6 +14,7 @@ import { useTheme } from "@/hooks/useTheme";
 import { useLayers } from "@/hooks/useLayers";
 import { useHexbins } from "@/lib/hexbins/useHexbins";
 import { useSourceCounts } from "@/lib/source-counts/useSourceCounts";
+import { useBoundaryCounts } from "@/hooks/useBoundaryCounts";
 import type { BBox } from "@/lib/sidebar/types";
 import { DEFAULT_ZOOM } from "@/lib/map-config";
 
@@ -37,6 +38,8 @@ export default function App() {
     setArrestFilter,
     toggleSource,
     setSources,
+    toggleBoundary,
+    clearBoundaryFilter,
     clearAll,
     activeFilterCount,
   } = useFilters();
@@ -59,11 +62,22 @@ export default function App() {
 
   const { hexbins } = useHexbins(bbox, zoom, filters, settledRef);
   const { sourceCounts } = useSourceCounts(bbox, filters, settledRef);
+  const { allBoundaryCounts, visibleBoundaryTypes } = useBoundaryCounts(bbox, filters, layers, settledRef);
 
   return (
     <div className="relative h-dvh w-screen overflow-hidden bg-background text-foreground">
       {/* Map — always full viewport */}
-      <CrimeMap filters={filters} hexbins={hexbins} zoom={zoom} mapTheme={mapTheme} layers={layers} onBoundsChange={handleBoundsChange} />
+      <CrimeMap
+        filters={filters}
+        hexbins={hexbins}
+        zoom={zoom}
+        mapTheme={mapTheme}
+        layers={layers}
+        allBoundaryCounts={allBoundaryCounts}
+        visibleBoundaryTypes={visibleBoundaryTypes}
+        onToggleBoundary={toggleBoundary}
+        onBoundsChange={handleBoundsChange}
+      />
 
       {/* Floating controls — top-left */}
       <div className="absolute top-3 left-2 z-10 flex items-start gap-2">
@@ -145,6 +159,8 @@ export default function App() {
               onSetArrestFilter={setArrestFilter}
               onToggleSource={toggleSource}
               onClearSources={() => setSources([])}
+              onToggleBoundary={toggleBoundary}
+              onClearBoundaryFilter={clearBoundaryFilter}
               onClearAll={clearAll}
               activeFilterCount={activeFilterCount}
             />

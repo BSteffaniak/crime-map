@@ -18,6 +18,7 @@
 //! regardless of dataset size.
 
 pub mod interactive;
+pub mod spatial;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -57,6 +58,9 @@ pub const OUTPUT_METADATA: &str = "metadata";
 
 /// Output name constant for the boundaries `PMTiles` file.
 pub const OUTPUT_BOUNDARIES_PMTILES: &str = "boundaries_pmtiles";
+
+/// Output name constant for the boundaries search `SQLite` database.
+pub const OUTPUT_BOUNDARIES_DB: &str = "boundaries_db";
 
 /// Per-source fingerprint capturing the data state at generation time.
 ///
@@ -134,6 +138,12 @@ pub struct GenerateArgs {
 ///
 /// Returns an error if the database query, file I/O, or any generation
 /// step fails.
+///
+/// # Panics
+///
+/// Panics if a spatial-index-dependent output is requested but the index
+/// failed to load (this should never happen in practice since load errors
+/// are propagated before the output runs).
 #[allow(clippy::too_many_lines)]
 pub async fn run_with_cache(
     db: &dyn Database,
@@ -200,12 +210,37 @@ pub async fn run_with_cache(
         outputs: BTreeMap::new(),
     });
 
+    // Build spatial index if any output that uses it is needed
+    let needs_spatial = needs.get(OUTPUT_INCIDENTS_DB) == Some(&true)
+        || needs.get(OUTPUT_COUNT_DB) == Some(&true)
+        || needs.get(OUTPUT_H3_DB) == Some(&true)
+        || needs.get(OUTPUT_INCIDENTS_PMTILES) == Some(&true);
+
+    let spatial_index = if needs_spatial {
+        progress.set_message("Loading spatial index (tracts + places)...".to_string());
+        progress.set_total(0);
+        progress.set_position(0);
+        Some(crate::spatial::SpatialIndex::load(db).await?)
+    } else {
+        None
+    };
+
     // Run each output that needs it
     if needs.get(OUTPUT_INCIDENTS_PMTILES) == Some(&true) {
         progress.set_message("Generating PMTiles...".to_string());
         progress.set_total(total_records);
         progress.set_position(0);
-        generate_pmtiles(db, args, source_ids, dir, &progress).await?;
+        generate_pmtiles(
+            db,
+            args,
+            source_ids,
+            dir,
+            spatial_index
+                .as_ref()
+                .expect("spatial index required for PMTiles"),
+            &progress,
+        )
+        .await?;
         record_output(manifest, OUTPUT_INCIDENTS_PMTILES);
         save_manifest(dir, manifest)?;
     }
@@ -214,7 +249,15 @@ pub async fn run_with_cache(
         progress.set_message("Generating sidebar DB...".to_string());
         progress.set_total(total_records);
         progress.set_position(0);
-        generate_sidebar_db(db, args, source_ids, dir, &progress).await?;
+        generate_sidebar_db(
+            db,
+            args,
+            source_ids,
+            dir,
+            spatial_index.as_ref().expect("spatial index required"),
+            &progress,
+        )
+        .await?;
         record_output(manifest, OUTPUT_INCIDENTS_DB);
         save_manifest(dir, manifest)?;
     }
@@ -223,7 +266,15 @@ pub async fn run_with_cache(
         progress.set_message("Generating count DB...".to_string());
         progress.set_total(total_records);
         progress.set_position(0);
-        generate_count_db(db, args, source_ids, dir, &progress).await?;
+        generate_count_db(
+            db,
+            args,
+            source_ids,
+            dir,
+            spatial_index.as_ref().expect("spatial index required"),
+            &progress,
+        )
+        .await?;
         record_output(manifest, OUTPUT_COUNT_DB);
         save_manifest(dir, manifest)?;
     }
@@ -232,7 +283,15 @@ pub async fn run_with_cache(
         progress.set_message("Generating H3 hexbin DB...".to_string());
         progress.set_total(total_records);
         progress.set_position(0);
-        generate_h3_db(db, args, source_ids, dir, &progress).await?;
+        generate_h3_db(
+            db,
+            args,
+            source_ids,
+            dir,
+            spatial_index.as_ref().expect("spatial index required"),
+            &progress,
+        )
+        .await?;
         record_output(manifest, OUTPUT_H3_DB);
         save_manifest(dir, manifest)?;
     }
@@ -252,6 +311,15 @@ pub async fn run_with_cache(
         progress.set_position(0);
         generate_boundaries_pmtiles(db, dir, &progress).await?;
         record_output(manifest, OUTPUT_BOUNDARIES_PMTILES);
+        save_manifest(dir, manifest)?;
+    }
+
+    if needs.get(OUTPUT_BOUNDARIES_DB) == Some(&true) {
+        progress.set_message("Generating boundaries search DB...".to_string());
+        progress.set_total(0);
+        progress.set_position(0);
+        generate_boundaries_db(db, dir).await?;
+        record_output(manifest, OUTPUT_BOUNDARIES_DB);
         save_manifest(dir, manifest)?;
     }
 
@@ -442,6 +510,7 @@ fn output_file_path(dir: &Path, output_name: &str) -> PathBuf {
         OUTPUT_H3_DB => dir.join("h3.duckdb"),
         OUTPUT_METADATA => dir.join("metadata.json"),
         OUTPUT_BOUNDARIES_PMTILES => dir.join("boundaries.pmtiles"),
+        OUTPUT_BOUNDARIES_DB => dir.join("boundaries.db"),
         _ => dir.join(output_name),
     }
 }
@@ -585,12 +654,21 @@ async fn generate_pmtiles(
     args: &GenerateArgs,
     source_ids: &[i32],
     dir: &Path,
+    geo_index: &crate::spatial::SpatialIndex,
     progress: &Arc<dyn ProgressCallback>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let geojsonseq_path = dir.join("incidents.geojsonseq");
 
     log::info!("Exporting incidents to GeoJSONSeq...");
-    export_geojsonseq(db, &geojsonseq_path, args.limit, source_ids, progress).await?;
+    export_geojsonseq(
+        db,
+        &geojsonseq_path,
+        args.limit,
+        source_ids,
+        geo_index,
+        progress,
+    )
+    .await?;
 
     log::info!("Running tippecanoe to generate PMTiles...");
 
@@ -630,6 +708,7 @@ async fn generate_pmtiles(
 async fn insert_sidebar_row(
     txn: &dyn Database,
     row: &switchy_database::Row,
+    geo_index: &crate::spatial::SpatialIndex,
 ) -> Result<i64, Box<dyn std::error::Error>> {
     let id: i64 = row.to_value("id").unwrap_or(0);
     let source_id: i32 = row.to_value("source_id").unwrap_or(0);
@@ -655,12 +734,29 @@ async fn insert_sidebar_row(
 
     let arrest_int = arrest_made.map(|b| DatabaseValue::Int32(i32::from(b)));
 
+    // Boundary GEOIDs — computed via Rust spatial index
+    let tract_geoid = geo_index.lookup_tract(lng, lat).map(str::to_owned);
+    let state_fips = tract_geoid
+        .as_deref()
+        .and_then(crate::spatial::SpatialIndex::derive_state_fips)
+        .map(str::to_owned);
+    let county_geoid = tract_geoid
+        .as_deref()
+        .and_then(crate::spatial::SpatialIndex::derive_county_geoid)
+        .map(str::to_owned);
+    let place_geoid = geo_index.lookup_place(lng, lat).map(str::to_owned);
+    let neighborhood_id = tract_geoid
+        .as_deref()
+        .and_then(|g| geo_index.lookup_neighborhood(g))
+        .map(str::to_owned);
+
     txn.exec_raw_params(
         "INSERT INTO incidents (id, source_id, source_name, source_incident_id,
             subcategory, category,
             severity, longitude, latitude, occurred_at, description,
-            block_address, city, state, arrest_made, location_type)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
+            block_address, city, state, arrest_made, location_type,
+            state_fips, county_geoid, place_geoid, tract_geoid, neighborhood_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)",
         &[
             DatabaseValue::Int64(id),
             DatabaseValue::Int32(source_id),
@@ -678,6 +774,11 @@ async fn insert_sidebar_row(
             DatabaseValue::String(state),
             arrest_int.unwrap_or(DatabaseValue::Null),
             location_type.map_or(DatabaseValue::Null, DatabaseValue::String),
+            state_fips.map_or(DatabaseValue::Null, DatabaseValue::String),
+            county_geoid.map_or(DatabaseValue::Null, DatabaseValue::String),
+            place_geoid.map_or(DatabaseValue::Null, DatabaseValue::String),
+            tract_geoid.map_or(DatabaseValue::Null, DatabaseValue::String),
+            neighborhood_id.map_or(DatabaseValue::Null, DatabaseValue::String),
         ],
     )
     .await?;
@@ -700,11 +801,13 @@ async fn insert_sidebar_row(
 ///
 /// Returns an error if the `PostGIS` export, `SQLite` creation, or
 /// index population fails.
+#[allow(clippy::too_many_lines)]
 async fn generate_sidebar_db(
     db: &dyn Database,
     args: &GenerateArgs,
     source_ids: &[i32],
     dir: &Path,
+    geo_index: &crate::spatial::SpatialIndex,
     progress: &Arc<dyn ProgressCallback>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db_path = dir.join("incidents.db");
@@ -737,7 +840,12 @@ async fn generate_sidebar_db(
                 city TEXT,
                 state TEXT,
                 arrest_made INTEGER,
-                location_type TEXT
+                location_type TEXT,
+                state_fips TEXT,
+                county_geoid TEXT,
+                place_geoid TEXT,
+                tract_geoid TEXT,
+                neighborhood_id TEXT
             )",
         )
         .await?;
@@ -777,7 +885,7 @@ async fn generate_sidebar_db(
         let txn = sqlite.begin_transaction().await?;
 
         for row in &rows {
-            last_id = insert_sidebar_row(txn.as_ref(), row).await?;
+            last_id = insert_sidebar_row(txn.as_ref(), row, geo_index).await?;
         }
 
         txn.commit().await?;
@@ -817,6 +925,23 @@ async fn generate_sidebar_db(
         .exec_raw("CREATE INDEX idx_incidents_source_id ON incidents(source_id)")
         .await?;
 
+    // Create boundary indexes for boundary filtering
+    sqlite
+        .exec_raw("CREATE INDEX idx_incidents_state_fips ON incidents(state_fips)")
+        .await?;
+    sqlite
+        .exec_raw("CREATE INDEX idx_incidents_county_geoid ON incidents(county_geoid)")
+        .await?;
+    sqlite
+        .exec_raw("CREATE INDEX idx_incidents_place_geoid ON incidents(place_geoid)")
+        .await?;
+    sqlite
+        .exec_raw("CREATE INDEX idx_incidents_tract_geoid ON incidents(tract_geoid)")
+        .await?;
+    sqlite
+        .exec_raw("CREATE INDEX idx_incidents_neighborhood_id ON incidents(neighborhood_id)")
+        .await?;
+
     // Analyze for query planner
     sqlite.exec_raw("ANALYZE").await?;
 
@@ -831,6 +956,13 @@ async fn generate_sidebar_db(
 ///
 /// Uses keyset pagination (`WHERE i.id > $1 ORDER BY i.id ASC LIMIT $N`)
 /// for efficient, index-backed iteration over the entire table.
+///
+/// Includes boundary GEOIDs derived from the incident's attributed census
+/// data. Boundary GEOIDs (`state_fips`, `county_geoid`, `place_geoid`,
+/// `tract_geoid`, `neighborhood_id`) are computed in Rust via the
+/// [`SpatialIndex`](crate::spatial::SpatialIndex) rather than from
+/// pre-attributed `PostGIS` columns, eliminating the need for the expensive
+/// `cargo ingest attribute` step.
 fn build_batch_query(
     last_id: i64,
     batch_limit: i64,
@@ -910,6 +1042,7 @@ async fn generate_count_db(
     args: &GenerateArgs,
     source_ids: &[i32],
     dir: &Path,
+    geo_index: &crate::spatial::SpatialIndex,
     progress: &Arc<dyn ProgressCallback>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db_path = dir.join("counts.duckdb");
@@ -939,14 +1072,20 @@ async fn generate_count_db(
             latitude DOUBLE NOT NULL,
             occurred_at VARCHAR,
             arrest_made INTEGER,
-            category VARCHAR NOT NULL
+            category VARCHAR NOT NULL,
+            state_fips VARCHAR,
+            county_geoid VARCHAR,
+            place_geoid VARCHAR,
+            tract_geoid VARCHAR,
+            neighborhood_id VARCHAR
         )",
     )?;
 
     // Drop the connection before the async loop; we'll reopen per batch
     drop(duck);
 
-    let total_count = populate_duckdb_incidents(db, args, source_ids, &db_path, progress).await?;
+    let total_count =
+        populate_duckdb_incidents(db, args, source_ids, &db_path, geo_index, progress).await?;
 
     // Reopen for aggregation
     let duck = duckdb::Connection::open(&db_path)?;
@@ -966,6 +1105,11 @@ async fn generate_count_db(
                   WHEN arrest_made = 0 THEN 0
                   ELSE 2 END AS arrest,
              SUBSTRING(occurred_at, 1, 10) AS day,
+             state_fips,
+             county_geoid,
+             place_geoid,
+             tract_geoid,
+             neighborhood_id,
              COUNT(*) AS cnt,
              SUM(longitude) AS sum_lng,
              SUM(latitude) AS sum_lat
@@ -1017,6 +1161,7 @@ async fn generate_h3_db(
     args: &GenerateArgs,
     source_ids: &[i32],
     dir: &Path,
+    geo_index: &crate::spatial::SpatialIndex,
     progress: &Arc<dyn ProgressCallback>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use h3o::{LatLng, Resolution};
@@ -1060,7 +1205,12 @@ async fn generate_h3_db(
                 h3_r6 BIGINT NOT NULL,
                 h3_r7 BIGINT NOT NULL,
                 h3_r8 BIGINT NOT NULL,
-                h3_r9 BIGINT NOT NULL
+                h3_r9 BIGINT NOT NULL,
+                state_fips VARCHAR,
+                county_geoid VARCHAR,
+                place_geoid VARCHAR,
+                tract_geoid VARCHAR,
+                neighborhood_id VARCHAR
             )",
         )?;
     }
@@ -1095,8 +1245,9 @@ async fn generate_h3_db(
 
             let mut stmt = duck.prepare(
                 "INSERT INTO h3_staging (source_id, category, subcategory, severity, arrest, day, lng, lat,
-                    h3_r4, h3_r5, h3_r6, h3_r7, h3_r8, h3_r9)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    h3_r4, h3_r5, h3_r6, h3_r7, h3_r8, h3_r9,
+                    state_fips, county_geoid, place_geoid, tract_geoid, neighborhood_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )?;
 
             for row in &rows {
@@ -1119,6 +1270,22 @@ async fn generate_h3_db(
                     Some(false) => 0,
                     None => 2,
                 };
+
+                // Boundary GEOIDs — computed via Rust spatial index
+                let tract_geoid = geo_index.lookup_tract(lng, lat).map(str::to_owned);
+                let state_fips = tract_geoid
+                    .as_deref()
+                    .and_then(crate::spatial::SpatialIndex::derive_state_fips)
+                    .map(str::to_owned);
+                let county_geoid = tract_geoid
+                    .as_deref()
+                    .and_then(crate::spatial::SpatialIndex::derive_county_geoid)
+                    .map(str::to_owned);
+                let place_geoid = geo_index.lookup_place(lng, lat).map(str::to_owned);
+                let neighborhood_id = tract_geoid
+                    .as_deref()
+                    .and_then(|g| geo_index.lookup_neighborhood(g))
+                    .map(str::to_owned);
 
                 let Ok(coord) = LatLng::new(lat, lng) else {
                     last_id = id;
@@ -1150,6 +1317,11 @@ async fn generate_h3_db(
                     h3_cells[3],
                     h3_cells[4],
                     h3_cells[5],
+                    state_fips,
+                    county_geoid,
+                    place_geoid,
+                    tract_geoid,
+                    neighborhood_id,
                 ])?;
 
                 last_id = id;
@@ -1182,17 +1354,17 @@ async fn generate_h3_db(
     duck.execute_batch(
         "CREATE TABLE h3_counts AS
          WITH unpivoted AS (
-             SELECT h3_r4 AS h3_index, 4 AS resolution, source_id, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
+             SELECT h3_r4 AS h3_index, 4 AS resolution, source_id, category, subcategory, severity, arrest, day, lng, lat, state_fips, county_geoid, place_geoid, tract_geoid, neighborhood_id FROM h3_staging
              UNION ALL
-             SELECT h3_r5, 5, source_id, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
+             SELECT h3_r5, 5, source_id, category, subcategory, severity, arrest, day, lng, lat, state_fips, county_geoid, place_geoid, tract_geoid, neighborhood_id FROM h3_staging
              UNION ALL
-             SELECT h3_r6, 6, source_id, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
+             SELECT h3_r6, 6, source_id, category, subcategory, severity, arrest, day, lng, lat, state_fips, county_geoid, place_geoid, tract_geoid, neighborhood_id FROM h3_staging
              UNION ALL
-             SELECT h3_r7, 7, source_id, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
+             SELECT h3_r7, 7, source_id, category, subcategory, severity, arrest, day, lng, lat, state_fips, county_geoid, place_geoid, tract_geoid, neighborhood_id FROM h3_staging
              UNION ALL
-             SELECT h3_r8, 8, source_id, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
+             SELECT h3_r8, 8, source_id, category, subcategory, severity, arrest, day, lng, lat, state_fips, county_geoid, place_geoid, tract_geoid, neighborhood_id FROM h3_staging
              UNION ALL
-             SELECT h3_r9, 9, source_id, category, subcategory, severity, arrest, day, lng, lat FROM h3_staging
+             SELECT h3_r9, 9, source_id, category, subcategory, severity, arrest, day, lng, lat, state_fips, county_geoid, place_geoid, tract_geoid, neighborhood_id FROM h3_staging
          )
          SELECT
              CAST(h3_index AS UBIGINT) AS h3_index,
@@ -1203,11 +1375,16 @@ async fn generate_h3_db(
              CAST(severity AS TINYINT) AS severity,
              CAST(arrest AS TINYINT) AS arrest,
              day,
+             state_fips,
+             county_geoid,
+             place_geoid,
+             tract_geoid,
+             neighborhood_id,
              CAST(COUNT(*) AS INTEGER) AS cnt,
              SUM(lng) AS sum_lng,
              SUM(lat) AS sum_lat
          FROM unpivoted
-         GROUP BY h3_index, resolution, source_id, category, subcategory, severity, arrest, day
+         GROUP BY h3_index, resolution, source_id, category, subcategory, severity, arrest, day, state_fips, county_geoid, place_geoid, tract_geoid, neighborhood_id
          ORDER BY resolution, h3_index",
     )?;
 
@@ -1306,6 +1483,7 @@ async fn populate_duckdb_incidents(
     args: &GenerateArgs,
     source_ids: &[i32],
     duck_path: &Path,
+    geo_index: &crate::spatial::SpatialIndex,
     progress: &Arc<dyn ProgressCallback>,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let mut last_id: i64 = 0;
@@ -1337,12 +1515,13 @@ async fn populate_duckdb_incidents(
 
             let mut stmt = duck.prepare(
                 "INSERT INTO incidents (id, source_id, subcategory, severity, longitude, latitude,
-                    occurred_at, arrest_made, category)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    occurred_at, arrest_made, category,
+                    state_fips, county_geoid, place_geoid, tract_geoid, neighborhood_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )?;
 
             for row in &rows {
-                last_id = insert_duckdb_row(&mut stmt, row)?;
+                last_id = insert_duckdb_row(&mut stmt, row, geo_index)?;
             }
 
             duck.execute_batch("COMMIT")?;
@@ -1376,6 +1555,7 @@ async fn populate_duckdb_incidents(
 fn insert_duckdb_row(
     stmt: &mut duckdb::Statement<'_>,
     row: &switchy_database::Row,
+    geo_index: &crate::spatial::SpatialIndex,
 ) -> Result<i64, Box<dyn std::error::Error>> {
     let id: i64 = row.to_value("id").unwrap_or(0);
     let source_id: i32 = row.to_value("source_id").unwrap_or(0);
@@ -1393,6 +1573,22 @@ fn insert_duckdb_row(
 
     let arrest_int: Option<i32> = arrest_made.map(i32::from);
 
+    // Boundary GEOIDs — computed via Rust spatial index
+    let tract_geoid = geo_index.lookup_tract(lng, lat).map(str::to_owned);
+    let state_fips = tract_geoid
+        .as_deref()
+        .and_then(crate::spatial::SpatialIndex::derive_state_fips)
+        .map(str::to_owned);
+    let county_geoid = tract_geoid
+        .as_deref()
+        .and_then(crate::spatial::SpatialIndex::derive_county_geoid)
+        .map(str::to_owned);
+    let place_geoid = geo_index.lookup_place(lng, lat).map(str::to_owned);
+    let neighborhood_id = tract_geoid
+        .as_deref()
+        .and_then(|g| geo_index.lookup_neighborhood(g))
+        .map(str::to_owned);
+
     stmt.execute(duckdb::params![
         id,
         source_id,
@@ -1403,6 +1599,11 @@ fn insert_duckdb_row(
         occurred_at_str,
         arrest_int,
         category,
+        state_fips,
+        county_geoid,
+        place_geoid,
+        tract_geoid,
+        neighborhood_id,
     ])?;
 
     Ok(id)
@@ -1488,6 +1689,227 @@ async fn generate_metadata(
 }
 
 // ============================================================
+// Boundaries search SQLite generation
+// ============================================================
+
+/// Generates a `SQLite` database for boundary name lookups at runtime.
+///
+/// Creates `boundaries.db` with a single `boundaries` table containing
+/// name/geoid metadata for all boundary types (states, counties, places,
+/// tracts, neighborhoods). Used by `GET /api/boundaries/search` to
+/// support type-ahead boundary filtering without `PostGIS`.
+///
+/// # Errors
+///
+/// Returns an error if the `PostGIS` query or `SQLite` write fails.
+#[allow(clippy::too_many_lines)]
+async fn generate_boundaries_db(
+    db: &dyn Database,
+    dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db_path = dir.join("boundaries.db");
+
+    // Remove existing file
+    if db_path.exists() {
+        std::fs::remove_file(&db_path)?;
+    }
+
+    log::info!("Creating boundaries search SQLite database...");
+    let sqlite = init_sqlite_rusqlite(Some(&db_path))?;
+
+    sqlite
+        .exec_raw(
+            "CREATE TABLE boundaries (
+                type TEXT NOT NULL,
+                geoid TEXT NOT NULL,
+                name TEXT NOT NULL,
+                full_name TEXT,
+                state_abbr TEXT,
+                population INTEGER,
+                PRIMARY KEY (type, geoid)
+            )",
+        )
+        .await?;
+
+    // States
+    let rows = db
+        .query_raw_params(
+            "SELECT fips, name, abbr, population FROM census_states ORDER BY fips",
+            &[],
+        )
+        .await?;
+    let txn = sqlite.begin_transaction().await?;
+    for row in &rows {
+        let fips: String = row.to_value("fips").unwrap_or_default();
+        let name: String = row.to_value("name").unwrap_or_default();
+        let abbr: String = row.to_value("abbr").unwrap_or_default();
+        let population: Option<i64> = row.to_value("population").unwrap_or(None);
+        txn.exec_raw_params(
+            "INSERT INTO boundaries (type, geoid, name, full_name, state_abbr, population)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+            &[
+                DatabaseValue::String("state".to_string()),
+                DatabaseValue::String(fips),
+                DatabaseValue::String(name.clone()),
+                DatabaseValue::String(name),
+                DatabaseValue::String(abbr),
+                population.map_or(DatabaseValue::Null, DatabaseValue::Int64),
+            ],
+        )
+        .await?;
+    }
+    txn.commit().await?;
+    log::info!("Inserted {} state boundaries", rows.len());
+
+    // Counties
+    let rows = db
+        .query_raw_params(
+            "SELECT geoid, name, full_name, state_abbr, population
+             FROM census_counties ORDER BY geoid",
+            &[],
+        )
+        .await?;
+    let txn = sqlite.begin_transaction().await?;
+    for row in &rows {
+        let geoid: String = row.to_value("geoid").unwrap_or_default();
+        let name: String = row.to_value("name").unwrap_or_default();
+        let full_name: String = row.to_value("full_name").unwrap_or_default();
+        let state_abbr: Option<String> = row.to_value("state_abbr").unwrap_or(None);
+        let population: Option<i32> = row.to_value("population").unwrap_or(None);
+        txn.exec_raw_params(
+            "INSERT INTO boundaries (type, geoid, name, full_name, state_abbr, population)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+            &[
+                DatabaseValue::String("county".to_string()),
+                DatabaseValue::String(geoid),
+                DatabaseValue::String(name),
+                DatabaseValue::String(full_name),
+                state_abbr.map_or(DatabaseValue::Null, DatabaseValue::String),
+                population.map_or(DatabaseValue::Null, DatabaseValue::Int32),
+            ],
+        )
+        .await?;
+    }
+    txn.commit().await?;
+    log::info!("Inserted {} county boundaries", rows.len());
+
+    // Places
+    let rows = db
+        .query_raw_params(
+            "SELECT geoid, name, full_name, state_abbr, population
+             FROM census_places ORDER BY geoid",
+            &[],
+        )
+        .await?;
+    let txn = sqlite.begin_transaction().await?;
+    for row in &rows {
+        let geoid: String = row.to_value("geoid").unwrap_or_default();
+        let name: String = row.to_value("name").unwrap_or_default();
+        let full_name: String = row.to_value("full_name").unwrap_or_default();
+        let state_abbr: Option<String> = row.to_value("state_abbr").unwrap_or(None);
+        let population: Option<i32> = row.to_value("population").unwrap_or(None);
+        txn.exec_raw_params(
+            "INSERT INTO boundaries (type, geoid, name, full_name, state_abbr, population)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+            &[
+                DatabaseValue::String("place".to_string()),
+                DatabaseValue::String(geoid),
+                DatabaseValue::String(name),
+                DatabaseValue::String(full_name),
+                state_abbr.map_or(DatabaseValue::Null, DatabaseValue::String),
+                population.map_or(DatabaseValue::Null, DatabaseValue::Int32),
+            ],
+        )
+        .await?;
+    }
+    txn.commit().await?;
+    log::info!("Inserted {} place boundaries", rows.len());
+
+    // Tracts
+    let rows = db
+        .query_raw_params(
+            "SELECT geoid, name, state_abbr, county_name, population
+             FROM census_tracts ORDER BY geoid",
+            &[],
+        )
+        .await?;
+    let txn = sqlite.begin_transaction().await?;
+    for row in &rows {
+        let geoid: String = row.to_value("geoid").unwrap_or_default();
+        let name: String = row.to_value("name").unwrap_or_default();
+        let state_abbr: Option<String> = row.to_value("state_abbr").unwrap_or(None);
+        let county_name: Option<String> = row.to_value("county_name").unwrap_or(None);
+        let population: Option<i32> = row.to_value("population").unwrap_or(None);
+        let full_name = match (&county_name, &state_abbr) {
+            (Some(c), Some(s)) => format!("Tract {name}, {c}, {s}"),
+            (Some(c), None) => format!("Tract {name}, {c}"),
+            (None, Some(s)) => format!("Tract {name}, {s}"),
+            (None, None) => format!("Tract {name}"),
+        };
+        txn.exec_raw_params(
+            "INSERT INTO boundaries (type, geoid, name, full_name, state_abbr, population)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+            &[
+                DatabaseValue::String("tract".to_string()),
+                DatabaseValue::String(geoid),
+                DatabaseValue::String(name),
+                DatabaseValue::String(full_name),
+                state_abbr.map_or(DatabaseValue::Null, DatabaseValue::String),
+                population.map_or(DatabaseValue::Null, DatabaseValue::Int32),
+            ],
+        )
+        .await?;
+    }
+    txn.commit().await?;
+    log::info!("Inserted {} tract boundaries", rows.len());
+
+    // Neighborhoods
+    let rows = db
+        .query_raw_params(
+            "SELECT id, name, city, state FROM neighborhoods ORDER BY id",
+            &[],
+        )
+        .await?;
+    let txn = sqlite.begin_transaction().await?;
+    for row in &rows {
+        let id: i32 = row.to_value("id").unwrap_or(0);
+        let name: String = row.to_value("name").unwrap_or_default();
+        let city: String = row.to_value("city").unwrap_or_default();
+        let state: String = row.to_value("state").unwrap_or_default();
+        let geoid = format!("nbhd-{id}");
+        let full_name = format!("{name}, {city}, {state}");
+        txn.exec_raw_params(
+            "INSERT INTO boundaries (type, geoid, name, full_name, state_abbr, population)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+            &[
+                DatabaseValue::String("neighborhood".to_string()),
+                DatabaseValue::String(geoid),
+                DatabaseValue::String(name),
+                DatabaseValue::String(full_name),
+                DatabaseValue::String(state),
+                DatabaseValue::Null,
+            ],
+        )
+        .await?;
+    }
+    txn.commit().await?;
+    log::info!("Inserted {} neighborhood boundaries", rows.len());
+
+    // Create search index
+    sqlite
+        .exec_raw("CREATE INDEX idx_boundaries_name ON boundaries(type, name COLLATE NOCASE)")
+        .await?;
+
+    sqlite.exec_raw("ANALYZE").await?;
+
+    log::info!(
+        "Boundaries search database generated: {}",
+        db_path.display()
+    );
+    Ok(())
+}
+
+// ============================================================
 // Boundary PMTiles generation
 // ============================================================
 
@@ -1536,8 +1958,7 @@ async fn generate_boundaries_pmtiles(
         "--minimum-zoom=0",
         "--maximum-zoom=14",
         "--coalesce-densest-as-needed",
-        "--simplification=10",
-        "--simplify-only-low-zooms",
+        "--detect-shared-borders",
     ]);
 
     // Add each layer as a named-layer with its GeoJSONSeq file
@@ -1699,10 +2120,12 @@ async fn export_boundary_layer(
                 })
             }
             "neighborhoods" => {
+                let id: i64 = row.to_value("id").unwrap_or(0);
                 let name: String = row.to_value("name").unwrap_or_default();
                 let city: String = row.to_value("city").unwrap_or_default();
                 let state: String = row.to_value("state").unwrap_or_default();
                 serde_json::json!({
+                    "nbhd_id": format!("nbhd-{id}"),
                     "name": name,
                     "city": city,
                     "state": state,
@@ -1730,11 +2153,13 @@ async fn export_boundary_layer(
 
 /// Exports all incidents from `PostGIS` as newline-delimited `GeoJSON`,
 /// using keyset pagination and streaming writes to keep memory constant.
+#[allow(clippy::too_many_lines)]
 async fn export_geojsonseq(
     db: &dyn Database,
     output_path: &Path,
     limit: Option<u64>,
     source_ids: &[i32],
+    geo_index: &crate::spatial::SpatialIndex,
     progress: &Arc<dyn ProgressCallback>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let file = std::fs::File::create(output_path)?;
@@ -1786,6 +2211,22 @@ async fn export_geojsonseq(
                     .to_rfc3339()
             });
 
+            // Derive boundary GEOIDs from spatial index
+            let tract_geoid = geo_index.lookup_tract(lng, lat).map(str::to_owned);
+            let state_fips = tract_geoid
+                .as_deref()
+                .and_then(crate::spatial::SpatialIndex::derive_state_fips)
+                .map(str::to_owned);
+            let county_geoid = tract_geoid
+                .as_deref()
+                .and_then(crate::spatial::SpatialIndex::derive_county_geoid)
+                .map(str::to_owned);
+            let place_geoid = geo_index.lookup_place(lng, lat).map(str::to_owned);
+            let neighborhood_id = tract_geoid
+                .as_deref()
+                .and_then(|g| geo_index.lookup_neighborhood(g))
+                .map(str::to_owned);
+
             let feature = serde_json::json!({
                 "type": "Feature",
                 "geometry": {
@@ -1806,6 +2247,11 @@ async fn export_geojsonseq(
                     "date": occurred_at,
                     "desc": description,
                     "addr": block_address,
+                    "state_fips": state_fips,
+                    "county_geoid": county_geoid,
+                    "place_geoid": place_geoid,
+                    "tract_geoid": tract_geoid,
+                    "neighborhood_id": neighborhood_id,
                 }
             });
 

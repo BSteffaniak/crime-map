@@ -31,8 +31,11 @@ clap = { workspace = true }
 chrono = { workspace = true }
 dialoguer = { workspace = true }
 duckdb = { workspace = true }
+geo = { workspace = true }
+geojson = { workspace = true }
 h3o = { workspace = true }
 log = { workspace = true }
+rstar = { workspace = true }
 pretty_env_logger = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }

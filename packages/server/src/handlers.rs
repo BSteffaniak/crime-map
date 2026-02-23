@@ -8,9 +8,11 @@ use crime_map_crime_models::{CrimeCategory, CrimeSubcategory};
 use crime_map_database::queries;
 use crime_map_database_models::{BoundingBox, IncidentQuery};
 use crime_map_server_models::{
-    ApiCategoryNode, ApiHealth, ApiIncident, ApiSource, ApiSubcategoryNode, ClusterEntry,
-    ClusterQueryParams, CountFilterParams, HexbinEntry, HexbinQueryParams, IncidentQueryParams,
-    SidebarIncident, SidebarQueryParams, SidebarResponse, SourceCountsQueryParams,
+    ApiCategoryNode, ApiHealth, ApiIncident, ApiSource, ApiSubcategoryNode,
+    BoundaryCountsQueryParams, BoundaryCountsResponse, BoundarySearchParams, BoundarySearchResult,
+    ClusterEntry, ClusterQueryParams, CountFilterParams, HexbinEntry, HexbinQueryParams,
+    IncidentQueryParams, SidebarIncident, SidebarQueryParams, SidebarResponse,
+    SourceCountsQueryParams,
 };
 use moosicbox_json_utils::database::ToValue as _;
 use serde::Deserialize;
@@ -262,6 +264,7 @@ fn parse_sidebar_row(row: &Row) -> SidebarIncident {
 /// query parameters. This query runs against `SQLite`.
 ///
 /// Returns `(features_query, feature_params)`.
+#[allow(clippy::too_many_lines)]
 fn build_features_query(
     params: &SidebarQueryParams,
     bbox: Option<&BoundingBox>,
@@ -351,6 +354,43 @@ fn build_features_query(
             }
         }
     }
+
+    // Boundary GEOID filters
+    add_features_in_filter(
+        params.state_fips.as_deref(),
+        "state_fips",
+        &mut conditions,
+        &mut feature_params,
+        &mut feat_idx,
+    );
+    add_features_in_filter(
+        params.county_geoids.as_deref(),
+        "county_geoid",
+        &mut conditions,
+        &mut feature_params,
+        &mut feat_idx,
+    );
+    add_features_in_filter(
+        params.place_geoids.as_deref(),
+        "place_geoid",
+        &mut conditions,
+        &mut feature_params,
+        &mut feat_idx,
+    );
+    add_features_in_filter(
+        params.tract_geoids.as_deref(),
+        "tract_geoid",
+        &mut conditions,
+        &mut feature_params,
+        &mut feat_idx,
+    );
+    add_features_in_filter(
+        params.neighborhood_ids.as_deref(),
+        "neighborhood_id",
+        &mut conditions,
+        &mut feature_params,
+        &mut feat_idx,
+    );
 
     let where_clause = if conditions.is_empty() {
         String::new()
@@ -1159,6 +1199,38 @@ fn build_count_conditions(
         conditions,
         bind_values,
     );
+
+    // Boundary GEOID filters
+    add_count_in_filter(
+        params.state_fips.as_deref(),
+        "state_fips",
+        conditions,
+        bind_values,
+    );
+    add_count_in_filter(
+        params.county_geoids.as_deref(),
+        "county_geoid",
+        conditions,
+        bind_values,
+    );
+    add_count_in_filter(
+        params.place_geoids.as_deref(),
+        "place_geoid",
+        conditions,
+        bind_values,
+    );
+    add_count_in_filter(
+        params.tract_geoids.as_deref(),
+        "tract_geoid",
+        conditions,
+        bind_values,
+    );
+    add_count_in_filter(
+        params.neighborhood_ids.as_deref(),
+        "neighborhood_id",
+        conditions,
+        bind_values,
+    );
 }
 
 /// Adds an `IN (...)` filter for a comma-separated parameter to the `DuckDB`
@@ -1278,6 +1350,38 @@ fn build_h3_conditions(
         conditions,
         bind_values,
     );
+
+    // Boundary GEOID filters
+    add_count_in_filter(
+        params.state_fips.as_deref(),
+        "h.state_fips",
+        conditions,
+        bind_values,
+    );
+    add_count_in_filter(
+        params.county_geoids.as_deref(),
+        "h.county_geoid",
+        conditions,
+        bind_values,
+    );
+    add_count_in_filter(
+        params.place_geoids.as_deref(),
+        "h.place_geoid",
+        conditions,
+        bind_values,
+    );
+    add_count_in_filter(
+        params.tract_geoids.as_deref(),
+        "h.tract_geoid",
+        conditions,
+        bind_values,
+    );
+    add_count_in_filter(
+        params.neighborhood_ids.as_deref(),
+        "h.neighborhood_id",
+        conditions,
+        bind_values,
+    );
 }
 
 /// Extracts the date portion (`YYYY-MM-DD`) from a date or RFC 3339 string.
@@ -1305,6 +1409,190 @@ fn parse_bbox(s: &str) -> Option<BoundingBox> {
         Some(BoundingBox::new(parts[0], parts[1], parts[2], parts[3]))
     } else {
         None
+    }
+}
+
+/// `GET /api/boundary-counts`
+///
+/// Returns incident counts grouped by boundary GEOID from the
+/// pre-generated `DuckDB` `count_summary` table. Supports all the same
+/// filters as the sidebar endpoint.
+pub async fn boundary_counts(
+    state: web::Data<AppState>,
+    params: web::Query<BoundaryCountsQueryParams>,
+) -> HttpResponse {
+    let Some(data) = state.data.get() else {
+        return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+            "error": "Data files are still loading. Please try again shortly."
+        }));
+    };
+
+    let boundary_type = params.boundary_type.clone();
+    let geoid_column = match boundary_type.as_str() {
+        "state" => "state_fips",
+        "county" => "county_geoid",
+        "place" => "place_geoid",
+        "tract" => "tract_geoid",
+        "neighborhood" => "neighborhood_id",
+        _ => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Invalid boundary type. Must be one of: state, county, place, tract, neighborhood"
+            }));
+        }
+    };
+
+    let bbox = params.bbox.as_deref().and_then(parse_bbox);
+    let count_db = data.count_db.clone();
+    let params_owned = params.into_inner();
+
+    let result = web::block(move || {
+        let conn = count_db
+            .lock()
+            .map_err(|e| format!("Failed to lock DuckDB connection: {e}"))?;
+        let filter_params = CountFilterParams::from(&params_owned);
+        execute_boundary_counts(&conn, &filter_params, bbox.as_ref(), geoid_column)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(counts)) => HttpResponse::Ok().json(BoundaryCountsResponse {
+            boundary_type,
+            counts,
+        }),
+        Ok(Err(e)) => {
+            log::error!("Boundary counts query failed: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to query boundary counts"
+            }))
+        }
+        Err(e) => {
+            log::error!("Boundary counts blocking error: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to query boundary counts"
+            }))
+        }
+    }
+}
+
+/// Executes the boundary count query against the `DuckDB` `count_summary` table.
+fn execute_boundary_counts(
+    db_conn: &duckdb::Connection,
+    params: &CountFilterParams,
+    bbox: Option<&BoundingBox>,
+    geoid_column: &str,
+) -> Result<BTreeMap<String, u64>, String> {
+    let mut conditions: Vec<String> = Vec::new();
+    let mut bind_values: Vec<DuckValue> = Vec::new();
+
+    // Must have a non-null geoid
+    conditions.push(format!("{geoid_column} IS NOT NULL"));
+
+    build_count_conditions(params, bbox, &mut conditions, &mut bind_values);
+
+    let where_clause = format!(" WHERE {}", conditions.join(" AND "));
+
+    let sql = format!(
+        "SELECT {geoid_column} AS geoid, CAST(SUM(cnt) AS BIGINT) AS count
+         FROM count_summary{where_clause}
+         GROUP BY {geoid_column}
+         HAVING SUM(cnt) > 0
+         ORDER BY count DESC"
+    );
+
+    let mut stmt = db_conn
+        .prepare(&sql)
+        .map_err(|e| format!("DuckDB boundary counts prepare failed: {e}"))?;
+
+    let boxed_params: Vec<Box<dyn duckdb::ToSql>> =
+        bind_values.into_iter().map(duck_value_to_boxed).collect();
+    let param_refs: Vec<&dyn duckdb::ToSql> = boxed_params.iter().map(AsRef::as_ref).collect();
+
+    let mut rows = stmt
+        .query(param_refs.as_slice())
+        .map_err(|e| format!("DuckDB boundary counts query failed: {e}"))?;
+
+    let mut result = BTreeMap::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("DuckDB boundary counts row error: {e}"))?
+    {
+        let geoid: String = row.get(0).map_err(|e| format!("get geoid: {e}"))?;
+        let count: i64 = row.get(1).map_err(|e| format!("get count: {e}"))?;
+        #[allow(clippy::cast_sign_loss)]
+        let count_u64 = count as u64;
+        result.insert(geoid, count_u64);
+    }
+
+    Ok(result)
+}
+
+/// `GET /api/boundaries/search`
+///
+/// Searches boundary names in the pre-generated `boundaries.db` `SQLite`
+/// database. Supports filtering by boundary type and limiting results.
+pub async fn boundary_search(
+    state: web::Data<AppState>,
+    params: web::Query<BoundarySearchParams>,
+) -> HttpResponse {
+    let Some(ref boundaries_db) = state.boundaries_db else {
+        return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+            "error": "Boundaries database not available"
+        }));
+    };
+
+    let q = params.q.trim().to_string();
+    if q.is_empty() {
+        return HttpResponse::Ok().json(Vec::<BoundarySearchResult>::new());
+    }
+
+    let limit = params.limit.unwrap_or(20).min(100);
+    let boundary_type = params.boundary_type.clone();
+
+    let mut conditions: Vec<String> = vec!["name LIKE '%' || $1 || '%'".to_string()];
+    let mut bind_params: Vec<DatabaseValue> = vec![DatabaseValue::String(q)];
+    let mut param_idx: usize = 2;
+
+    if let Some(ref bt) = boundary_type {
+        conditions.push(format!("type = ${param_idx}"));
+        bind_params.push(DatabaseValue::String(bt.clone()));
+        param_idx += 1;
+    }
+
+    let where_clause = conditions.join(" AND ");
+    let query = format!(
+        "SELECT type, geoid, name, full_name, state_abbr, population
+         FROM boundaries
+         WHERE {where_clause}
+         ORDER BY name
+         LIMIT ${param_idx}"
+    );
+    bind_params.push(DatabaseValue::UInt32(limit));
+
+    match boundaries_db.query_raw_params(&query, &bind_params).await {
+        Ok(rows) => {
+            let results: Vec<BoundarySearchResult> = rows
+                .iter()
+                .map(|row| {
+                    let pop_i32: Option<i32> = row.to_value("population").unwrap_or(None);
+                    let pop_i64: Option<i64> = pop_i32.map(i64::from);
+                    BoundarySearchResult {
+                        boundary_type: row.to_value("type").unwrap_or_default(),
+                        geoid: row.to_value("geoid").unwrap_or_default(),
+                        name: row.to_value("name").unwrap_or_default(),
+                        full_name: row.to_value("full_name").unwrap_or(None),
+                        state_abbr: row.to_value("state_abbr").unwrap_or(None),
+                        population: pop_i64,
+                    }
+                })
+                .collect();
+            HttpResponse::Ok().json(results)
+        }
+        Err(e) => {
+            log::error!("Boundary search failed: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to search boundaries"
+            }))
+        }
     }
 }
 

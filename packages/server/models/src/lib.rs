@@ -171,6 +171,16 @@ pub struct SidebarQueryParams {
     pub arrest_made: Option<bool>,
     /// Comma-separated list of source IDs to include.
     pub sources: Option<String>,
+    /// Comma-separated list of state FIPS codes to include.
+    pub state_fips: Option<String>,
+    /// Comma-separated list of county GEOIDs to include.
+    pub county_geoids: Option<String>,
+    /// Comma-separated list of place GEOIDs to include.
+    pub place_geoids: Option<String>,
+    /// Comma-separated list of tract GEOIDs to include.
+    pub tract_geoids: Option<String>,
+    /// Comma-separated list of neighborhood IDs to include.
+    pub neighborhood_ids: Option<String>,
 }
 
 /// Response from the sidebar endpoint.
@@ -242,6 +252,16 @@ pub struct CountFilterParams {
     pub arrest_made: Option<bool>,
     /// Comma-separated list of source IDs to include.
     pub sources: Option<String>,
+    /// Comma-separated list of state FIPS codes to include.
+    pub state_fips: Option<String>,
+    /// Comma-separated list of county GEOIDs to include.
+    pub county_geoids: Option<String>,
+    /// Comma-separated list of place GEOIDs to include.
+    pub place_geoids: Option<String>,
+    /// Comma-separated list of tract GEOIDs to include.
+    pub tract_geoids: Option<String>,
+    /// Comma-separated list of neighborhood IDs to include.
+    pub neighborhood_ids: Option<String>,
 }
 
 impl From<&SidebarQueryParams> for CountFilterParams {
@@ -254,6 +274,11 @@ impl From<&SidebarQueryParams> for CountFilterParams {
             severity_min: p.severity_min,
             arrest_made: p.arrest_made,
             sources: p.sources.clone(),
+            state_fips: p.state_fips.clone(),
+            county_geoids: p.county_geoids.clone(),
+            place_geoids: p.place_geoids.clone(),
+            tract_geoids: p.tract_geoids.clone(),
+            neighborhood_ids: p.neighborhood_ids.clone(),
         }
     }
 }
@@ -268,6 +293,11 @@ impl From<&ClusterQueryParams> for CountFilterParams {
             severity_min: p.severity_min,
             arrest_made: p.arrest_made,
             sources: p.sources.clone(),
+            state_fips: p.state_fips.clone(),
+            county_geoids: p.county_geoids.clone(),
+            place_geoids: p.place_geoids.clone(),
+            tract_geoids: p.tract_geoids.clone(),
+            neighborhood_ids: p.neighborhood_ids.clone(),
         }
     }
 }
@@ -282,6 +312,11 @@ impl From<&HexbinQueryParams> for CountFilterParams {
             severity_min: p.severity_min,
             arrest_made: p.arrest_made,
             sources: p.sources.clone(),
+            state_fips: p.state_fips.clone(),
+            county_geoids: p.county_geoids.clone(),
+            place_geoids: p.place_geoids.clone(),
+            tract_geoids: p.tract_geoids.clone(),
+            neighborhood_ids: p.neighborhood_ids.clone(),
         }
     }
 }
@@ -310,6 +345,16 @@ pub struct ClusterQueryParams {
     pub arrest_made: Option<bool>,
     /// Comma-separated list of source IDs to include.
     pub sources: Option<String>,
+    /// Comma-separated list of state FIPS codes to include.
+    pub state_fips: Option<String>,
+    /// Comma-separated list of county GEOIDs to include.
+    pub county_geoids: Option<String>,
+    /// Comma-separated list of place GEOIDs to include.
+    pub place_geoids: Option<String>,
+    /// Comma-separated list of tract GEOIDs to include.
+    pub tract_geoids: Option<String>,
+    /// Comma-separated list of neighborhood IDs to include.
+    pub neighborhood_ids: Option<String>,
 }
 
 /// A single cluster entry in the clusters endpoint response.
@@ -346,6 +391,16 @@ pub struct HexbinQueryParams {
     pub arrest_made: Option<bool>,
     /// Comma-separated list of source IDs to include.
     pub sources: Option<String>,
+    /// Comma-separated list of state FIPS codes to include.
+    pub state_fips: Option<String>,
+    /// Comma-separated list of county GEOIDs to include.
+    pub county_geoids: Option<String>,
+    /// Comma-separated list of place GEOIDs to include.
+    pub place_geoids: Option<String>,
+    /// Comma-separated list of tract GEOIDs to include.
+    pub tract_geoids: Option<String>,
+    /// Comma-separated list of neighborhood IDs to include.
+    pub neighborhood_ids: Option<String>,
 }
 
 /// A single hexbin entry in the hexbins endpoint response.
@@ -400,6 +455,16 @@ pub struct SourceCountsQueryParams {
     pub severity_min: Option<u8>,
     /// Filter by arrest status.
     pub arrest_made: Option<bool>,
+    /// Comma-separated list of state FIPS codes to include.
+    pub state_fips: Option<String>,
+    /// Comma-separated list of county GEOIDs to include.
+    pub county_geoids: Option<String>,
+    /// Comma-separated list of place GEOIDs to include.
+    pub place_geoids: Option<String>,
+    /// Comma-separated list of tract GEOIDs to include.
+    pub tract_geoids: Option<String>,
+    /// Comma-separated list of neighborhood IDs to include.
+    pub neighborhood_ids: Option<String>,
 }
 
 impl From<&SourceCountsQueryParams> for CountFilterParams {
@@ -412,6 +477,108 @@ impl From<&SourceCountsQueryParams> for CountFilterParams {
             severity_min: p.severity_min,
             arrest_made: p.arrest_made,
             sources: None, // Don't filter by source — we want counts for ALL sources
+            state_fips: p.state_fips.clone(),
+            county_geoids: p.county_geoids.clone(),
+            place_geoids: p.place_geoids.clone(),
+            tract_geoids: p.tract_geoids.clone(),
+            neighborhood_ids: p.neighborhood_ids.clone(),
         }
     }
+}
+
+/// Query parameters for the boundary-counts endpoint.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoundaryCountsQueryParams {
+    /// Boundary type: "state", "county", "place", "tract", or "neighborhood".
+    #[serde(rename = "type")]
+    pub boundary_type: String,
+    /// Bounding box as `west,south,east,north`.
+    pub bbox: Option<String>,
+    /// Start date for temporal filtering (ISO 8601).
+    pub from: Option<String>,
+    /// End date for temporal filtering (ISO 8601).
+    pub to: Option<String>,
+    /// Comma-separated list of category names to include.
+    pub categories: Option<String>,
+    /// Comma-separated list of subcategory names to include.
+    pub subcategories: Option<String>,
+    /// Minimum severity value (1-5).
+    pub severity_min: Option<u8>,
+    /// Filter by arrest status.
+    pub arrest_made: Option<bool>,
+    /// Comma-separated list of source IDs to include.
+    pub sources: Option<String>,
+    /// Comma-separated list of state FIPS codes to include.
+    pub state_fips: Option<String>,
+    /// Comma-separated list of county GEOIDs to include.
+    pub county_geoids: Option<String>,
+    /// Comma-separated list of place GEOIDs to include.
+    pub place_geoids: Option<String>,
+    /// Comma-separated list of tract GEOIDs to include.
+    pub tract_geoids: Option<String>,
+    /// Comma-separated list of neighborhood IDs to include.
+    pub neighborhood_ids: Option<String>,
+}
+
+impl From<&BoundaryCountsQueryParams> for CountFilterParams {
+    fn from(p: &BoundaryCountsQueryParams) -> Self {
+        Self {
+            from: p.from.clone(),
+            to: p.to.clone(),
+            categories: p.categories.clone(),
+            subcategories: p.subcategories.clone(),
+            severity_min: p.severity_min,
+            arrest_made: p.arrest_made,
+            sources: p.sources.clone(),
+            state_fips: p.state_fips.clone(),
+            county_geoids: p.county_geoids.clone(),
+            place_geoids: p.place_geoids.clone(),
+            tract_geoids: p.tract_geoids.clone(),
+            neighborhood_ids: p.neighborhood_ids.clone(),
+        }
+    }
+}
+
+/// Response for the boundary-counts endpoint.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoundaryCountsResponse {
+    /// Boundary type that was queried.
+    #[serde(rename = "type")]
+    pub boundary_type: String,
+    /// Map of geoid -> incident count.
+    pub counts: std::collections::BTreeMap<String, u64>,
+}
+
+/// Query parameters for the boundary search endpoint.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoundarySearchParams {
+    /// Search query string.
+    pub q: String,
+    /// Boundary type filter: "state", "county", "place", "tract", "neighborhood".
+    #[serde(rename = "type")]
+    pub boundary_type: Option<String>,
+    /// Maximum number of results.
+    pub limit: Option<u32>,
+}
+
+/// A boundary search result.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoundarySearchResult {
+    /// Boundary GEOID or synthetic ID.
+    pub geoid: String,
+    /// Display name.
+    pub name: String,
+    /// Full name including state.
+    pub full_name: Option<String>,
+    /// State abbreviation.
+    pub state_abbr: Option<String>,
+    /// Population (if available).
+    pub population: Option<i64>,
+    /// Boundary type.
+    #[serde(rename = "type")]
+    pub boundary_type: String,
 }

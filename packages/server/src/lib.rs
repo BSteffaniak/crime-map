@@ -114,6 +114,9 @@ pub struct AppState {
     pub ai_context: Arc<crime_map_ai::agent::AgentContext>,
     /// `SQLite` database for persistent AI conversation storage.
     pub conversations_db: Arc<dyn Database>,
+    /// Pre-generated `SQLite` database for boundary name searches.
+    /// `None` when `boundaries.db` is not present.
+    pub boundaries_db: Option<Arc<dyn Database>>,
 }
 
 /// Required data files that must all be present before the server can
@@ -367,11 +370,29 @@ pub async fn run_server() -> std::io::Result<()> {
             .await
             .expect("Failed to open conversations database");
 
+    let boundaries_db_path = data_dir.join("boundaries.db");
+    let boundaries_db: Option<Arc<dyn Database>> = if boundaries_db_path.exists() {
+        match init_sqlite_rusqlite(Some(&boundaries_db_path)) {
+            Ok(db) => {
+                log::info!("Opened boundaries search database");
+                Some(Arc::from(db))
+            }
+            Err(e) => {
+                log::warn!("Failed to open boundaries.db: {e}");
+                None
+            }
+        }
+    } else {
+        log::info!("boundaries.db not found; boundary search will be unavailable");
+        None
+    };
+
     let state = web::Data::new(AppState {
         db: db_conn,
         data,
         ai_context: Arc::new(ai_context),
         conversations_db: Arc::from(conversations_db),
+        boundaries_db,
     });
 
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -399,6 +420,11 @@ pub async fn run_server() -> std::io::Result<()> {
                     .route("/sidebar", web::get().to(handlers::sidebar))
                     .route("/clusters", web::get().to(handlers::clusters))
                     .route("/hexbins", web::get().to(handlers::hexbins))
+                    .route("/boundary-counts", web::get().to(handlers::boundary_counts))
+                    .route(
+                        "/boundaries/search",
+                        web::get().to(handlers::boundary_search),
+                    )
                     .route("/ai/ask", web::post().to(handlers::ai_ask)),
             )
             // Serve generated tile data

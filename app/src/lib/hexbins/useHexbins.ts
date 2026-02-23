@@ -21,6 +21,7 @@ import { CRIME_CATEGORIES } from "../types";
 import type { BBox } from "../sidebar/types";
 import type { HexbinEntry } from "./types";
 import { VIEWPORT_DEBOUNCE_MS, hexbinResolution } from "../map-config";
+import { appendBoundaryParams } from "../boundary-params";
 
 /**
  * Expands a bounding box by a zoom-dependent buffer so hexbins beyond the
@@ -100,6 +101,9 @@ function buildQueryString(
   if (filters.sources.length > 0) {
     params.set("sources", filters.sources.join(","));
   }
+
+  // Boundary filters
+  appendBoundaryParams(params, filters);
 
   return params.toString();
 }

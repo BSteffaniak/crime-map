@@ -15,6 +15,7 @@ import type { FilterState, CategoryId } from "../types";
 import { CRIME_CATEGORIES } from "../types";
 import type { BBox } from "../sidebar/types";
 import { VIEWPORT_DEBOUNCE_MS } from "../map-config";
+import { appendBoundaryParams } from "../boundary-params";
 
 /** source_id -> viewport incident count */
 export type SourceCounts = Record<number, number>;
@@ -66,6 +67,9 @@ function buildQueryString(bbox: BBox, filters: FilterState): string {
   // NOTE: We intentionally do NOT pass the sources filter here.
   // We want counts for ALL sources in the viewport so the user can
   // see which sources are available to filter by.
+
+  // Boundary filters
+  appendBoundaryParams(params, filters);
 
   return params.toString();
 }

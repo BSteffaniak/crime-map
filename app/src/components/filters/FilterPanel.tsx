@@ -6,6 +6,7 @@ import {
   type ApiSource,
 } from "@/lib/types";
 import type { SourceCounts } from "@/lib/source-counts/useSourceCounts";
+import BoundaryFilter from "@/components/filters/BoundaryFilter";
 
 const DATE_PRESETS = [
   { id: "7d", label: "7 Days" },
@@ -33,6 +34,8 @@ interface FilterPanelProps {
   onSetArrestFilter: (value: boolean | null) => void;
   onToggleSource: (sourceId: number) => void;
   onClearSources: () => void;
+  onToggleBoundary: (type: string, geoid: string) => void;
+  onClearBoundaryFilter: (type: string) => void;
   onClearAll: () => void;
   activeFilterCount: number;
 }
@@ -48,6 +51,8 @@ export default function FilterPanel({
   onSetArrestFilter,
   onToggleSource,
   onClearSources,
+  onToggleBoundary,
+  onClearBoundaryFilter,
   onClearAll,
   activeFilterCount,
 }: FilterPanelProps) {
@@ -213,6 +218,13 @@ export default function FilterPanel({
           ))}
         </div>
       </div>
+
+      {/* Boundary Filter Section */}
+      <BoundaryFilter
+        filters={filters}
+        onToggleBoundary={onToggleBoundary}
+        onClearBoundaryFilter={onClearBoundaryFilter}
+      />
 
       {/* Data Source Section */}
       <div className="px-4 py-3">

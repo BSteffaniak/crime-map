@@ -569,122 +569,167 @@ pub async fn get_all_category_ids(
 /// Assigns census place GEOIDs to incidents that have coordinates but no
 /// `census_place_geoid` yet.
 ///
-/// Uses a two-pass approach:
+/// Uses a two-pass approach, batched by state for performance:
 /// 1. **Exact containment** — `ST_Covers` assigns incidents that fall
 ///    directly inside a place boundary. When a point is inside multiple
 ///    overlapping places, the smallest (by area) wins.
 /// 2. **Nearest within buffer** — For remaining unmatched incidents,
 ///    `ST_DWithin` with a configurable buffer (meters) finds the nearest
-///    place. This handles source-data coordinate imprecision where points
-///    land slightly outside the true boundary.
+///    place.
 ///
-/// Each incident is assigned to exactly one place (the most specific
-/// containing place, or the nearest one within the buffer).
-///
-/// Processes in batches to avoid locking the table for too long.
-/// Returns the total number of incidents updated.
+/// Performance optimizations:
+/// - Casts `geography` to `geometry` for planar `ST_Covers` (10–50× faster,
+///   negligible accuracy difference for CONUS).
+/// - Batches by state so each spatial join only compares incidents against
+///   places in the same state, dramatically reducing the cross-product.
+/// - Boosts `work_mem` for the session to allow hash joins.
 ///
 /// # Errors
 ///
 /// Returns [`DbError`] if the database operation fails.
+#[allow(clippy::too_many_lines)]
 pub async fn attribute_places(
     db: &dyn Database,
     buffer_meters: f64,
-    batch_size: u32,
+    _batch_size: u32,
     progress: Option<Arc<dyn ProgressCallback>>,
 ) -> Result<u64, DbError> {
     let mut total = 0u64;
 
+    // Boost work_mem for this session to allow efficient hash joins
+    db.exec_raw("SET work_mem = '256MB'").await?;
+
+    // Ensure partial index exists for fast lookup of unattributed rows
+    db.exec_raw(
+        "CREATE INDEX IF NOT EXISTS idx_incidents_unattr_place \
+         ON crime_incidents (id) \
+         WHERE census_place_geoid IS NULL AND has_coordinates = TRUE",
+    )
+    .await?;
+
     // Query unattributed count for progress reporting
-    if let Some(ref p) = progress {
+    let unattributed: i64 = {
         let rows = db
             .query_raw_params(
-                "SELECT COUNT(*) as cnt FROM crime_incidents WHERE census_place_geoid IS NULL AND has_coordinates = TRUE",
+                "SELECT COUNT(*) as cnt FROM crime_incidents \
+                 WHERE census_place_geoid IS NULL AND has_coordinates = TRUE",
                 &[],
             )
             .await?;
-        if let Some(row) = rows.first() {
-            let count: i64 = row.to_value("cnt").unwrap_or(0);
-            #[allow(clippy::cast_sign_loss)]
-            p.set_total(count as u64);
-        }
+        rows.first().map_or(0, |r| r.to_value("cnt").unwrap_or(0))
+    };
+
+    if let Some(ref p) = progress {
+        #[allow(clippy::cast_sign_loss)]
+        p.set_total(unattributed as u64);
     }
 
-    // Pass 1: Exact containment (ST_Covers).
-    // DISTINCT ON (i2.id) + ORDER BY ST_Area picks the smallest containing
-    // place when boundaries overlap.
-    log::info!("Pass 1: exact containment (ST_Covers)...");
-    loop {
+    if unattributed == 0 {
+        if let Some(ref p) = progress {
+            p.finish("Place attribution complete: 0 incidents (already done)".to_string());
+        }
+        return Ok(0);
+    }
+
+    // Get distinct states that have unattributed incidents
+    let state_rows = db
+        .query_raw_params(
+            "SELECT DISTINCT state FROM crime_incidents \
+             WHERE census_place_geoid IS NULL AND has_coordinates = TRUE \
+             ORDER BY state",
+            &[],
+        )
+        .await?;
+
+    let states: Vec<String> = state_rows
+        .iter()
+        .filter_map(|r| {
+            let s: String = r.to_value("state").unwrap_or_default();
+            if s.is_empty() { None } else { Some(s) }
+        })
+        .collect();
+
+    log::info!(
+        "Pass 1: exact containment (geometry cast + state batching) for ~{unattributed} incidents across {} states...",
+        states.len()
+    );
+
+    // Pass 1: Exact containment per state, using geometry cast
+    for state in &states {
         let updated = db
             .exec_raw_params(
-                "UPDATE crime_incidents i
-                 SET census_place_geoid = sub.geoid
-                 FROM (
-                     SELECT DISTINCT ON (i2.id) i2.id, p.geoid
-                     FROM crime_incidents i2
-                     JOIN census_places p
-                       ON ST_Covers(p.boundary, i2.location)
-                     WHERE i2.census_place_geoid IS NULL
-                       AND i2.has_coordinates = TRUE
-                     ORDER BY i2.id, ST_Area(p.boundary)
-                     LIMIT $1
-                 ) sub
+                "UPDATE crime_incidents i \
+                 SET census_place_geoid = sub.geoid \
+                 FROM ( \
+                     SELECT DISTINCT ON (i2.id) i2.id, p.geoid \
+                     FROM crime_incidents i2 \
+                     JOIN census_places p \
+                       ON p.state_abbr = i2.state \
+                      AND ST_Covers(p.boundary::geometry, i2.location::geometry) \
+                     WHERE i2.census_place_geoid IS NULL \
+                       AND i2.has_coordinates = TRUE \
+                       AND i2.state = $1 \
+                     ORDER BY i2.id, ST_Area(p.boundary::geometry) \
+                 ) sub \
                  WHERE i.id = sub.id",
-                &[DatabaseValue::Int64(i64::from(batch_size))],
+                &[DatabaseValue::String(state.clone())],
             )
             .await?;
 
-        if updated == 0 {
-            break;
-        }
-
         total += updated;
-        log::info!("  exact: {updated} incidents attributed ({total} total)");
+        if updated > 0 {
+            log::info!("  {state}: {updated} incidents (exact), {total} total");
+        }
         if let Some(ref p) = progress {
             p.inc(updated);
         }
     }
 
-    // Pass 2: Nearest place within buffer distance.
-    // For incidents whose coordinates fall just outside a boundary due to
-    // source-data imprecision. DISTINCT ON + ORDER BY ST_Distance picks
-    // the single nearest place per incident.
-    log::info!("Pass 2: nearest within {buffer_meters}m buffer...");
-    loop {
+    // Pass 2: Nearest within buffer, per state, using geometry cast
+    // Convert buffer from meters to approximate degrees (1 degree ≈ 111km)
+    let buffer_degrees = buffer_meters / 111_000.0;
+    log::info!("Pass 2: nearest within {buffer_meters}m buffer (~{buffer_degrees:.6} deg)...");
+
+    for state in &states {
         let updated = db
             .exec_raw_params(
-                "UPDATE crime_incidents i
-                 SET census_place_geoid = sub.geoid
-                 FROM (
-                     SELECT DISTINCT ON (i2.id) i2.id, p.geoid
-                     FROM crime_incidents i2
-                     JOIN census_places p
-                       ON ST_DWithin(p.boundary, i2.location, $1)
-                     WHERE i2.census_place_geoid IS NULL
-                       AND i2.has_coordinates = TRUE
-                     ORDER BY i2.id, ST_Distance(p.boundary, i2.location)
-                     LIMIT $2
-                 ) sub
+                "UPDATE crime_incidents i \
+                 SET census_place_geoid = sub.geoid \
+                 FROM ( \
+                     SELECT DISTINCT ON (i2.id) i2.id, p.geoid \
+                     FROM crime_incidents i2 \
+                     JOIN census_places p \
+                       ON p.state_abbr = i2.state \
+                      AND ST_DWithin(p.boundary::geometry, i2.location::geometry, $1) \
+                     WHERE i2.census_place_geoid IS NULL \
+                       AND i2.has_coordinates = TRUE \
+                       AND i2.state = $2 \
+                     ORDER BY i2.id, ST_Distance(p.boundary::geometry, i2.location::geometry) \
+                 ) sub \
                  WHERE i.id = sub.id",
                 &[
-                    DatabaseValue::Real64(buffer_meters),
-                    DatabaseValue::Int64(i64::from(batch_size)),
+                    DatabaseValue::Real64(buffer_degrees),
+                    DatabaseValue::String(state.clone()),
                 ],
             )
             .await?;
 
-        if updated == 0 {
-            break;
-        }
-
         total += updated;
-        log::info!("  buffer: {updated} incidents attributed ({total} total)");
+        if updated > 0 {
+            log::info!("  {state}: {updated} incidents (buffer), {total} total");
+        }
         if let Some(ref p) = progress {
             p.inc(updated);
         }
     }
 
+    // Mark remaining unattributed rows as done for progress
     if let Some(ref p) = progress {
+        #[allow(clippy::cast_sign_loss)]
+        let remaining = (unattributed as u64).saturating_sub(total);
+        if remaining > 0 {
+            p.inc(remaining);
+        }
         p.finish(format!("Place attribution complete: {total} incidents"));
     }
 
@@ -694,62 +739,110 @@ pub async fn attribute_places(
 /// Assigns census tract GEOIDs to incidents that have coordinates but no
 /// `census_tract_geoid` yet.
 ///
+/// Performance optimizations:
+/// - Casts `geography` to `geometry` for planar `ST_Covers` (10–50× faster).
+/// - Batches by state so each spatial join only compares incidents against
+///   tracts in the same state.
+/// - Census tracts tile the US without overlap, so no `DISTINCT ON` is needed.
+///
 /// # Errors
 ///
 /// Returns [`DbError`] if the database operation fails.
+#[allow(clippy::too_many_lines)]
 pub async fn attribute_tracts(
     db: &dyn Database,
-    batch_size: u32,
+    _batch_size: u32,
     progress: Option<Arc<dyn ProgressCallback>>,
 ) -> Result<u64, DbError> {
     let mut total = 0u64;
 
+    // Boost work_mem for this session to allow efficient hash joins
+    db.exec_raw("SET work_mem = '256MB'").await?;
+
+    // Ensure partial index exists for fast lookup of unattributed rows
+    db.exec_raw(
+        "CREATE INDEX IF NOT EXISTS idx_incidents_unattr_tract \
+         ON crime_incidents (id) \
+         WHERE census_tract_geoid IS NULL AND has_coordinates = TRUE",
+    )
+    .await?;
+
     // Query unattributed count for progress reporting
-    if let Some(ref p) = progress {
+    let unattributed: i64 = {
         let rows = db
             .query_raw_params(
-                "SELECT COUNT(*) as cnt FROM crime_incidents WHERE census_tract_geoid IS NULL AND has_coordinates = TRUE",
+                "SELECT COUNT(*) as cnt FROM crime_incidents \
+                 WHERE census_tract_geoid IS NULL AND has_coordinates = TRUE",
                 &[],
             )
             .await?;
-        if let Some(row) = rows.first() {
-            let count: i64 = row.to_value("cnt").unwrap_or(0);
-            #[allow(clippy::cast_sign_loss)]
-            p.set_total(count as u64);
-        }
+        rows.first().map_or(0, |r| r.to_value("cnt").unwrap_or(0))
+    };
+
+    if let Some(ref p) = progress {
+        #[allow(clippy::cast_sign_loss)]
+        p.set_total(unattributed as u64);
     }
 
-    loop {
+    if unattributed == 0 {
+        if let Some(ref p) = progress {
+            p.finish("Tract attribution complete: 0 incidents (already done)".to_string());
+        }
+        return Ok(0);
+    }
+
+    // Get distinct states that have unattributed incidents
+    let state_rows = db
+        .query_raw_params(
+            "SELECT DISTINCT state FROM crime_incidents \
+             WHERE census_tract_geoid IS NULL AND has_coordinates = TRUE \
+             ORDER BY state",
+            &[],
+        )
+        .await?;
+
+    let states: Vec<String> = state_rows
+        .iter()
+        .filter_map(|r| {
+            let s: String = r.to_value("state").unwrap_or_default();
+            if s.is_empty() { None } else { Some(s) }
+        })
+        .collect();
+
+    log::info!(
+        "Bulk tract attribution (geometry cast + state batching) for ~{unattributed} incidents across {} states...",
+        states.len()
+    );
+
+    // Process each state separately — tracts don't overlap so no DISTINCT ON
+    for state in &states {
         let updated = db
             .exec_raw_params(
-                "UPDATE crime_incidents i
-                 SET census_tract_geoid = sub.geoid
-                 FROM (
-                     SELECT i2.id, ct.geoid
-                     FROM crime_incidents i2
-                     JOIN census_tracts ct
-                       ON ST_Covers(ct.boundary, i2.location)
-                     WHERE i2.census_tract_geoid IS NULL
-                       AND i2.has_coordinates = TRUE
-                     LIMIT $1
-                 ) sub
-                 WHERE i.id = sub.id",
-                &[DatabaseValue::Int64(i64::from(batch_size))],
+                "UPDATE crime_incidents i \
+                 SET census_tract_geoid = ct.geoid \
+                 FROM census_tracts ct \
+                 WHERE ct.state_abbr = i.state \
+                   AND ST_Covers(ct.boundary::geometry, i.location::geometry) \
+                   AND i.census_tract_geoid IS NULL \
+                   AND i.has_coordinates = TRUE \
+                   AND i.state = $1",
+                &[DatabaseValue::String(state.clone())],
             )
             .await?;
 
-        if updated == 0 {
-            break;
-        }
-
         total += updated;
-        log::info!("Attributed {updated} incidents to census tracts ({total} total)");
+        log::info!("  {state}: {updated} incidents attributed, {total} total");
         if let Some(ref p) = progress {
             p.inc(updated);
         }
     }
 
     if let Some(ref p) = progress {
+        #[allow(clippy::cast_sign_loss)]
+        let remaining = (unattributed as u64).saturating_sub(total);
+        if remaining > 0 {
+            p.inc(remaining);
+        }
         p.finish(format!("Tract attribution complete: {total} incidents"));
     }
 

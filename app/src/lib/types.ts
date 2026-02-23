@@ -102,6 +102,16 @@ export interface FilterState {
   datePreset: string | null;
   arrestMade: boolean | null;
   sources: number[];
+  /** Selected state FIPS codes. */
+  stateFips: string[];
+  /** Selected county GEOIDs. */
+  countyGeoids: string[];
+  /** Selected place GEOIDs. */
+  placeGeoids: string[];
+  /** Selected tract GEOIDs. */
+  tractGeoids: string[];
+  /** Selected neighborhood IDs (e.g. "nbhd-42"). */
+  neighborhoodIds: string[];
 }
 
 export const DEFAULT_FILTERS: FilterState = {
@@ -113,6 +123,11 @@ export const DEFAULT_FILTERS: FilterState = {
   datePreset: null,
   arrestMade: null,
   sources: [],
+  stateFips: [],
+  countyGeoids: [],
+  placeGeoids: [],
+  tractGeoids: [],
+  neighborhoodIds: [],
 };
 
 /** Severity color for the given 1-5 value. */

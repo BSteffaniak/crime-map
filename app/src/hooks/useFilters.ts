@@ -2,6 +2,18 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FilterState, CategoryId } from "@/lib/types";
 import { CRIME_CATEGORIES, DEFAULT_FILTERS } from "@/lib/types";
 
+/** Maps boundary type string to the corresponding FilterState key. */
+function boundaryFilterKey(type: string): keyof FilterState | null {
+  switch (type) {
+    case "state": return "stateFips";
+    case "county": return "countyGeoids";
+    case "place": return "placeGeoids";
+    case "tract": return "tractGeoids";
+    case "neighborhood": return "neighborhoodIds";
+    default: return null;
+  }
+}
+
 // -- URL serialization --
 
 function serializeFilters(filters: FilterState): string {
@@ -24,6 +36,23 @@ function serializeFilters(filters: FilterState): string {
   }
   if (filters.sources.length > 0) {
     params.set("sources", filters.sources.join(","));
+  }
+
+  // Boundary filters
+  if (filters.stateFips.length > 0) {
+    params.set("stateFips", filters.stateFips.join(","));
+  }
+  if (filters.countyGeoids.length > 0) {
+    params.set("countyGeoids", filters.countyGeoids.join(","));
+  }
+  if (filters.placeGeoids.length > 0) {
+    params.set("placeGeoids", filters.placeGeoids.join(","));
+  }
+  if (filters.tractGeoids.length > 0) {
+    params.set("tractGeoids", filters.tractGeoids.join(","));
+  }
+  if (filters.neighborhoodIds.length > 0) {
+    params.set("neighborhoodIds", filters.neighborhoodIds.join(","));
   }
 
   return params.toString();
@@ -86,6 +115,22 @@ function parseFiltersFromUrl(): FilterState {
       .map((s) => parseInt(s, 10))
       .filter((n) => !isNaN(n));
   }
+
+  // Boundary filters
+  const stateFips = params.get("stateFips");
+  if (stateFips) filters.stateFips = stateFips.split(",").filter(Boolean);
+
+  const countyGeoids = params.get("countyGeoids");
+  if (countyGeoids) filters.countyGeoids = countyGeoids.split(",").filter(Boolean);
+
+  const placeGeoids = params.get("placeGeoids");
+  if (placeGeoids) filters.placeGeoids = placeGeoids.split(",").filter(Boolean);
+
+  const tractGeoids = params.get("tractGeoids");
+  if (tractGeoids) filters.tractGeoids = tractGeoids.split(",").filter(Boolean);
+
+  const neighborhoodIds = params.get("neighborhoodIds");
+  if (neighborhoodIds) filters.neighborhoodIds = neighborhoodIds.split(",").filter(Boolean);
 
   return filters;
 }
@@ -218,6 +263,29 @@ export function useFilters() {
     setFilters((prev) => ({ ...prev, sources: sourceIds }));
   }, []);
 
+  /** Toggle a boundary GEOID in the corresponding filter array. */
+  const toggleBoundary = useCallback((type: string, geoid: string) => {
+    setFilters((prev) => {
+      const key = boundaryFilterKey(type);
+      if (!key) return prev;
+      const arr = prev[key] as string[];
+      const exists = arr.includes(geoid);
+      return {
+        ...prev,
+        [key]: exists ? arr.filter((g) => g !== geoid) : [...arr, geoid],
+      };
+    });
+  }, []);
+
+  /** Clear all boundary filters of a given type. */
+  const clearBoundaryFilter = useCallback((type: string) => {
+    setFilters((prev) => {
+      const key = boundaryFilterKey(type);
+      if (!key) return prev;
+      return { ...prev, [key]: [] };
+    });
+  }, []);
+
   const clearAll = useCallback(() => {
     setFilters(DEFAULT_FILTERS);
   }, []);
@@ -230,6 +298,12 @@ export function useFilters() {
     if (filters.datePreset) count++;
     if (filters.arrestMade !== null) count++;
     if (filters.sources.length > 0) count++;
+    // Boundary filters — each type with selections counts as one filter
+    if (filters.stateFips.length > 0) count++;
+    if (filters.countyGeoids.length > 0) count++;
+    if (filters.placeGeoids.length > 0) count++;
+    if (filters.tractGeoids.length > 0) count++;
+    if (filters.neighborhoodIds.length > 0) count++;
     return count;
   }, [filters]);
 
@@ -242,6 +316,8 @@ export function useFilters() {
     setArrestFilter,
     toggleSource,
     setSources,
+    toggleBoundary,
+    clearBoundaryFilter,
     clearAll,
     activeFilterCount,
   };

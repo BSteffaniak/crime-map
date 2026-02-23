@@ -25,6 +25,8 @@ import { severityColor, type FilterState } from "@/lib/types";
 import { buildIncidentFilter } from "@/lib/map-filters/expressions";
 import type { HexbinEntry } from "@/lib/hexbins/types";
 import BoundaryLayers from "@/components/map/BoundaryLayers";
+import { LAYER_TO_TYPE } from "@/components/map/BoundaryLayers";
+import type { AllBoundaryCounts, BoundaryType } from "@/hooks/useBoundaryCounts";
 
 interface CrimeMapProps {
   filters: FilterState;
@@ -32,6 +34,9 @@ interface CrimeMapProps {
   zoom: number;
   mapTheme: MapTheme;
   layers: Record<string, boolean>;
+  allBoundaryCounts: AllBoundaryCounts;
+  visibleBoundaryTypes: BoundaryType[];
+  onToggleBoundary?: (type: string, geoid: string) => void;
   onBoundsChange?: (bounds: maplibregl.LngLatBounds, zoom: number, options: { settled: boolean }) => void;
 }
 
@@ -502,6 +507,15 @@ function formatPopulation(pop: number): string {
   return String(pop);
 }
 
+/** Human-readable label for each boundary source layer. */
+const BOUNDARY_TYPE_LABELS: Record<string, string> = {
+  states: "State",
+  counties: "County",
+  places: "City / Place",
+  tracts: "Census Tract",
+  neighborhoods: "Neighborhood",
+};
+
 /** Build the HTML for the unified hover tooltip from features at the cursor. */
 function buildHoverHtml(
   hexFeature: maplibregl.GeoJSONFeature | undefined,
@@ -518,25 +532,49 @@ function buildHoverHtml(
     );
   }
 
-  // Boundary names (already in specificity order)
+  // Boundary sections (already in specificity order)
   if (boundaryFeatures.length > 0) {
-    // Add separator if we also have hex data
-    if (parts.length > 0) {
-      parts.push(
-        `<div class="my-1 border-t border-gray-200 dark:border-gray-700"></div>`,
-      );
-    }
     for (const feat of boundaryFeatures) {
       const props = feat.properties;
       if (!props) continue;
+
+      // Divider between sections (hex→boundary or boundary→boundary)
+      if (parts.length > 0) {
+        parts.push(
+          `<div class="my-1.5 border-t border-gray-200 dark:border-gray-700"></div>`,
+        );
+      }
+
+      // Type label
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const sourceLayer = (feat as any).sourceLayer as string | undefined;
+      const typeLabel = BOUNDARY_TYPE_LABELS[sourceLayer ?? ""] ?? "Boundary";
+      parts.push(
+        `<div class="text-[9px] uppercase tracking-wider text-gray-400 dark:text-gray-500">${typeLabel}</div>`,
+      );
+
+      // Name
       const name = (props.name || props.full_name || "Unknown") as string;
       const extra = props.state ? `, ${props.state}` : "";
-      const population = props.population
-        ? ` &middot; Pop. ${formatPopulation(Number(props.population))}`
-        : "";
       parts.push(
-        `<div class="text-gray-600 dark:text-gray-400">${name}${extra}${population}</div>`,
+        `<div class="font-semibold text-gray-800 dark:text-gray-200">${name}${extra}</div>`,
       );
+
+      // Stats line: population · incident count
+      const statParts: string[] = [];
+      if (props.population) {
+        statParts.push(`Pop. ${formatPopulation(Number(props.population))}`);
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const featureCount = (feat as any).state?.count;
+      if (featureCount != null && featureCount > 0) {
+        statParts.push(`${formatCount(featureCount)} incidents`);
+      }
+      if (statParts.length > 0) {
+        parts.push(
+          `<div class="text-gray-500 dark:text-gray-400">${statParts.join(" · ")}</div>`,
+        );
+      }
     }
   }
 
@@ -544,7 +582,7 @@ function buildHoverHtml(
 }
 
 /** Click + hover interactions for hexbin and incident point layers. */
-function MapInteractions({ layers }: { layers: Record<string, boolean> }) {
+function MapInteractions({ layers, onToggleBoundary }: { layers: Record<string, boolean>; onToggleBoundary?: (type: string, geoid: string) => void }) {
   const { map, isLoaded } = useMap();
   const popupRef = useRef<maplibregl.Popup | null>(null);
   const popupOpenRef = useRef(false);
@@ -595,7 +633,7 @@ function MapInteractions({ layers }: { layers: Record<string, boolean> }) {
           `<div class="text-sm bg-white dark:bg-gray-900 rounded-lg shadow-lg p-3 border border-border">
             <div class="font-semibold">${props.subcategory ?? "Unknown"}</div>
             <div class="text-gray-600 dark:text-gray-400">${props.category ?? ""}</div>
-            ${props.desc ? `<div class="text-gray-500 dark:text-gray-400 text-xs mt-1">${props.desc}</div>` : ""}
+            ${props.desc ? `<div class="text-gray-500 dark:text-gray-400 text-xs mt-1 whitespace-pre-wrap">${props.desc}</div>` : ""}
             <div class="text-gray-500 dark:text-gray-400 text-xs mt-1">${props.date ?? ""}</div>
             ${props.addr ? `<div class="text-gray-500 dark:text-gray-400 text-xs">${props.addr}</div>` : ""}
             <div class="text-gray-500 dark:text-gray-400 text-xs">${props.city ?? ""}, ${props.state ?? ""}</div>
@@ -716,8 +754,29 @@ function MapInteractions({ layers }: { layers: Record<string, boolean> }) {
       map.on("mouseleave", "incidents-points", onLayerLeave);
     }
 
-    // Boundary fill layers — all share the unified handler
+    // Boundary fill layers — click to filter and unified hover
+    const onBoundaryClick = (e: maplibregl.MapLayerMouseEvent) => {
+      if (!onToggleBoundary || !e.features || e.features.length === 0) return;
+      const feat = e.features[0];
+      if (!feat.properties) return;
+
+      // Determine which layer was clicked
+      const layerId = feat.layer?.id?.replace("-fill", "") ?? "";
+      const boundaryType = LAYER_TO_TYPE[layerId];
+      if (!boundaryType) return;
+
+      // Get the geoid from the feature
+      const geoid =
+        (feat.properties.geoid as string) ||
+        (feat.properties.fips as string) ||
+        (feat.properties.name as string);
+      if (!geoid) return;
+
+      onToggleBoundary(boundaryType, geoid);
+    };
+
     for (const layerId of activeBoundaryFillIds) {
+      map.on("click", layerId, onBoundaryClick);
       map.on("mousemove", layerId, onHoverMouseMove);
       map.on("mouseleave", layerId, onHoverMouseLeave);
     }
@@ -733,6 +792,7 @@ function MapInteractions({ layers }: { layers: Record<string, boolean> }) {
         map.off("mouseenter", "incidents-points", onLayerEnter);
         map.off("mouseleave", "incidents-points", onLayerLeave);
         for (const layerId of activeBoundaryFillIds) {
+          map.off("click", layerId, onBoundaryClick);
           map.off("mousemove", layerId, onHoverMouseMove);
           map.off("mouseleave", layerId, onHoverMouseLeave);
         }
@@ -836,7 +896,7 @@ function BoundsTracker({
 // Main CrimeMap component
 // ---------------------------------------------------------------------------
 
-export default function CrimeMap({ filters, hexbins, zoom, mapTheme, layers, onBoundsChange }: CrimeMapProps) {
+export default function CrimeMap({ filters, hexbins, zoom, mapTheme, layers, allBoundaryCounts, visibleBoundaryTypes, onToggleBoundary, onBoundsChange }: CrimeMapProps) {
   const uiTheme = baseUiTheme(mapTheme);
   // Memoize the style so the Map component gets a stable reference per theme
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -865,8 +925,8 @@ export default function CrimeMap({ filters, hexbins, zoom, mapTheme, layers, onB
       <HeatmapLayer filters={filters} uiTheme={uiTheme} visible={!!layers.heatmap} />
       <HexbinLayer hexbins={hexbins} zoom={zoom} uiTheme={uiTheme} visible={!!layers.hexbins} />
       <IncidentPointsLayer filters={filters} uiTheme={uiTheme} visible={!!layers.points} />
-      <BoundaryLayers uiTheme={uiTheme} layers={layers} />
-      <MapInteractions layers={layers} />
+      <BoundaryLayers uiTheme={uiTheme} layers={layers} allBoundaryCounts={allBoundaryCounts} visibleBoundaryTypes={visibleBoundaryTypes} filters={filters} />
+      <MapInteractions layers={layers} onToggleBoundary={onToggleBoundary} />
       <BoundsTracker onBoundsChange={handleBoundsChange} />
     </Map>
   );

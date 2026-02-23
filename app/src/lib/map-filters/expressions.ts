@@ -63,6 +63,23 @@ export function buildIncidentFilter(
     clauses.push(["in", ["get", "src"], ["literal", filters.sources]]);
   }
 
+  // Boundary GEOID filters
+  if (filters.stateFips.length > 0) {
+    clauses.push(["in", ["get", "state_fips"], ["literal", filters.stateFips]]);
+  }
+  if (filters.countyGeoids.length > 0) {
+    clauses.push(["in", ["get", "county_geoid"], ["literal", filters.countyGeoids]]);
+  }
+  if (filters.placeGeoids.length > 0) {
+    clauses.push(["in", ["get", "place_geoid"], ["literal", filters.placeGeoids]]);
+  }
+  if (filters.tractGeoids.length > 0) {
+    clauses.push(["in", ["get", "tract_geoid"], ["literal", filters.tractGeoids]]);
+  }
+  if (filters.neighborhoodIds.length > 0) {
+    clauses.push(["in", ["get", "neighborhood_id"], ["literal", filters.neighborhoodIds]]);
+  }
+
   if (clauses.length === 0) return null;
   if (clauses.length === 1) return clauses[0];
   return ["all", ...clauses] as FilterSpecification;

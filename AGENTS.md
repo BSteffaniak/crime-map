@@ -14,6 +14,40 @@
 - **Generate tiles**: `cargo generate all`
 - **Run server**: `cargo server`
 
+## Architecture
+
+### Runtime vs. Ingestion
+
+**PostgreSQL (PostGIS) is used ONLY during ingestion and generation.**
+The production server runs exclusively on pre-generated SQLite, DuckDB, and
+PMTiles files. No runtime API endpoint may depend on a PostgreSQL connection.
+
+| Database | Role | When Used |
+|----------|------|-----------|
+| PostGIS (port 5440) | Source of truth; spatial attribution, geocoding, boundary ingestion | `cargo ingest`, `cargo generate` |
+| SQLite | Sidebar incidents (`incidents.db`), conversations (`conversations.db`), boundary search (`boundaries.db`) | Runtime server |
+| DuckDB | Aggregated counts (`counts.duckdb`), hexbin analytics (`h3.duckdb`) | Runtime server |
+| PMTiles | Vector tiles for map layers (`incidents.pmtiles`, `boundaries.pmtiles`) | Runtime server (served as static files) |
+
+When adding new server endpoints or features:
+- **Never** query PostgreSQL from the server at runtime
+- Pre-generate any data the server needs into SQLite, DuckDB, or static files
+  during `cargo generate`
+- Boundary GEOIDs (`state_fips`, `county_geoid`, `place_geoid`, `tract_geoid`,
+  `neighborhood_id`) are derived from PostGIS at generation time and stored in
+  DuckDB/SQLite so boundary filtering works without spatial joins at runtime
+
+### Migration Roadmap: Remaining PostgreSQL Dependencies
+
+Three server endpoints still require PostgreSQL when `DATABASE_URL` is set
+(they return `503` when it is not). These should be migrated:
+
+| Endpoint | Current State | Migration Approach |
+|----------|--------------|-------------------|
+| `GET /api/incidents` | Queries PostGIS with `ST_MakeEnvelope` | Port to sidebar SQLite (`incidents.db` already has coordinates + R-tree index) |
+| `GET /api/sources` | `SELECT * FROM crime_sources` | Pre-generate source metadata into `metadata.json` or a SQLite table during generation |
+| `POST /api/ai/ask` | 7 analytics tools query PostGIS | **Temporary exception** -- port all tools to DuckDB (none use spatial functions, only standard SQL aggregations) |
+
 ## Code Style Guidelines
 
 ### Rust Patterns
