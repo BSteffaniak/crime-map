@@ -14,7 +14,10 @@ crime_map_database_models = { workspace = true }
 crime_map_source = { workspace = true }
 
 switchy_database = { workspace = true, features = ["postgres-raw", "schema"] }
-switchy_database_connection = { workspace = true, features = ["postgres-raw"] }
+switchy_database_connection = { workspace = true, features = [
+  "postgres-raw",
+  "postgres-native-tls",
+] }
 switchy_schema = { workspace = true, features = ["embedded"] }
 moosicbox_json_utils = { workspace = true, features = ["database"] }
 

@@ -566,6 +566,28 @@ pub async fn get_all_category_ids(
     Ok(map)
 }
 
+/// Builds an optional `AND source_id IN (...)` SQL fragment for filtering
+/// attribution queries to a specific set of sources.
+///
+/// Returns an empty string when `source_ids` is `None` (no filter).
+fn build_source_filter(source_ids: Option<&[i32]>) -> String {
+    match source_ids {
+        Some(ids) if !ids.is_empty() => {
+            use std::fmt::Write;
+            let mut clause = String::from(" AND i.source_id IN (");
+            for (i, id) in ids.iter().enumerate() {
+                if i > 0 {
+                    clause.push(',');
+                }
+                write!(clause, "{id}").unwrap();
+            }
+            clause.push(')');
+            clause
+        }
+        _ => String::new(),
+    }
+}
+
 /// Assigns census place GEOIDs to incidents that have coordinates but no
 /// `census_place_geoid` yet.
 ///
@@ -592,9 +614,13 @@ pub async fn attribute_places(
     db: &dyn Database,
     buffer_meters: f64,
     _batch_size: u32,
+    source_ids: Option<&[i32]>,
     progress: Option<Arc<dyn ProgressCallback>>,
 ) -> Result<u64, DbError> {
     let mut total = 0u64;
+
+    // Build optional source filter clause
+    let source_filter = build_source_filter(source_ids);
 
     // Boost work_mem for this session to allow efficient hash joins
     db.exec_raw("SET work_mem = '256MB'").await?;
@@ -611,8 +637,10 @@ pub async fn attribute_places(
     let unattributed: i64 = {
         let rows = db
             .query_raw_params(
-                "SELECT COUNT(*) as cnt FROM crime_incidents \
-                 WHERE census_place_geoid IS NULL AND has_coordinates = TRUE",
+                &format!(
+                    "SELECT COUNT(*) as cnt FROM crime_incidents \
+                     WHERE census_place_geoid IS NULL AND has_coordinates = TRUE{source_filter}"
+                ),
                 &[],
             )
             .await?;
@@ -634,9 +662,11 @@ pub async fn attribute_places(
     // Get distinct states that have unattributed incidents
     let state_rows = db
         .query_raw_params(
-            "SELECT DISTINCT state FROM crime_incidents \
-             WHERE census_place_geoid IS NULL AND has_coordinates = TRUE \
-             ORDER BY state",
+            &format!(
+                "SELECT DISTINCT state FROM crime_incidents \
+                 WHERE census_place_geoid IS NULL AND has_coordinates = TRUE{source_filter} \
+                 ORDER BY state"
+            ),
             &[],
         )
         .await?;
@@ -658,20 +688,22 @@ pub async fn attribute_places(
     for state in &states {
         let updated = db
             .exec_raw_params(
-                "UPDATE crime_incidents i \
-                 SET census_place_geoid = sub.geoid \
-                 FROM ( \
-                     SELECT DISTINCT ON (i2.id) i2.id, p.geoid \
-                     FROM crime_incidents i2 \
-                     JOIN census_places p \
-                       ON p.state_abbr = i2.state \
-                      AND ST_Covers(p.boundary::geometry, i2.location::geometry) \
-                     WHERE i2.census_place_geoid IS NULL \
-                       AND i2.has_coordinates = TRUE \
-                       AND i2.state = $1 \
-                     ORDER BY i2.id, ST_Area(p.boundary::geometry) \
-                 ) sub \
-                 WHERE i.id = sub.id",
+                &format!(
+                    "UPDATE crime_incidents i \
+                     SET census_place_geoid = sub.geoid \
+                     FROM ( \
+                         SELECT DISTINCT ON (i2.id) i2.id, p.geoid \
+                         FROM crime_incidents i2 \
+                         JOIN census_places p \
+                           ON p.state_abbr = i2.state \
+                          AND ST_Covers(p.boundary::geometry, i2.location::geometry) \
+                         WHERE i2.census_place_geoid IS NULL \
+                           AND i2.has_coordinates = TRUE \
+                           AND i2.state = $1{source_filter} \
+                         ORDER BY i2.id, ST_Area(p.boundary::geometry) \
+                     ) sub \
+                     WHERE i.id = sub.id"
+                ),
                 &[DatabaseValue::String(state.clone())],
             )
             .await?;
@@ -693,20 +725,22 @@ pub async fn attribute_places(
     for state in &states {
         let updated = db
             .exec_raw_params(
-                "UPDATE crime_incidents i \
-                 SET census_place_geoid = sub.geoid \
-                 FROM ( \
-                     SELECT DISTINCT ON (i2.id) i2.id, p.geoid \
-                     FROM crime_incidents i2 \
-                     JOIN census_places p \
-                       ON p.state_abbr = i2.state \
-                      AND ST_DWithin(p.boundary::geometry, i2.location::geometry, $1) \
-                     WHERE i2.census_place_geoid IS NULL \
-                       AND i2.has_coordinates = TRUE \
-                       AND i2.state = $2 \
-                     ORDER BY i2.id, ST_Distance(p.boundary::geometry, i2.location::geometry) \
-                 ) sub \
-                 WHERE i.id = sub.id",
+                &format!(
+                    "UPDATE crime_incidents i \
+                     SET census_place_geoid = sub.geoid \
+                     FROM ( \
+                         SELECT DISTINCT ON (i2.id) i2.id, p.geoid \
+                         FROM crime_incidents i2 \
+                         JOIN census_places p \
+                           ON p.state_abbr = i2.state \
+                          AND ST_DWithin(p.boundary::geometry, i2.location::geometry, $1) \
+                         WHERE i2.census_place_geoid IS NULL \
+                           AND i2.has_coordinates = TRUE \
+                           AND i2.state = $2{source_filter} \
+                         ORDER BY i2.id, ST_Distance(p.boundary::geometry, i2.location::geometry) \
+                     ) sub \
+                     WHERE i.id = sub.id"
+                ),
                 &[
                     DatabaseValue::Real64(buffer_degrees),
                     DatabaseValue::String(state.clone()),
@@ -752,9 +786,13 @@ pub async fn attribute_places(
 pub async fn attribute_tracts(
     db: &dyn Database,
     _batch_size: u32,
+    source_ids: Option<&[i32]>,
     progress: Option<Arc<dyn ProgressCallback>>,
 ) -> Result<u64, DbError> {
     let mut total = 0u64;
+
+    // Build optional source filter clause
+    let source_filter = build_source_filter(source_ids);
 
     // Boost work_mem for this session to allow efficient hash joins
     db.exec_raw("SET work_mem = '256MB'").await?;
@@ -771,8 +809,10 @@ pub async fn attribute_tracts(
     let unattributed: i64 = {
         let rows = db
             .query_raw_params(
-                "SELECT COUNT(*) as cnt FROM crime_incidents \
-                 WHERE census_tract_geoid IS NULL AND has_coordinates = TRUE",
+                &format!(
+                    "SELECT COUNT(*) as cnt FROM crime_incidents \
+                     WHERE census_tract_geoid IS NULL AND has_coordinates = TRUE{source_filter}"
+                ),
                 &[],
             )
             .await?;
@@ -794,9 +834,11 @@ pub async fn attribute_tracts(
     // Get distinct states that have unattributed incidents
     let state_rows = db
         .query_raw_params(
-            "SELECT DISTINCT state FROM crime_incidents \
-             WHERE census_tract_geoid IS NULL AND has_coordinates = TRUE \
-             ORDER BY state",
+            &format!(
+                "SELECT DISTINCT state FROM crime_incidents \
+                 WHERE census_tract_geoid IS NULL AND has_coordinates = TRUE{source_filter} \
+                 ORDER BY state"
+            ),
             &[],
         )
         .await?;
@@ -818,14 +860,16 @@ pub async fn attribute_tracts(
     for state in &states {
         let updated = db
             .exec_raw_params(
-                "UPDATE crime_incidents i \
-                 SET census_tract_geoid = ct.geoid \
-                 FROM census_tracts ct \
-                 WHERE ct.state_abbr = i.state \
-                   AND ST_Covers(ct.boundary::geometry, i.location::geometry) \
-                   AND i.census_tract_geoid IS NULL \
-                   AND i.has_coordinates = TRUE \
-                   AND i.state = $1",
+                &format!(
+                    "UPDATE crime_incidents i \
+                     SET census_tract_geoid = ct.geoid \
+                     FROM census_tracts ct \
+                     WHERE ct.state_abbr = i.state \
+                       AND ST_Covers(ct.boundary::geometry, i.location::geometry) \
+                       AND i.census_tract_geoid IS NULL \
+                       AND i.has_coordinates = TRUE \
+                       AND i.state = $1{source_filter}"
+                ),
                 &[DatabaseValue::String(state.clone())],
             )
             .await?;

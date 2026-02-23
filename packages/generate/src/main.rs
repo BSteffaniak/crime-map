@@ -8,6 +8,8 @@
 //! `crime_map_generate`. When invoked without a subcommand, launches the
 //! interactive menu.
 
+use std::path::PathBuf;
+
 use clap::{Args, Parser, Subcommand};
 use crime_map_database::db;
 use crime_map_generate::{
@@ -35,6 +37,17 @@ struct CliGenerateArgs {
     #[arg(long)]
     sources: Option<String>,
 
+    /// Comma-separated state FIPS codes to include (e.g., "24,11" for MD+DC).
+    /// Sources whose `state` field matches the given FIPS codes will be
+    /// included. Combined with `--sources` via union if both are provided.
+    #[arg(long)]
+    states: Option<String>,
+
+    /// Output directory for generated files. Defaults to `data/generated/`
+    /// in the workspace root.
+    #[arg(long)]
+    output_dir: Option<PathBuf>,
+
     /// Keep the intermediate `.geojsonseq` file after generation instead of
     /// deleting it.
     #[arg(long)]
@@ -45,11 +58,12 @@ struct CliGenerateArgs {
     force: bool,
 }
 
-impl From<CliGenerateArgs> for GenerateArgs {
-    fn from(cli: CliGenerateArgs) -> Self {
+impl From<&CliGenerateArgs> for GenerateArgs {
+    fn from(cli: &CliGenerateArgs) -> Self {
         Self {
             limit: cli.limit,
-            sources: cli.sources,
+            sources: cli.sources.clone(),
+            states: cli.states.clone(),
             keep_intermediate: cli.keep_intermediate,
             force: cli.force,
         }
@@ -88,6 +102,23 @@ enum Commands {
         #[command(flatten)]
         args: CliGenerateArgs,
     },
+    /// Merge partitioned artifacts from multiple directories into unified output files
+    Merge {
+        /// Comma-separated list of partition directories to merge.
+        #[arg(long)]
+        partition_dirs: String,
+
+        /// Directory containing pre-generated boundary artifacts
+        /// (`boundaries.pmtiles`, `boundaries.db`). If not provided,
+        /// boundaries are skipped in the merge output.
+        #[arg(long)]
+        boundaries_dir: Option<PathBuf>,
+
+        /// Output directory for merged files. Defaults to `data/generated/`
+        /// in the workspace root.
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -99,90 +130,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return crime_map_generate::interactive::run().await;
     };
 
-    let db = db::connect_from_env().await?;
-    let dir = output_dir();
-    std::fs::create_dir_all(&dir)?;
-
     match command {
-        Commands::Pmtiles { args } => {
-            let args = GenerateArgs::from(args);
-            let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
-            run_with_cache(
-                db.as_ref(),
-                &args,
-                &source_ids,
-                &dir,
-                &[OUTPUT_INCIDENTS_PMTILES],
-                None,
-            )
-            .await?;
+        Commands::Merge {
+            partition_dirs,
+            boundaries_dir,
+            output_dir: out_dir,
+        } => {
+            let dirs: Vec<PathBuf> = partition_dirs
+                .split(',')
+                .map(|s| PathBuf::from(s.trim()))
+                .collect();
+            let out = out_dir.unwrap_or_else(output_dir);
+            std::fs::create_dir_all(&out)?;
+            crime_map_generate::merge::run(&dirs, boundaries_dir.as_deref(), &out).await?;
         }
-        Commands::Sidebar { args } => {
-            let args = GenerateArgs::from(args);
-            let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
-            run_with_cache(
-                db.as_ref(),
-                &args,
-                &source_ids,
-                &dir,
-                &[OUTPUT_INCIDENTS_DB],
-                None,
-            )
-            .await?;
-        }
-        Commands::CountDb { args } => {
-            let args = GenerateArgs::from(args);
-            let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
-            run_with_cache(
-                db.as_ref(),
-                &args,
-                &source_ids,
-                &dir,
-                &[OUTPUT_COUNT_DB],
-                None,
-            )
-            .await?;
-        }
-        Commands::H3Db { args } => {
-            let args = GenerateArgs::from(args);
-            let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
-            run_with_cache(db.as_ref(), &args, &source_ids, &dir, &[OUTPUT_H3_DB], None).await?;
-        }
-        Commands::Boundaries { args } => {
-            let args = GenerateArgs::from(args);
-            let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
-            run_with_cache(
-                db.as_ref(),
-                &args,
-                &source_ids,
-                &dir,
-                &[OUTPUT_BOUNDARIES_PMTILES, OUTPUT_BOUNDARIES_DB],
-                None,
-            )
-            .await?;
-        }
-        Commands::All { args } => {
-            let args = GenerateArgs::from(args);
-            let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
-            run_with_cache(
-                db.as_ref(),
-                &args,
-                &source_ids,
-                &dir,
-                &[
-                    OUTPUT_INCIDENTS_PMTILES,
-                    OUTPUT_INCIDENTS_DB,
-                    OUTPUT_COUNT_DB,
-                    OUTPUT_H3_DB,
-                    OUTPUT_METADATA,
-                    OUTPUT_BOUNDARIES_PMTILES,
-                    OUTPUT_BOUNDARIES_DB,
-                ],
-                None,
-            )
-            .await?;
+        cmd => {
+            let db = db::connect_from_env().await?;
+            run_generate_command(cmd, db.as_ref()).await?;
         }
     }
+
+    Ok(())
+}
+
+async fn run_generate_command(
+    command: Commands,
+    db: &dyn switchy_database::Database,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (cli_args, outputs): (&CliGenerateArgs, &[&str]) = match &command {
+        Commands::Pmtiles { args } => (args, &[OUTPUT_INCIDENTS_PMTILES]),
+        Commands::Sidebar { args } => (args, &[OUTPUT_INCIDENTS_DB]),
+        Commands::CountDb { args } => (args, &[OUTPUT_COUNT_DB]),
+        Commands::H3Db { args } => (args, &[OUTPUT_H3_DB]),
+        Commands::Boundaries { args } => (args, &[OUTPUT_BOUNDARIES_PMTILES, OUTPUT_BOUNDARIES_DB]),
+        Commands::All { args } => (
+            args,
+            &[
+                OUTPUT_INCIDENTS_PMTILES,
+                OUTPUT_INCIDENTS_DB,
+                OUTPUT_COUNT_DB,
+                OUTPUT_H3_DB,
+                OUTPUT_METADATA,
+                OUTPUT_BOUNDARIES_PMTILES,
+                OUTPUT_BOUNDARIES_DB,
+            ][..],
+        ),
+        Commands::Merge { .. } => unreachable!("Merge handled separately"),
+    };
+
+    let dir = cli_args.output_dir.clone().unwrap_or_else(output_dir);
+    std::fs::create_dir_all(&dir)?;
+
+    let args = GenerateArgs::from(cli_args);
+    let source_ids = resolve_source_ids(db, &args).await?;
+    run_with_cache(db, &args, &source_ids, &dir, outputs, None).await?;
 
     Ok(())
 }

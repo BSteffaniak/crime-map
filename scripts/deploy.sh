@@ -61,6 +61,7 @@ command_data() {
 
     local files=(
         "incidents.db"
+        "boundaries.db"
         "counts.duckdb"
         "h3.duckdb"
         "metadata.json"

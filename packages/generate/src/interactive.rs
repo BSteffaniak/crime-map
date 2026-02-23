@@ -115,6 +115,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = GenerateArgs {
         limit,
         sources,
+        states: None,
         keep_intermediate,
         force,
     };

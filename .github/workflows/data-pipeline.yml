@@ -1,0 +1,306 @@
+name: Data Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      partitions:
+        description: "Comma-separated partition names to run (empty = all)"
+        required: false
+        type: string
+        default: ""
+      limit:
+        description: "Max records per source (0 = unlimited)"
+        required: false
+        type: string
+        default: "0"
+      force:
+        description: "Force full re-sync and regeneration"
+        required: false
+        type: boolean
+        default: false
+      max_parallel:
+        description: "Maximum number of concurrent partition jobs"
+        required: false
+        type: number
+        default: 20
+
+concurrency:
+  group: data-pipeline
+  cancel-in-progress: false
+
+env:
+  RUST_LOG: crime_map=debug
+
+jobs:
+  # ── Step 1: Discover sources and compute partition matrix ───────────
+  setup:
+    name: Compute Partitions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.partitions.outputs.matrix }}
+      partition_count: ${{ steps.partitions.outputs.count }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute partition matrix
+        id: partitions
+        run: |
+          # Discover all source TOML files
+          SOURCE_DIR="packages/source/sources"
+          ALL_SOURCES=$(ls "$SOURCE_DIR"/*.toml 2>/dev/null | xargs -I{} basename {} .toml | sort)
+
+          # Load partition overrides if they exist
+          OVERRIDES_FILE=".github/partition-overrides.json"
+          GROUPED_SOURCES=""
+          MATRIX_ENTRIES="[]"
+
+          if [ -f "$OVERRIDES_FILE" ]; then
+            echo "Loading partition overrides from $OVERRIDES_FILE"
+            # Extract grouped sources and build matrix entries for groups
+            GROUPED_SOURCES=$(jq -r '.groups | to_entries[] | .value[]' "$OVERRIDES_FILE" 2>/dev/null | sort)
+            MATRIX_ENTRIES=$(jq -c '[.groups | to_entries[] | {name: .key, sources: (.value | join(","))}]' "$OVERRIDES_FILE" 2>/dev/null || echo "[]")
+          fi
+
+          # Add solo entries for sources not in any group
+          SOLO_ENTRIES="[]"
+          for source in $ALL_SOURCES; do
+            if ! echo "$GROUPED_SOURCES" | grep -qx "$source"; then
+              SOLO_ENTRIES=$(echo "$SOLO_ENTRIES" | jq -c ". + [{\"name\": \"$source\", \"sources\": \"$source\"}]")
+            fi
+          done
+
+          # Merge grouped + solo entries
+          FULL_MATRIX=$(echo "$MATRIX_ENTRIES" "$SOLO_ENTRIES" | jq -sc '.[0] + .[1]')
+
+          # Apply partition filter if specified
+          FILTER="${{ inputs.partitions }}"
+          if [ -n "$FILTER" ]; then
+            IFS=',' read -ra FILTER_NAMES <<< "$FILTER"
+            FILTER_JSON=$(printf '%s\n' "${FILTER_NAMES[@]}" | jq -R . | jq -sc .)
+            FULL_MATRIX=$(echo "$FULL_MATRIX" | jq -c --argjson filter "$FILTER_JSON" '[.[] | select(.name as $n | $filter | index($n))]')
+          fi
+
+          COUNT=$(echo "$FULL_MATRIX" | jq 'length')
+          echo "Computed $COUNT partition(s)"
+          echo "$FULL_MATRIX" | jq .
+
+          # Set outputs
+          echo "matrix={\"include\":$(echo "$FULL_MATRIX" | jq -c .)}" >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
+  # ── Step 2: Ingest census boundaries (shared data) ─────────────────
+  boundaries:
+    name: Ingest Boundaries
+    runs-on: ubuntu-latest
+    needs: setup
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract DB hostname
+        id: db
+        run: |
+          HOST=$(echo "${{ secrets.DATABASE_URL }}" | sed 's|.*@||;s|/.*||;s|:.*||')
+          echo "host=$HOST" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pipeline tools
+        uses: ./.github/actions/setup-pipeline
+        with:
+          db-host: ${{ steps.db.outputs.host }}
+
+      - name: Keepalive for Neon
+        run: |
+          # Periodic query to prevent Neon scale-to-zero during pipeline
+          (while true; do
+            psql "${{ secrets.DATABASE_URL }}" -c "SELECT 1" > /dev/null 2>&1 || true
+            sleep 120
+          done) &
+          echo "KEEPALIVE_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Run migrations
+        run: cargo ingest migrate
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Ingest state boundaries
+        run: cargo ingest states
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Ingest county boundaries
+        run: cargo ingest counties
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Ingest place boundaries
+        run: cargo ingest places
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Ingest tract boundaries
+        run: cargo ingest tracts
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Ingest neighborhoods
+        run: cargo ingest neighborhoods
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Generate boundary artifacts
+        run: |
+          mkdir -p data/boundaries
+          cargo generate boundaries --output-dir data/boundaries --force
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Upload boundary artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: boundaries
+          path: |
+            data/boundaries/boundaries.pmtiles
+            data/boundaries/boundaries.db
+          retention-days: 7
+
+      - name: Stop keepalive
+        if: always()
+        run: kill $KEEPALIVE_PID 2>/dev/null || true
+
+  # ── Step 3: Per-partition ingest + generate ─────────────────────────
+  partition:
+    name: "${{ matrix.name }}"
+    runs-on: ubuntu-latest
+    needs: [setup, boundaries]
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(inputs.max_parallel || '20') }}
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract DB hostname
+        id: db
+        run: |
+          HOST=$(echo "${{ secrets.DATABASE_URL }}" | sed 's|.*@||;s|/.*||;s|:.*||')
+          echo "host=$HOST" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pipeline tools
+        uses: ./.github/actions/setup-pipeline
+        with:
+          rust-cache-key: partition
+          db-host: ${{ steps.db.outputs.host }}
+
+      - name: Ingest sources
+        run: |
+          INGEST_ARGS="sync-all --sources ${{ matrix.sources }}"
+          if [ "${{ inputs.limit }}" != "0" ] && [ -n "${{ inputs.limit }}" ]; then
+            INGEST_ARGS="$INGEST_ARGS --limit ${{ inputs.limit }}"
+          fi
+          if [ "${{ inputs.force }}" = "true" ]; then
+            INGEST_ARGS="$INGEST_ARGS --force"
+          fi
+          cargo ingest $INGEST_ARGS
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Geocode missing coordinates
+        run: cargo ingest geocode --sources ${{ matrix.sources }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PELIAS_URL: ${{ secrets.PELIAS_URL }}
+
+      - name: Attribute boundary GEOIDs
+        run: cargo ingest attribute --sources ${{ matrix.sources }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Generate artifacts
+        run: |
+          GENERATE_ARGS="all --sources ${{ matrix.sources }} --output-dir data/partitions/${{ matrix.name }}"
+          if [ "${{ inputs.force }}" = "true" ]; then
+            GENERATE_ARGS="$GENERATE_ARGS --force"
+          fi
+          cargo generate $GENERATE_ARGS
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: List generated files
+        run: ls -lah data/partitions/${{ matrix.name }}/ 2>/dev/null || echo "No files generated"
+
+      - name: Upload partition artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: partition-${{ matrix.name }}
+          path: |
+            data/partitions/${{ matrix.name }}/incidents.pmtiles
+            data/partitions/${{ matrix.name }}/incidents.db
+            data/partitions/${{ matrix.name }}/counts.duckdb
+            data/partitions/${{ matrix.name }}/h3.duckdb
+            data/partitions/${{ matrix.name }}/metadata.json
+          retention-days: 7
+
+  # ── Step 4: Merge all partitions ────────────────────────────────────
+  merge:
+    name: Merge Artifacts
+    runs-on: ubuntu-latest
+    needs: [setup, partition]
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pipeline tools
+        uses: ./.github/actions/setup-pipeline
+        with:
+          rust-cache-key: merge
+
+      - name: Download boundary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: boundaries
+          path: data/boundaries
+
+      - name: Download all partition artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: partition-*
+          path: data/partitions
+
+      - name: List downloaded artifacts
+        run: |
+          echo "=== Boundaries ==="
+          ls -lah data/boundaries/ 2>/dev/null || echo "none"
+          echo "=== Partitions ==="
+          find data/partitions -type f | head -100
+
+      - name: Merge artifacts
+        run: |
+          # Build comma-separated list of partition dirs
+          PARTITION_DIRS=$(find data/partitions -mindepth 1 -maxdepth 1 -type d | sort | tr '\n' ',' | sed 's/,$//')
+          echo "Merging partition dirs: $PARTITION_DIRS"
+
+          mkdir -p data/generated
+          cargo generate merge \
+            --partition-dirs "$PARTITION_DIRS" \
+            --boundaries-dir data/boundaries \
+            --output-dir data/generated
+
+      - name: List merged files
+        run: ls -lah data/generated/
+
+      - name: Upload merged artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: merged-data
+          path: data/generated/
+          retention-days: 14

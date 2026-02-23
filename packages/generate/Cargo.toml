@@ -17,6 +17,7 @@ path = "src/lib.rs"
 
 [dependencies]
 crime_map_database = { workspace = true }
+crime_map_geography_models = { workspace = true }
 crime_map_source = { workspace = true }
 moosicbox_json_utils = { workspace = true, features = ["database"] }
 switchy_database = { workspace = true, features = [
@@ -46,5 +47,6 @@ default = []
 duckdb-bundled = ["duckdb/bundled"]
 fail-on-warnings = [
   "crime_map_database/fail-on-warnings",
+  "crime_map_geography_models/fail-on-warnings",
   "crime_map_source/fail-on-warnings",
 ]

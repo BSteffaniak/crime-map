@@ -8,6 +8,8 @@
 //! questions like "which neighborhood is safest". They are independent of
 //! the main crime incident data.
 
+pub mod fips;
+
 use serde::{Deserialize, Serialize};
 
 /// A US state row as stored in the database.

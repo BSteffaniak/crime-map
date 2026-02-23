@@ -18,6 +18,7 @@
 //! regardless of dataset size.
 
 pub mod interactive;
+pub mod merge;
 pub mod spatial;
 
 use std::collections::BTreeMap;
@@ -119,6 +120,11 @@ pub struct GenerateArgs {
     /// Comma-separated list of source IDs to include (e.g., "chicago,la,sf").
     /// Only incidents from these sources will be exported.
     pub sources: Option<String>,
+
+    /// Comma-separated state FIPS codes to include (e.g., "24,11" for MD+DC).
+    /// Sources whose `state` field matches the given FIPS codes will be
+    /// included. Combined with `--sources` via union if both are provided.
+    pub states: Option<String>,
 
     /// Keep the intermediate `.geojsonseq` file after generation instead of
     /// deleting it.
@@ -574,11 +580,18 @@ fn output_needs_regen(
     false
 }
 
-/// Resolves `--sources` short IDs (e.g., "chicago") to database integer
-/// `source_id` values by looking up each source's human-readable name in
-/// `crime_sources`.
+/// Resolves `--sources` and/or `--states` filters to database integer
+/// `source_id` values.
 ///
-/// Returns an empty `Vec` if `--sources` was not provided (meaning: export
+/// When `--sources` is provided, looks up each short ID in the TOML
+/// registry and then resolves the human-readable name in `crime_sources`.
+///
+/// When `--states` is provided, maps FIPS codes to state abbreviations
+/// and filters the registry by the `state` field on each source.
+///
+/// If both are provided, their results are unioned (deduplicated).
+///
+/// Returns an empty `Vec` if neither flag was provided (meaning: export
 /// all sources).
 ///
 /// # Errors
@@ -589,16 +602,44 @@ pub async fn resolve_source_ids(
     db: &dyn Database,
     args: &GenerateArgs,
 ) -> Result<Vec<i32>, Box<dyn std::error::Error>> {
-    let Some(ref sources_str) = args.sources else {
+    if args.sources.is_none() && args.states.is_none() {
         return Ok(Vec::new());
-    };
+    }
 
-    let requested: Vec<&str> = sources_str.split(',').map(str::trim).collect();
     let registry = all_sources();
+    let mut short_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
-    let mut source_ids = Vec::with_capacity(requested.len());
-    for short_id in &requested {
-        let Some(def) = registry.iter().find(|s| s.id() == *short_id) else {
+    // Collect source IDs from --sources
+    if let Some(ref sources_str) = args.sources {
+        for id in sources_str.split(',').map(str::trim) {
+            if !id.is_empty() {
+                short_ids.insert(id.to_string());
+            }
+        }
+    }
+
+    // Collect source IDs from --states (FIPS -> abbreviation -> matching sources)
+    if let Some(ref states_str) = args.states {
+        let fips_codes: Vec<&str> = states_str.split(',').map(str::trim).collect();
+        let abbrs: Vec<String> = fips_codes
+            .iter()
+            .map(|f| crime_map_geography_models::fips::state_abbr(f).to_string())
+            .collect();
+
+        for source in &registry {
+            if abbrs.iter().any(|a| a.eq_ignore_ascii_case(&source.state)) {
+                short_ids.insert(source.id().to_string());
+            }
+        }
+    }
+
+    if short_ids.is_empty() {
+        return Err("No sources matched the provided --sources / --states filters".into());
+    }
+
+    let mut source_ids = Vec::with_capacity(short_ids.len());
+    for short_id in &short_ids {
+        let Some(def) = registry.iter().find(|s| s.id() == short_id.as_str()) else {
             return Err(format!("Unknown source ID: {short_id}").into());
         };
 

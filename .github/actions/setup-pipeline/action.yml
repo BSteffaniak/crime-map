@@ -1,0 +1,92 @@
+name: Setup Data Pipeline Tools
+description: Installs Rust, DuckDB native library, tippecanoe, and caches all tools
+
+inputs:
+  rust-cache-key:
+    description: Additional cache key suffix for Rust build cache
+    required: false
+    default: ''
+  db-host:
+    description: Database hostname to pin to IPv4 via /etc/hosts (optional)
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Force IPv4 for database connectivity
+      shell: bash
+      run: |
+        # Prefer IPv4 in system DNS resolution
+        echo 'precedence ::ffff:0:0/96 100' | sudo tee -a /etc/gai.conf
+        # Pin DB hostname to IPv4 in /etc/hosts if provided
+        DB_HOST="${{ inputs.db-host }}"
+        if [ -n "$DB_HOST" ]; then
+          IPV4=$(dig +short "$DB_HOST" A | tail -1)
+          if [ -n "$IPV4" ]; then
+            echo "$IPV4 $DB_HOST" | sudo tee -a /etc/hosts
+            echo "Pinned $DB_HOST -> $IPV4 in /etc/hosts"
+          else
+            echo "WARNING: Could not resolve $DB_HOST to IPv4"
+          fi
+        fi
+
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Rust build cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ inputs.rust-cache-key }}
+
+    - name: Install system dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends cmake libssl-dev pkg-config
+
+    - name: Cache DuckDB native library
+      id: cache-duckdb
+      uses: actions/cache@v4
+      with:
+        path: /usr/local/lib/duckdb
+        key: duckdb-linux-amd64-v1.4.4
+
+    - name: Install DuckDB native library
+      if: steps.cache-duckdb.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        wget -q https://github.com/duckdb/duckdb/releases/download/v1.4.4/libduckdb-linux-amd64.zip
+        sudo mkdir -p /usr/local/lib/duckdb
+        sudo unzip -o libduckdb-linux-amd64.zip -d /usr/local/lib/duckdb
+
+    - name: Set DuckDB environment variables
+      shell: bash
+      run: |
+        echo "DUCKDB_LIB_DIR=/usr/local/lib/duckdb" >> "$GITHUB_ENV"
+        echo "DUCKDB_INCLUDE_DIR=/usr/local/lib/duckdb" >> "$GITHUB_ENV"
+        echo "LD_LIBRARY_PATH=/usr/local/lib/duckdb" >> "$GITHUB_ENV"
+
+    - name: Cache tippecanoe
+      id: cache-tippecanoe
+      uses: actions/cache@v4
+      with:
+        path: /usr/local/bin/tippecanoe
+        key: tippecanoe-v2-linux-amd64
+
+    - name: Cache tile-join
+      id: cache-tile-join
+      uses: actions/cache@v4
+      with:
+        path: /usr/local/bin/tile-join
+        key: tile-join-v2-linux-amd64
+
+    - name: Install tippecanoe + tile-join
+      if: steps.cache-tippecanoe.outputs.cache-hit != 'true' || steps.cache-tile-join.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        git clone --depth 1 https://github.com/felt/tippecanoe.git /tmp/tippecanoe
+        make -j$(nproc) -C /tmp/tippecanoe
+        sudo cp /tmp/tippecanoe/tippecanoe /usr/local/bin/tippecanoe
+        sudo cp /tmp/tippecanoe/tile-join /usr/local/bin/tile-join
+        rm -rf /tmp/tippecanoe

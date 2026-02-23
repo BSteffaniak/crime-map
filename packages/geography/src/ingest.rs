@@ -33,71 +33,7 @@ fn build_tigerweb_client() -> Result<reqwest::Client, GeoError> {
         .map_err(Into::into)
 }
 
-/// US state FIPS codes for the 50 states + DC.
-const STATE_FIPS: &[&str] = &[
-    "01", "02", "04", "05", "06", "08", "09", "10", "11", "12", "13", "15", "16", "17", "18", "19",
-    "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "34", "35",
-    "36", "37", "38", "39", "40", "41", "42", "44", "45", "46", "47", "48", "49", "50", "51", "53",
-    "54", "55", "56",
-];
-
-/// State FIPS to abbreviation mapping.
-fn state_abbr(fips: &str) -> &'static str {
-    match fips {
-        "01" => "AL",
-        "02" => "AK",
-        "04" => "AZ",
-        "05" => "AR",
-        "06" => "CA",
-        "08" => "CO",
-        "09" => "CT",
-        "10" => "DE",
-        "11" => "DC",
-        "12" => "FL",
-        "13" => "GA",
-        "15" => "HI",
-        "16" => "ID",
-        "17" => "IL",
-        "18" => "IN",
-        "19" => "IA",
-        "20" => "KS",
-        "21" => "KY",
-        "22" => "LA",
-        "23" => "ME",
-        "24" => "MD",
-        "25" => "MA",
-        "26" => "MI",
-        "27" => "MN",
-        "28" => "MS",
-        "29" => "MO",
-        "30" => "MT",
-        "31" => "NE",
-        "32" => "NV",
-        "33" => "NH",
-        "34" => "NJ",
-        "35" => "NM",
-        "36" => "NY",
-        "37" => "NC",
-        "38" => "ND",
-        "39" => "OH",
-        "40" => "OK",
-        "41" => "OR",
-        "42" => "PA",
-        "44" => "RI",
-        "45" => "SC",
-        "46" => "SD",
-        "47" => "TN",
-        "48" => "TX",
-        "49" => "UT",
-        "50" => "VT",
-        "51" => "VA",
-        "53" => "WA",
-        "54" => "WV",
-        "55" => "WI",
-        "56" => "WY",
-        _ => "??",
-    }
-}
+use crime_map_geography_models::fips::{STATE_FIPS, state_abbr};
 
 // ============================================================
 // Paginated TIGERweb fetcher
@@ -1103,63 +1039,7 @@ pub async fn ingest_counties_for_states(
 // State boundary ingestion
 // ============================================================
 
-/// State FIPS to full name mapping.
-fn state_name(fips: &str) -> &'static str {
-    match fips {
-        "01" => "Alabama",
-        "02" => "Alaska",
-        "04" => "Arizona",
-        "05" => "Arkansas",
-        "06" => "California",
-        "08" => "Colorado",
-        "09" => "Connecticut",
-        "10" => "Delaware",
-        "11" => "District of Columbia",
-        "12" => "Florida",
-        "13" => "Georgia",
-        "15" => "Hawaii",
-        "16" => "Idaho",
-        "17" => "Illinois",
-        "18" => "Indiana",
-        "19" => "Iowa",
-        "20" => "Kansas",
-        "21" => "Kentucky",
-        "22" => "Louisiana",
-        "23" => "Maine",
-        "24" => "Maryland",
-        "25" => "Massachusetts",
-        "26" => "Michigan",
-        "27" => "Minnesota",
-        "28" => "Mississippi",
-        "29" => "Missouri",
-        "30" => "Montana",
-        "31" => "Nebraska",
-        "32" => "Nevada",
-        "33" => "New Hampshire",
-        "34" => "New Jersey",
-        "35" => "New Mexico",
-        "36" => "New York",
-        "37" => "North Carolina",
-        "38" => "North Dakota",
-        "39" => "Ohio",
-        "40" => "Oklahoma",
-        "41" => "Oregon",
-        "42" => "Pennsylvania",
-        "44" => "Rhode Island",
-        "45" => "South Carolina",
-        "46" => "South Dakota",
-        "47" => "Tennessee",
-        "48" => "Texas",
-        "49" => "Utah",
-        "50" => "Vermont",
-        "51" => "Virginia",
-        "53" => "Washington",
-        "54" => "West Virginia",
-        "55" => "Wisconsin",
-        "56" => "Wyoming",
-        _ => "Unknown",
-    }
-}
+use crime_map_geography_models::fips::state_name;
 
 /// Downloads and inserts all US state boundaries from `TIGERweb` Layer 84
 /// (States).

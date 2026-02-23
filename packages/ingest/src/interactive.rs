@@ -349,9 +349,14 @@ async fn attribute_census_data(
             "Attributing incidents to census places (buffer={buffer}m, batch={batch_size})..."
         );
         let places_bar = IndicatifProgress::batch_bar(multi, "Place attribution");
-        let place_count =
-            crime_map_database::queries::attribute_places(db, buffer, batch_size, Some(places_bar))
-                .await?;
+        let place_count = crime_map_database::queries::attribute_places(
+            db,
+            buffer,
+            batch_size,
+            None,
+            Some(places_bar),
+        )
+        .await?;
         log::info!("Attributed {place_count} incidents to census places");
     }
 
@@ -359,7 +364,8 @@ async fn attribute_census_data(
         log::info!("Attributing incidents to census tracts (batch={batch_size})...");
         let tracts_bar = IndicatifProgress::batch_bar(multi, "Tract attribution");
         let tract_count =
-            crime_map_database::queries::attribute_tracts(db, batch_size, Some(tracts_bar)).await?;
+            crime_map_database::queries::attribute_tracts(db, batch_size, None, Some(tracts_bar))
+                .await?;
         log::info!("Attributed {tract_count} incidents to census tracts");
     }
 

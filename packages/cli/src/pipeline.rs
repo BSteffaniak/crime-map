@@ -436,6 +436,7 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
                 db.as_ref(),
                 config.attribute_buffer,
                 config.attribute_batch_size,
+                None,
                 Some(places_bar),
             )
             .await
@@ -455,6 +456,7 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
             if let Err(e) = crime_map_database::queries::attribute_tracts(
                 db.as_ref(),
                 config.attribute_batch_size,
+                None,
                 Some(tracts_bar),
             )
             .await
@@ -478,6 +480,7 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
         let args = crime_map_generate::GenerateArgs {
             limit: config.generate_limit,
             sources: config.generate_sources_filter.clone(),
+            states: None,
             keep_intermediate: config.generate_keep_intermediate,
             force: config.generate_force,
         };
