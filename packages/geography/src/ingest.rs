@@ -1161,10 +1161,15 @@ use crime_map_geography_models::fips::state_name;
 /// # Errors
 ///
 /// Returns [`GeoError`] if the HTTP request or database operation fails.
+#[allow(clippy::too_many_lines)]
 pub async fn ingest_all_states(db: &dyn Database, force: bool) -> Result<u64, GeoError> {
     let client = build_tigerweb_client()?;
 
-    // Skip if states already exist (unless --force)
+    // Skip if all states already exist (unless --force)
+    // We compare against the expected count (51 = 50 states + DC) rather than
+    // just > 0, so partial ingestion (e.g., interrupted run) is retried.
+    #[allow(clippy::cast_possible_wrap)]
+    let expected_states = STATE_FIPS.len() as i64;
     if !force {
         let rows = db
             .query_raw_params(
@@ -1173,11 +1178,17 @@ pub async fn ingest_all_states(db: &dyn Database, force: bool) -> Result<u64, Ge
             )
             .await?;
         let count: i64 = rows.first().map_or(0, |r| r.to_value("count").unwrap_or(0));
-        if count > 0 {
+        if count >= expected_states {
             log::info!(
-                "{count} state boundaries already exist, skipping (use --force to re-import)"
+                "{count} state boundaries already exist (all {expected_states} present), \
+                 skipping (use --force to re-import)"
             );
             return Ok(0);
+        }
+        if count > 0 {
+            log::info!(
+                "{count}/{expected_states} state boundaries exist, re-fetching to fill gaps"
+            );
         }
     }
 

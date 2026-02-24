@@ -335,24 +335,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let db = db::connect_from_env().await?;
             run_migrations(db.as_ref()).await?;
 
-            // Skip if neighborhoods already exist (unless --force)
-            if !force {
-                let rows = db
-                    .as_ref()
-                    .query_raw_params("SELECT COUNT(*) as cnt FROM neighborhoods", &[])
-                    .await?;
-                let count: i64 = rows.first().map_or(0, |r| {
-                    moosicbox_json_utils::database::ToValue::to_value(r, "cnt").unwrap_or(0)
-                });
-                if count > 0 {
-                    log::info!(
-                        "{count} neighborhoods already exist, skipping \
-                         (use --force to re-import)"
-                    );
-                    return Ok(());
-                }
-            }
-
             let all_sources = crime_map_neighborhood::registry::all_sources();
             let sources_to_ingest = if let Some(filter_str) = sources {
                 let ids: Vec<&str> = filter_str.split(',').map(str::trim).collect();
@@ -377,6 +359,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut total = 0u64;
 
             for source in &sources_to_ingest {
+                // Skip sources that already have neighborhoods (unless --force)
+                if !force {
+                    let rows = db
+                        .as_ref()
+                        .query_raw_params(
+                            "SELECT COUNT(*) as cnt FROM neighborhoods WHERE source_id = $1",
+                            &[switchy_database::DatabaseValue::String(
+                                source.id().to_string(),
+                            )],
+                        )
+                        .await?;
+                    let existing: i64 = rows.first().map_or(0, |r| {
+                        moosicbox_json_utils::database::ToValue::to_value(r, "cnt").unwrap_or(0)
+                    });
+                    if existing > 0 {
+                        log::info!(
+                            "{}: {existing} neighborhoods already exist, skipping \
+                             (use --force to re-import)",
+                            source.id()
+                        );
+                        continue;
+                    }
+                }
+
                 match crime_map_neighborhood::ingest::ingest_source(db.as_ref(), &client, source)
                     .await
                 {
@@ -387,9 +393,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // Build the tract-to-neighborhood crosswalk
-            if let Err(e) = crime_map_neighborhood::ingest::build_crosswalk(db.as_ref()).await {
-                log::error!("Failed to build crosswalk: {e}");
+            // Build the tract-to-neighborhood crosswalk only if new data was ingested
+            if total > 0 {
+                if let Err(e) = crime_map_neighborhood::ingest::build_crosswalk(db.as_ref()).await {
+                    log::error!("Failed to build crosswalk: {e}");
+                }
+            } else {
+                log::info!("No new neighborhoods ingested, skipping crosswalk rebuild");
             }
 
             let elapsed = start.elapsed();
