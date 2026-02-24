@@ -15,6 +15,7 @@ import { useLayers } from "@/hooks/useLayers";
 import { useHexbins } from "@/lib/hexbins/useHexbins";
 import { useSourceCounts } from "@/lib/source-counts/useSourceCounts";
 import { useBoundaryCounts } from "@/hooks/useBoundaryCounts";
+import type { BoundaryMetric } from "@/hooks/useBoundaryCounts";
 import type { BBox } from "@/lib/sidebar/types";
 import { DEFAULT_ZOOM } from "@/lib/map-config";
 
@@ -28,6 +29,7 @@ export default function App() {
   const settledRef = useRef(true);
   const { mapTheme, setMapTheme } = useTheme();
   const { layers, toggleLayer } = useLayers();
+  const [boundaryMetric, setBoundaryMetric] = useState<BoundaryMetric>("count");
 
   const {
     filters,
@@ -75,6 +77,7 @@ export default function App() {
         layers={layers}
         allBoundaryCounts={allBoundaryCounts}
         visibleBoundaryTypes={visibleBoundaryTypes}
+        boundaryMetric={boundaryMetric}
         onToggleBoundary={toggleBoundary}
         onBoundsChange={handleBoundsChange}
       />
@@ -99,7 +102,7 @@ export default function App() {
         )}
 
         <ThemeToggle mapTheme={mapTheme} onSelect={setMapTheme} />
-        <LayerToggle layers={layers} zoom={zoom} onToggle={toggleLayer} />
+        <LayerToggle layers={layers} zoom={zoom} onToggle={toggleLayer} boundaryMetric={boundaryMetric} onBoundaryMetricChange={setBoundaryMetric} />
       </div>
 
       {/* Floating sidebar panel */}

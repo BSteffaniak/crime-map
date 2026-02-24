@@ -1,11 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Layers, ChevronDown } from "lucide-react";
 import { MAP_LAYERS, type MapLayerConfig } from "@/lib/map-config";
+import type { BoundaryMetric } from "@/hooks/useBoundaryCounts";
+
+const METRIC_OPTIONS: { value: BoundaryMetric; label: string }[] = [
+  { value: "count", label: "Count" },
+  { value: "per_capita", label: "Per Capita" },
+  { value: "per_sq_mi", label: "Per Sq Mi" },
+];
 
 interface LayerToggleProps {
   layers: Record<string, boolean>;
   zoom: number;
   onToggle: (id: string) => void;
+  boundaryMetric: BoundaryMetric;
+  onBoundaryMetricChange: (metric: BoundaryMetric) => void;
 }
 
 /** Groups layers by their group field for sectioned display. */
@@ -25,7 +34,7 @@ function groupedLayers(): { group: string; label: string; items: MapLayerConfig[
 }
 
 /** Expandable layer toggle button positioned over the map. */
-export default function LayerToggle({ layers, zoom, onToggle }: LayerToggleProps) {
+export default function LayerToggle({ layers, zoom, onToggle, boundaryMetric, onBoundaryMetricChange }: LayerToggleProps) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -55,6 +64,9 @@ export default function LayerToggle({ layers, zoom, onToggle }: LayerToggleProps
 
   const groups = groupedLayers();
   const activeCount = MAP_LAYERS.filter((l) => layers[l.id]).length;
+  const hasBoundaryLayer = MAP_LAYERS.some(
+    (l) => l.group === "boundaries" && layers[l.id],
+  );
 
   return (
     <div ref={containerRef} className="relative">
@@ -120,6 +132,29 @@ export default function LayerToggle({ layers, zoom, onToggle }: LayerToggleProps
               })}
             </div>
           ))}
+          {/* Metric selector — visible when any boundary layer is on */}
+          {hasBoundaryLayer && (
+            <div>
+              <div className="border-b border-t border-border px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Choropleth Metric
+              </div>
+              <div className="flex gap-1 px-2 py-2">
+                {METRIC_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    onClick={() => onBoundaryMetricChange(opt.value)}
+                    className={`flex-1 rounded px-1.5 py-1 text-[11px] font-medium transition-colors ${
+                      boundaryMetric === opt.value
+                        ? "bg-blue-600 text-white"
+                        : "bg-muted text-muted-foreground hover:bg-accent"
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

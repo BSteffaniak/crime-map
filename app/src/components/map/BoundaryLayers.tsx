@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useMap } from "@/components/ui/map";
 import { BOUNDARIES_PMTILES_URL, LABEL_BEFORE_ID } from "@/lib/map-config";
-import type { AllBoundaryCounts, BoundaryType } from "@/hooks/useBoundaryCounts";
+import type { AllBoundaryCounts, BoundaryMetric, BoundaryType } from "@/hooks/useBoundaryCounts";
 import type { FilterState } from "@/lib/types";
 
 /** Maps boundary type to the property name used as the feature ID in PMTiles. */
@@ -105,24 +105,40 @@ const BOUNDARY_LAYER_DEFS = [
   },
 ] as const;
 
-/** Sequential color scale for choropleth fill (yellow -> orange -> red). */
-const CHOROPLETH_FILL_EXPR = [
-  "case",
-  ["!=", ["feature-state", "count"], null],
-  [
-    "interpolate",
-    ["linear"],
-    ["feature-state", "count"],
-    0, "rgba(255, 255, 178, 0.05)",
-    10, "rgba(254, 217, 118, 0.12)",
-    50, "rgba(254, 178, 76, 0.18)",
-    200, "rgba(253, 141, 60, 0.24)",
-    500, "rgba(240, 59, 32, 0.30)",
-    2000, "rgba(189, 0, 38, 0.35)",
-  ],
-  "rgba(0, 0, 0, 0)",
+/** Color palette (yellow → orange → red). Alpha values kept low for readability. */
+const CHOROPLETH_COLORS = [
+  "rgba(255, 255, 178, 0.05)",
+  "rgba(254, 217, 118, 0.12)",
+  "rgba(254, 178, 76, 0.18)",
+  "rgba(253, 141, 60, 0.24)",
+  "rgba(240, 59, 32, 0.30)",
+  "rgba(189, 0, 38, 0.35)",
+];
+
+/** Breakpoints for each metric — values at which the 6 color stops trigger. */
+const CHOROPLETH_STOPS: Record<BoundaryMetric, number[]> = {
+  count:      [0,  10,    50,   200,   500,  2000],
+  per_capita: [0,   2,     8,    20,    50,   150],   // per 1K residents
+  per_sq_mi:  [0,  20,   100,   500,  2000, 10000],
+};
+
+/** Builds the choropleth fill-color expression for a given metric. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-] as any;
+function buildChoroplethExpr(metric: BoundaryMetric): any {
+  const stops = CHOROPLETH_STOPS[metric];
+  const interp: (string | number | string[])[] = [
+    "interpolate", ["linear"], ["feature-state", "value"],
+  ];
+  for (let i = 0; i < stops.length; i++) {
+    interp.push(stops[i], CHOROPLETH_COLORS[i]);
+  }
+  return [
+    "case",
+    ["!=", ["feature-state", "value"], null],
+    interp,
+    "rgba(0, 0, 0, 0)",
+  ];
+}
 
 /** Maps API boundary type to its FilterState key. */
 const TYPE_TO_FILTER_KEY: Record<string, keyof FilterState> = {
@@ -139,6 +155,7 @@ interface BoundaryLayersProps {
   allBoundaryCounts: AllBoundaryCounts;
   visibleBoundaryTypes: BoundaryType[];
   filters: FilterState;
+  boundaryMetric: BoundaryMetric;
 }
 
 /** Adds boundary polygon layers from the boundaries PMTiles source. */
@@ -148,6 +165,7 @@ export default function BoundaryLayers({
   allBoundaryCounts,
   visibleBoundaryTypes,
   filters,
+  boundaryMetric,
 }: BoundaryLayersProps) {
   const { map, isLoaded } = useMap();
   const prevFeatureStatesRef = useRef<{ sourceLayer: string; ids: string[] }[]>([]);
@@ -183,7 +201,7 @@ export default function BoundaryLayers({
           },
           paint: {
             "fill-color": hasChoropleth
-              ? CHOROPLETH_FILL_EXPR
+              ? buildChoroplethExpr(boundaryMetric)
               : def.baseFillColor[uiTheme],
             "fill-opacity": 1,
           },
@@ -259,7 +277,7 @@ export default function BoundaryLayers({
     }
   }, [isLoaded, map, layers]);
 
-  // Update fill-color expression when visible boundary types change
+  // Update fill-color expression when visible boundary types or metric change
   useEffect(() => {
     if (!isLoaded || !map) return;
 
@@ -273,16 +291,17 @@ export default function BoundaryLayers({
           map.setPaintProperty(
             `${def.id}-fill`,
             "fill-color",
-            hasChoropleth ? CHOROPLETH_FILL_EXPR : def.baseFillColor[uiTheme],
+            hasChoropleth ? buildChoroplethExpr(boundaryMetric) : def.baseFillColor[uiTheme],
           );
         }
       } catch {
         // Layer may not exist yet
       }
     }
-  }, [isLoaded, map, visibleBoundaryTypes, layers, uiTheme]);
+  }, [isLoaded, map, visibleBoundaryTypes, layers, uiTheme, boundaryMetric]);
 
   // Apply feature states from boundary counts for choropleth rendering (all visible layers)
+  // Normalizes raw counts based on the selected metric using feature properties.
   useEffect(() => {
     if (!isLoaded || !map || !map.getSource("boundaries")) return;
 
@@ -292,7 +311,7 @@ export default function BoundaryLayers({
         try {
           map.setFeatureState(
             { source: "boundaries", sourceLayer: prev.sourceLayer, id },
-            { count: null },
+            { value: null, count: null },
           );
         } catch {
           // Feature may not be in the current viewport
@@ -306,6 +325,28 @@ export default function BoundaryLayers({
       return;
     }
 
+    // Build a lookup of feature properties (population, area) per source layer
+    // by querying rendered/source features.
+    const getFeatureProps = (sourceLayer: string, idProp: string) => {
+      const propMap = new Map<string, { population: number; area: number }>();
+      try {
+        const features = map.querySourceFeatures("boundaries", { sourceLayer });
+        for (const f of features) {
+          const fid = f.properties?.[idProp];
+          if (fid == null) continue;
+          const key = String(fid);
+          if (propMap.has(key)) continue; // dedupe
+          propMap.set(key, {
+            population: Number(f.properties?.population) || 0,
+            area: Number(f.properties?.land_area_sq_mi) || 0,
+          });
+        }
+      } catch {
+        // Source may not be ready
+      }
+      return propMap;
+    };
+
     // Apply counts for all visible layers
     const newStates: { sourceLayer: string; ids: string[] }[] = [];
 
@@ -316,12 +357,35 @@ export default function BoundaryLayers({
       const counts = allBoundaryCounts[boundaryType];
       if (!counts) continue;
 
+      // Only query feature properties if we need them for normalization
+      const needsProps = boundaryMetric !== "count";
+      const idProp = PROMOTE_ID_MAP[def.id];
+      const featureProps = needsProps ? getFeatureProps(def.sourceLayer, idProp) : null;
+
       const ids: string[] = [];
-      for (const [geoid, count] of Object.entries(counts)) {
+      for (const [geoid, rawCount] of Object.entries(counts)) {
+        let displayValue = rawCount;
+
+        if (boundaryMetric === "per_capita" && featureProps) {
+          const props = featureProps.get(geoid);
+          if (props && props.population > 0) {
+            displayValue = (rawCount / props.population) * 1000; // per 1K residents
+          } else {
+            displayValue = 0; // No population data — hide
+          }
+        } else if (boundaryMetric === "per_sq_mi" && featureProps) {
+          const props = featureProps.get(geoid);
+          if (props && props.area > 0) {
+            displayValue = rawCount / props.area;
+          } else {
+            displayValue = 0; // No area data — hide
+          }
+        }
+
         try {
           map.setFeatureState(
             { source: "boundaries", sourceLayer: def.sourceLayer, id: geoid },
-            { count },
+            { value: displayValue, count: rawCount },
           );
           ids.push(geoid);
         } catch {
@@ -334,7 +398,7 @@ export default function BoundaryLayers({
     }
 
     prevFeatureStatesRef.current = newStates;
-  }, [isLoaded, map, allBoundaryCounts, visibleBoundaryTypes]);
+  }, [isLoaded, map, allBoundaryCounts, visibleBoundaryTypes, boundaryMetric]);
 
   // Apply "selected" feature state for filtered boundaries (highlight effect)
   useEffect(() => {

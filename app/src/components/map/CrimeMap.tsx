@@ -26,7 +26,7 @@ import { buildIncidentFilter } from "@/lib/map-filters/expressions";
 import type { HexbinEntry } from "@/lib/hexbins/types";
 import BoundaryLayers from "@/components/map/BoundaryLayers";
 import { LAYER_TO_TYPE } from "@/components/map/BoundaryLayers";
-import type { AllBoundaryCounts, BoundaryType } from "@/hooks/useBoundaryCounts";
+import type { AllBoundaryCounts, BoundaryMetric, BoundaryType } from "@/hooks/useBoundaryCounts";
 
 interface CrimeMapProps {
   filters: FilterState;
@@ -36,6 +36,7 @@ interface CrimeMapProps {
   layers: Record<string, boolean>;
   allBoundaryCounts: AllBoundaryCounts;
   visibleBoundaryTypes: BoundaryType[];
+  boundaryMetric: BoundaryMetric;
   onToggleBoundary?: (type: string, geoid: string) => void;
   onBoundsChange?: (bounds: maplibregl.LngLatBounds, zoom: number, options: { settled: boolean }) => void;
 }
@@ -896,7 +897,7 @@ function BoundsTracker({
 // Main CrimeMap component
 // ---------------------------------------------------------------------------
 
-export default function CrimeMap({ filters, hexbins, zoom, mapTheme, layers, allBoundaryCounts, visibleBoundaryTypes, onToggleBoundary, onBoundsChange }: CrimeMapProps) {
+export default function CrimeMap({ filters, hexbins, zoom, mapTheme, layers, allBoundaryCounts, visibleBoundaryTypes, boundaryMetric, onToggleBoundary, onBoundsChange }: CrimeMapProps) {
   const uiTheme = baseUiTheme(mapTheme);
   // Memoize the style so the Map component gets a stable reference per theme
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -925,7 +926,7 @@ export default function CrimeMap({ filters, hexbins, zoom, mapTheme, layers, all
       <HeatmapLayer filters={filters} uiTheme={uiTheme} visible={!!layers.heatmap} />
       <HexbinLayer hexbins={hexbins} zoom={zoom} uiTheme={uiTheme} visible={!!layers.hexbins} />
       <IncidentPointsLayer filters={filters} uiTheme={uiTheme} visible={!!layers.points} />
-      <BoundaryLayers uiTheme={uiTheme} layers={layers} allBoundaryCounts={allBoundaryCounts} visibleBoundaryTypes={visibleBoundaryTypes} filters={filters} />
+      <BoundaryLayers uiTheme={uiTheme} layers={layers} allBoundaryCounts={allBoundaryCounts} visibleBoundaryTypes={visibleBoundaryTypes} filters={filters} boundaryMetric={boundaryMetric} />
       <MapInteractions layers={layers} onToggleBoundary={onToggleBoundary} />
       <BoundsTracker onBoundsChange={handleBoundsChange} />
     </Map>

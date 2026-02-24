@@ -26,6 +26,9 @@ export type AllBoundaryCounts = Partial<Record<BoundaryType, BoundaryCounts>>;
 const BOUNDARY_TYPES = ["county", "state", "place", "tract", "neighborhood"] as const;
 export type BoundaryType = (typeof BOUNDARY_TYPES)[number];
 
+/** Choropleth display metric. */
+export type BoundaryMetric = "count" | "per_capita" | "per_sq_mi";
+
 /** Maps boundary layer toggle ID to boundary type for the API. */
 const LAYER_TO_TYPE: Record<string, BoundaryType> = {
   states: "state",

@@ -2542,11 +2542,13 @@ async fn export_boundary_layer(
                 let name: String = row.to_value("name").unwrap_or_default();
                 let abbr: String = row.to_value("abbr").unwrap_or_default();
                 let population: Option<i64> = row.to_value("population").unwrap_or(None);
+                let land_area: Option<f64> = row.to_value("land_area_sq_mi").unwrap_or(None);
                 serde_json::json!({
                     "name": name,
                     "abbr": abbr,
                     "fips": fips,
                     "population": population,
+                    "land_area_sq_mi": land_area,
                 })
             }
             "counties" => {
@@ -2555,12 +2557,14 @@ async fn export_boundary_layer(
                 let full_name: String = row.to_value("full_name").unwrap_or_default();
                 let state_abbr: Option<String> = row.to_value("state_abbr").unwrap_or(None);
                 let population: Option<i32> = row.to_value("population").unwrap_or(None);
+                let land_area: Option<f64> = row.to_value("land_area_sq_mi").unwrap_or(None);
                 serde_json::json!({
                     "name": name,
                     "full_name": full_name,
                     "geoid": geoid,
                     "state": state_abbr,
                     "population": population,
+                    "land_area_sq_mi": land_area,
                 })
             }
             "places" => {
@@ -2570,6 +2574,7 @@ async fn export_boundary_layer(
                 let state_abbr: Option<String> = row.to_value("state_abbr").unwrap_or(None);
                 let place_type: String = row.to_value("place_type").unwrap_or_default();
                 let population: Option<i32> = row.to_value("population").unwrap_or(None);
+                let land_area: Option<f64> = row.to_value("land_area_sq_mi").unwrap_or(None);
                 serde_json::json!({
                     "name": name,
                     "full_name": full_name,
@@ -2577,6 +2582,7 @@ async fn export_boundary_layer(
                     "state": state_abbr,
                     "type": place_type,
                     "population": population,
+                    "land_area_sq_mi": land_area,
                 })
             }
             "tracts" => {
@@ -2585,12 +2591,14 @@ async fn export_boundary_layer(
                 let state_abbr: Option<String> = row.to_value("state_abbr").unwrap_or(None);
                 let county_name: Option<String> = row.to_value("county_name").unwrap_or(None);
                 let population: Option<i32> = row.to_value("population").unwrap_or(None);
+                let land_area: Option<f64> = row.to_value("land_area_sq_mi").unwrap_or(None);
                 serde_json::json!({
                     "name": name,
                     "geoid": geoid,
                     "state": state_abbr,
                     "county": county_name,
                     "population": population,
+                    "land_area_sq_mi": land_area,
                 })
             }
             "neighborhoods" => {
