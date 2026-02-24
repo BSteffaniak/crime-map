@@ -582,15 +582,23 @@ pub async fn get_all_category_ids(
     Ok(map)
 }
 
-/// Builds an optional `AND source_id IN (...)` SQL fragment for filtering
-/// attribution queries to a specific set of sources.
+/// Builds an optional `AND [alias.]source_id IN (...)` SQL fragment for
+/// filtering attribution queries to a specific set of sources.
+///
+/// When `alias` is non-empty, the column is qualified (e.g., `i.source_id`).
+/// When `alias` is empty, the column is unqualified (e.g., `source_id`).
 ///
 /// Returns an empty string when `source_ids` is `None` (no filter).
-fn build_source_filter(source_ids: Option<&[i32]>) -> String {
+fn build_source_filter(source_ids: Option<&[i32]>, alias: &str) -> String {
     match source_ids {
         Some(ids) if !ids.is_empty() => {
             use std::fmt::Write;
-            let mut clause = String::from(" AND i.source_id IN (");
+            let col = if alias.is_empty() {
+                "source_id".to_string()
+            } else {
+                format!("{alias}.source_id")
+            };
+            let mut clause = format!(" AND {col} IN (");
             for (i, id) in ids.iter().enumerate() {
                 if i > 0 {
                     clause.push(',');
@@ -635,8 +643,13 @@ pub async fn attribute_places(
 ) -> Result<u64, DbError> {
     let mut total = 0u64;
 
-    // Build optional source filter clause
-    let source_filter = build_source_filter(source_ids);
+    // Build source filter clauses for different query contexts:
+    // - bare: no table alias (for COUNT / DISTINCT queries)
+    // - i2:   subquery alias (for the inner SELECT)
+    // - i:    outer UPDATE alias (prevents deadlocks by scoping row locks)
+    let filter_bare = build_source_filter(source_ids, "");
+    let filter_i2 = build_source_filter(source_ids, "i2");
+    let filter_i = build_source_filter(source_ids, "i");
 
     // Boost work_mem for this session to allow efficient hash joins
     db.exec_raw("SET work_mem = '256MB'").await?;
@@ -655,7 +668,7 @@ pub async fn attribute_places(
             .query_raw_params(
                 &format!(
                     "SELECT COUNT(*) as cnt FROM crime_incidents \
-                     WHERE census_place_geoid IS NULL AND has_coordinates = TRUE{source_filter}"
+                     WHERE census_place_geoid IS NULL AND has_coordinates = TRUE{filter_bare}"
                 ),
                 &[],
             )
@@ -680,7 +693,7 @@ pub async fn attribute_places(
         .query_raw_params(
             &format!(
                 "SELECT DISTINCT state FROM crime_incidents \
-                 WHERE census_place_geoid IS NULL AND has_coordinates = TRUE{source_filter} \
+                 WHERE census_place_geoid IS NULL AND has_coordinates = TRUE{filter_bare} \
                  ORDER BY state"
             ),
             &[],
@@ -715,10 +728,10 @@ pub async fn attribute_places(
                           AND ST_Covers(p.boundary::geometry, i2.location::geometry) \
                          WHERE i2.census_place_geoid IS NULL \
                            AND i2.has_coordinates = TRUE \
-                           AND i2.state = $1{source_filter} \
+                           AND i2.state = $1{filter_i2} \
                          ORDER BY i2.id, ST_Area(p.boundary::geometry) \
                      ) sub \
-                     WHERE i.id = sub.id"
+                     WHERE i.id = sub.id{filter_i}"
                 ),
                 &[DatabaseValue::String(state.clone())],
             )
@@ -752,10 +765,10 @@ pub async fn attribute_places(
                           AND ST_DWithin(p.boundary::geometry, i2.location::geometry, $1) \
                          WHERE i2.census_place_geoid IS NULL \
                            AND i2.has_coordinates = TRUE \
-                           AND i2.state = $2{source_filter} \
+                           AND i2.state = $2{filter_i2} \
                          ORDER BY i2.id, ST_Distance(p.boundary::geometry, i2.location::geometry) \
                      ) sub \
-                     WHERE i.id = sub.id"
+                     WHERE i.id = sub.id{filter_i}"
                 ),
                 &[
                     DatabaseValue::Real64(buffer_degrees),
@@ -807,8 +820,11 @@ pub async fn attribute_tracts(
 ) -> Result<u64, DbError> {
     let mut total = 0u64;
 
-    // Build optional source filter clause
-    let source_filter = build_source_filter(source_ids);
+    // Build source filter clauses for different query contexts:
+    // - bare: no table alias (for COUNT / DISTINCT queries)
+    // - i:    outer UPDATE alias (prevents deadlocks by scoping row locks)
+    let filter_bare = build_source_filter(source_ids, "");
+    let filter_i = build_source_filter(source_ids, "i");
 
     // Boost work_mem for this session to allow efficient hash joins
     db.exec_raw("SET work_mem = '256MB'").await?;
@@ -827,7 +843,7 @@ pub async fn attribute_tracts(
             .query_raw_params(
                 &format!(
                     "SELECT COUNT(*) as cnt FROM crime_incidents \
-                     WHERE census_tract_geoid IS NULL AND has_coordinates = TRUE{source_filter}"
+                     WHERE census_tract_geoid IS NULL AND has_coordinates = TRUE{filter_bare}"
                 ),
                 &[],
             )
@@ -852,7 +868,7 @@ pub async fn attribute_tracts(
         .query_raw_params(
             &format!(
                 "SELECT DISTINCT state FROM crime_incidents \
-                 WHERE census_tract_geoid IS NULL AND has_coordinates = TRUE{source_filter} \
+                 WHERE census_tract_geoid IS NULL AND has_coordinates = TRUE{filter_bare} \
                  ORDER BY state"
             ),
             &[],
@@ -873,6 +889,9 @@ pub async fn attribute_tracts(
     );
 
     // Process each state separately — tracts don't overlap so no DISTINCT ON
+    // The source filter on the outer UPDATE (filter_i) ensures PostgreSQL only
+    // locks rows belonging to this partition's sources, preventing deadlocks
+    // when multiple partition jobs run concurrently.
     for state in &states {
         let updated = db
             .exec_raw_params(
@@ -884,7 +903,7 @@ pub async fn attribute_tracts(
                        AND ST_Covers(ct.boundary::geometry, i.location::geometry) \
                        AND i.census_tract_geoid IS NULL \
                        AND i.has_coordinates = TRUE \
-                       AND i.state = $1{source_filter}"
+                       AND i.state = $1{filter_i}"
                 ),
                 &[DatabaseValue::String(state.clone())],
             )

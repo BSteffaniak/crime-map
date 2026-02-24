@@ -47,9 +47,20 @@ jobs:
       - name: Compute partition matrix
         id: partitions
         run: |
-          # Discover all source TOML files
+          # Discover all source TOML files and extract the `id` field from each.
+          # Filenames often don't match the id (53 of 76 differ), so we must parse.
           SOURCE_DIR="packages/source/sources"
-          ALL_SOURCES=$(ls "$SOURCE_DIR"/*.toml 2>/dev/null | xargs -I{} basename {} .toml | sort)
+          ALL_SOURCES=""
+          for toml in "$SOURCE_DIR"/*.toml; do
+            sid=$(grep -m1 '^id\s*=' "$toml" | sed 's/^id\s*=\s*"\(.*\)"/\1/')
+            if [ -n "$sid" ]; then
+              ALL_SOURCES="$ALL_SOURCES $sid"
+            else
+              # Fallback to filename if no id field
+              ALL_SOURCES="$ALL_SOURCES $(basename "$toml" .toml)"
+            fi
+          done
+          ALL_SOURCES=$(echo "$ALL_SOURCES" | tr ' ' '\n' | grep -v '^$' | sort)
 
           # Load partition overrides if they exist
           OVERRIDES_FILE=".github/partition-overrides.json"
