@@ -235,3 +235,57 @@ pub fn init_logger() -> MultiProgress {
 
     multi
 }
+
+// ── Shared interactive prompts ──────────────────────────────────
+
+/// Presents a multi-select checkbox list of all configured crime data
+/// sources (formatted as `"source_id — Source Name"`).
+///
+/// Returns the selected source IDs as strings. If the user selects
+/// nothing, returns an empty `Vec`.
+///
+/// # Errors
+///
+/// Returns an error if the terminal interaction fails.
+pub fn prompt_source_multiselect(prompt: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let sources = crime_map_source::registry::all_sources();
+    if sources.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let labels: Vec<String> = sources
+        .iter()
+        .map(|s| format!("{} \u{2014} {}", s.id(), s.name()))
+        .collect();
+
+    let selected = dialoguer::MultiSelect::new()
+        .with_prompt(prompt)
+        .items(&labels)
+        .max_length(20)
+        .interact()?;
+
+    Ok(selected
+        .into_iter()
+        .map(|i| sources[i].id().to_string())
+        .collect())
+}
+
+/// Prompts the user for an optional `u64` value.
+///
+/// Returns `None` if the input is empty.
+///
+/// # Errors
+///
+/// Returns an error if the terminal interaction or parsing fails.
+pub fn prompt_optional_u64(prompt: &str) -> Result<Option<u64>, Box<dyn std::error::Error>> {
+    let input: String = dialoguer::Input::new()
+        .with_prompt(prompt)
+        .allow_empty(true)
+        .interact_text()?;
+
+    if input.trim().is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(input.trim().parse()?))
+    }
+}

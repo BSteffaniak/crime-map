@@ -7,10 +7,9 @@
 
 use std::time::Instant;
 
-use dialoguer::{Confirm, Input, MultiSelect, Select};
+use dialoguer::{Confirm, Input, Select};
 
 use crime_map_cli_utils::{IndicatifProgress, MultiProgress};
-use crime_map_database::{geocode_cache, source_db};
 
 /// Top-level actions available in the ingest interactive menu.
 enum IngestAction {
@@ -68,7 +67,7 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
     match IngestAction::ALL[idx] {
         IngestAction::SyncSources => sync_sources(multi).await?,
         IngestAction::ListSources => list_sources(),
-        IngestAction::Geocode => geocode_missing_interactive(multi)?,
+        IngestAction::Geocode => geocode_interactive(multi)?,
         IngestAction::IngestTracts => ingest_census_tracts().await?,
         IngestAction::IngestPlaces => ingest_census_places().await?,
         IngestAction::IngestNeighborhoods => ingest_neighborhoods().await?,
@@ -77,76 +76,44 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-/// Prompts the user to select one or more sources via checkboxes, then
-/// syncs each selected source.
+/// Prompts the user to select sources, then syncs using [`crate::run_sync`].
 #[allow(clippy::future_not_send)]
 async fn sync_sources(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>> {
-    let sources = crate::all_sources();
-    if sources.is_empty() {
-        println!("No sources configured.");
-        return Ok(());
-    }
+    let source_ids = crime_map_cli_utils::prompt_source_multiselect(
+        "Select sources to sync (space=toggle, a=all, enter=confirm)",
+    )?;
 
-    let labels: Vec<String> = sources
-        .iter()
-        .map(|s| format!("{} \u{2014} {}", s.id(), s.name()))
-        .collect();
-
-    let selected = MultiSelect::new()
-        .with_prompt("Select sources to sync (space=toggle, a=all, enter=confirm)")
-        .items(&labels)
-        .max_length(20)
-        .interact()?;
-
-    if selected.is_empty() {
+    if source_ids.is_empty() {
         println!("No sources selected.");
         return Ok(());
     }
 
-    let limit = prompt_optional_u64("Record limit per source (empty for no limit)")?;
+    let limit =
+        crime_map_cli_utils::prompt_optional_u64("Record limit per source (empty for no limit)")?;
     let force = Confirm::new()
         .with_prompt("Force full sync?")
         .default(false)
         .interact()?;
 
-    let num_sources = selected.len();
-    log::info!(
-        "Syncing {} source(s): {}",
-        num_sources,
-        selected
-            .iter()
-            .map(|&i| sources[i].id())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-
+    let num_sources = source_ids.len();
     let source_bar = IndicatifProgress::steps_bar(multi, "Sources", num_sources as u64);
 
-    for (i, &idx) in selected.iter().enumerate() {
-        let src = &sources[idx];
-        let fetch_bar = IndicatifProgress::records_bar(multi, src.name());
-        source_bar.set_message(format!("Source {}/{num_sources}: {}", i + 1, src.name()));
+    let args = crate::SyncArgs {
+        source_ids,
+        limit,
+        force,
+    };
 
-        match source_db::open_by_id(src.id()) {
-            Ok(conn) => {
-                let result =
-                    crate::sync_source(&conn, src, limit, force, Some(fetch_bar.clone())).await;
-                fetch_bar.finish_and_clear();
-
-                if let Err(e) = result {
-                    log::error!("Failed to sync {}: {e}", src.id());
-                }
-            }
-            Err(e) => {
-                fetch_bar.finish_and_clear();
-                log::error!("Failed to open DB for {}: {e}", src.id());
-            }
-        }
-
-        source_bar.inc(1);
-    }
-
+    let result = crate::run_sync(&args, Some(&source_bar)).await;
     source_bar.finish(format!("Synced {num_sources} source(s)"));
+
+    if !result.failed.is_empty() {
+        log::error!(
+            "{} source(s) failed: {}",
+            result.failed.len(),
+            result.failed.join(", ")
+        );
+    }
 
     Ok(())
 }
@@ -161,10 +128,13 @@ fn list_sources() {
     }
 }
 
-/// Prompts for geocoding parameters and runs the geocode pipeline.
-#[allow(clippy::too_many_lines)]
-fn geocode_missing_interactive(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>> {
-    let limit = prompt_optional_u64("Total limit (empty for no limit)")?;
+/// Prompts for geocoding parameters and runs via [`crate::run_geocode`].
+fn geocode_interactive(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>> {
+    let source_ids = crime_map_cli_utils::prompt_source_multiselect(
+        "Sources to geocode (space=toggle, a=all, enter=confirm)",
+    )?;
+
+    let limit = crime_map_cli_utils::prompt_optional_u64("Total limit (empty for no limit)")?;
 
     let batch_size_str: String = Input::new()
         .with_prompt("Batch size")
@@ -177,98 +147,25 @@ fn geocode_missing_interactive(multi: &MultiProgress) -> Result<(), Box<dyn std:
         .default(false)
         .interact()?;
 
-    // Source filter — multi-select from all configured sources
-    let all_sources = crate::all_sources();
-    let source_labels: Vec<String> = all_sources
-        .iter()
-        .map(|s| format!("{} \u{2014} {}", s.id(), s.name()))
-        .collect();
-
-    let selected = MultiSelect::new()
-        .with_prompt("Sources to geocode (space=toggle, a=all, enter=confirm)")
-        .items(&source_labels)
-        .max_length(20)
-        .interact()?;
-
-    let all_selected = selected.is_empty() || selected.len() == all_sources.len();
-
-    // Build list of source definitions to process
-    let target_sources: Vec<&crime_map_source::source_def::SourceDefinition> = if all_selected {
-        all_sources.iter().collect()
-    } else {
-        selected.iter().map(|&idx| &all_sources[idx]).collect()
-    };
-
-    log::info!(
-        "Geocoding {} source(s): {}",
-        target_sources.len(),
-        target_sources
-            .iter()
-            .map(|s| s.id())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-
-    let cache_conn = geocode_cache::open_default()?;
-    let rt = tokio::runtime::Handle::current();
-
     let start = Instant::now();
     let geocode_bar = IndicatifProgress::batch_bar(multi, "Geocoding");
 
-    // Phase 1: Geocode incidents that have no coordinates
-    let mut missing_count = 0u64;
-    for src in &target_sources {
-        let source_conn = source_db::open_by_id(src.id())?;
-        let count = crate::geocode_missing(
-            &source_conn,
-            &cache_conn,
-            batch_size,
-            limit,
-            nominatim_only,
-            Some(geocode_bar.clone()),
-            &rt,
-        )?;
-        missing_count += count;
+    let args = crate::GeocodeArgs {
+        source_ids,
+        batch_size,
+        limit,
+        nominatim_only,
+    };
 
-        if limit.is_some_and(|l| missing_count >= l) {
-            break;
-        }
-    }
-
-    // Phase 2: Re-geocode sources with imprecise coords
-    let mut re_geocode_count = 0u64;
-    let remaining_limit = limit.map(|l| l.saturating_sub(missing_count));
-    if remaining_limit.is_none_or(|l| l > 0) {
-        let re_geocode_sources: Vec<&&crime_map_source::source_def::SourceDefinition> =
-            target_sources.iter().filter(|s| s.re_geocode()).collect();
-
-        if !re_geocode_sources.is_empty() {
-            log::info!(
-                "Re-geocoding {} source(s) with imprecise coordinates...",
-                re_geocode_sources.len()
-            );
-            for src in re_geocode_sources {
-                let source_conn = source_db::open_by_id(src.id())?;
-                let count = crate::re_geocode_source(
-                    &source_conn,
-                    &cache_conn,
-                    batch_size,
-                    remaining_limit,
-                    nominatim_only,
-                    Some(geocode_bar.clone()),
-                    &rt,
-                )?;
-                re_geocode_count += count;
-            }
-        }
-    }
-
+    let result = crate::run_geocode(&args, Some(geocode_bar.clone()))?;
     geocode_bar.finish("Geocoding complete".to_string());
 
-    let total = missing_count + re_geocode_count;
     let elapsed = start.elapsed();
     log::info!(
-        "Geocoding complete: {total} incidents geocoded ({missing_count} missing-coord + {re_geocode_count} re-geocoded) in {:.1}s",
+        "Geocoding complete: {} incidents ({} missing-coord + {} re-geocoded) in {:.1}s",
+        result.total(),
+        result.missing_geocoded,
+        result.re_geocoded,
         elapsed.as_secs_f64()
     );
 
@@ -351,7 +248,7 @@ async fn ingest_neighborhoods() -> Result<(), Box<dyn std::error::Error>> {
         .map(|s| format!("{} \u{2014} {}", s.id(), s.name()))
         .collect();
 
-    let selected = MultiSelect::new()
+    let selected = dialoguer::MultiSelect::new()
         .with_prompt("Select neighborhood sources (space=toggle, a=all, enter=confirm)")
         .items(&labels)
         .max_length(20)
@@ -398,19 +295,4 @@ async fn ingest_neighborhoods() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     Ok(())
-}
-
-/// Prompts the user for an optional `u64` value. Returns `None` if the
-/// input is empty.
-fn prompt_optional_u64(prompt: &str) -> Result<Option<u64>, Box<dyn std::error::Error>> {
-    let input: String = Input::new()
-        .with_prompt(prompt)
-        .allow_empty(true)
-        .interact_text()?;
-
-    if input.trim().is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(input.trim().parse()?))
-    }
 }

@@ -8,10 +8,8 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use crime_map_cli_utils::IndicatifProgress;
-use crime_map_database::{geocode_cache, source_db};
-use crime_map_ingest::{
-    all_sources, enabled_sources, geocode_missing, re_geocode_source, sync_source,
-};
+use crime_map_database::source_db;
+use crime_map_ingest::{GeocodeArgs, SyncArgs, all_sources, enabled_sources, sync_source};
 use crime_map_source::source_def::SourceDefinition;
 
 #[derive(Parser)]
@@ -187,29 +185,6 @@ fn resolve_source_filter(sources: Option<&str>, states: Option<&str>) -> Vec<Sou
     filtered
 }
 
-/// Resolves `--sources` CSV to a list of TOML source IDs.
-fn resolve_source_toml_ids(sources: Option<&str>) -> Vec<String> {
-    let Some(sources_str) = sources else {
-        return Vec::new();
-    };
-
-    let all = all_sources();
-    let mut toml_ids = Vec::new();
-
-    for short_id in sources_str.split(',').map(str::trim) {
-        if short_id.is_empty() {
-            continue;
-        }
-        if all.iter().any(|s| s.id() == short_id) {
-            toml_ids.push(short_id.to_string());
-        } else {
-            log::warn!("Unknown source ID '{short_id}'; skipping");
-        }
-    }
-
-    toml_ids
-}
-
 /// Parses an optional comma-separated source CSV into a `Vec<String>`.
 /// Returns an empty vec when `None` (meaning "all sources").
 fn parse_source_csv(csv: Option<&str>) -> Vec<String> {
@@ -265,59 +240,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             states,
             force,
         } => {
-            let sources = if states.is_some() || sources.is_some() {
+            let source_ids: Vec<String> = if states.is_some() || sources.is_some() {
                 resolve_source_filter(sources.as_deref(), states.as_deref())
+                    .into_iter()
+                    .map(|s| s.id().to_string())
+                    .collect()
             } else {
                 enabled_sources(None)
+                    .into_iter()
+                    .map(|s| s.id().to_string())
+                    .collect()
             };
 
-            let num_sources = sources.len();
-            log::info!(
-                "Syncing {} source(s): {}",
-                num_sources,
-                sources
-                    .iter()
-                    .map(SourceDefinition::id)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-
+            let num_sources = source_ids.len();
             let source_bar = IndicatifProgress::steps_bar(&multi, "Sources", num_sources as u64);
 
-            let mut failed_sources: Vec<String> = Vec::new();
+            let args = SyncArgs {
+                source_ids,
+                limit,
+                force,
+            };
 
-            for (i, src) in sources.iter().enumerate() {
-                let fetch_bar = IndicatifProgress::records_bar(&multi, src.name());
-                source_bar.set_message(format!("Source {}/{num_sources}: {}", i + 1, src.name()));
-
-                match source_db::open_by_id(src.id()) {
-                    Ok(conn) => {
-                        let result =
-                            sync_source(&conn, src, limit, force, Some(fetch_bar.clone())).await;
-                        fetch_bar.finish_and_clear();
-
-                        if let Err(e) = result {
-                            log::error!("Failed to sync {}: {e}", src.id());
-                            failed_sources.push(src.id().to_string());
-                        }
-                    }
-                    Err(e) => {
-                        fetch_bar.finish_and_clear();
-                        log::error!("Failed to open DB for {}: {e}", src.id());
-                        failed_sources.push(src.id().to_string());
-                    }
-                }
-
-                source_bar.inc(1);
-            }
-
+            let result = crime_map_ingest::run_sync(&args, Some(&source_bar)).await;
             source_bar.finish(format!("Synced {num_sources} source(s)"));
 
-            if !failed_sources.is_empty() {
+            if !result.failed.is_empty() {
                 return Err(format!(
                     "{} source(s) failed to sync: {}",
-                    failed_sources.len(),
-                    failed_sources.join(", ")
+                    result.failed.len(),
+                    result.failed.join(", ")
                 )
                 .into());
             }
@@ -487,78 +438,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             nominatim_only,
             sources,
         } => {
-            let source_toml_ids = resolve_source_toml_ids(sources.as_deref());
-            let cache_conn = geocode_cache::open_default()?;
-            let rt = tokio::runtime::Handle::current();
-
             let start = Instant::now();
             let geocode_bar = IndicatifProgress::batch_bar(&multi, "Geocoding");
 
-            let mut total_missing = 0u64;
-            let mut total_re_geocoded = 0u64;
-
-            // Determine which sources to geocode
-            let all_defs = all_sources();
-            let target_sources: Vec<&SourceDefinition> = if source_toml_ids.is_empty() {
-                all_defs.iter().collect()
-            } else {
-                all_defs
-                    .iter()
-                    .filter(|s| source_toml_ids.contains(&s.id().to_string()))
-                    .collect()
+            let args = GeocodeArgs {
+                source_ids: parse_source_csv(sources.as_deref()),
+                batch_size,
+                limit,
+                nominatim_only,
             };
 
-            // Phase 1: Geocode incidents missing coordinates
-            for src in &target_sources {
-                let source_conn = source_db::open_by_id(src.id())?;
-                let missing = geocode_missing(
-                    &source_conn,
-                    &cache_conn,
-                    batch_size,
-                    limit,
-                    nominatim_only,
-                    Some(geocode_bar.clone()),
-                    &rt,
-                )?;
-                total_missing += missing;
-
-                if limit.is_some_and(|l| total_missing >= l) {
-                    break;
-                }
-            }
-
-            // Phase 2: Re-geocode sources with imprecise coords
-            let remaining_limit = limit.map(|l| l.saturating_sub(total_missing));
-            if remaining_limit.is_none_or(|l| l > 0) {
-                let re_geocode_sources: Vec<&&SourceDefinition> =
-                    target_sources.iter().filter(|s| s.re_geocode()).collect();
-
-                for src in re_geocode_sources {
-                    let source_conn = source_db::open_by_id(src.id())?;
-                    log::info!(
-                        "Re-geocoding source '{}' ({}) with imprecise coordinates...",
-                        src.id(),
-                        src.name()
-                    );
-                    let count = re_geocode_source(
-                        &source_conn,
-                        &cache_conn,
-                        batch_size,
-                        remaining_limit,
-                        nominatim_only,
-                        Some(geocode_bar.clone()),
-                        &rt,
-                    )?;
-                    total_re_geocoded += count;
-                }
-            }
-
+            let result = crime_map_ingest::run_geocode(&args, Some(geocode_bar.clone()))?;
             geocode_bar.finish("Geocoding complete".to_string());
 
-            let total = total_missing + total_re_geocoded;
             let elapsed = start.elapsed();
             log::info!(
-                "Geocoding complete: {total} incidents geocoded ({total_missing} missing-coord + {total_re_geocoded} re-geocoded) in {:.1}s",
+                "Geocoding complete: {} incidents geocoded ({} missing-coord + {} re-geocoded) in {:.1}s",
+                result.total(),
+                result.missing_geocoded,
+                result.re_geocoded,
                 elapsed.as_secs_f64()
             );
         }

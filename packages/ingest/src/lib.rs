@@ -31,6 +31,213 @@ pub type CacheEntry = geocode_cache::CacheEntry;
 /// normalized cache key string.
 pub type AddressGroup<'a> = (String, &'a (String, String, String), &'a Vec<String>);
 
+// ── High-level orchestration args ────────────────────────────────
+
+/// Arguments for [`run_sync`].
+pub struct SyncArgs {
+    /// Source IDs to sync. Empty means all enabled sources.
+    pub source_ids: Vec<String>,
+    /// Maximum number of records per source (for testing).
+    pub limit: Option<u64>,
+    /// Force a full sync, ignoring any previously synced data.
+    pub force: bool,
+}
+
+/// Arguments for [`run_geocode`].
+pub struct GeocodeArgs {
+    /// Source IDs to geocode. Empty means all sources.
+    pub source_ids: Vec<String>,
+    /// Number of incidents to fetch per batch.
+    pub batch_size: u64,
+    /// Maximum total incidents to geocode across all sources.
+    pub limit: Option<u64>,
+    /// Skip Census Bureau batch geocoder and only use Nominatim.
+    pub nominatim_only: bool,
+}
+
+/// Result of a [`run_sync`] call.
+pub struct SyncResult {
+    /// Number of sources that synced successfully.
+    pub succeeded: u64,
+    /// Source IDs that failed to sync.
+    pub failed: Vec<String>,
+}
+
+/// Result of a [`run_geocode`] call.
+pub struct GeocodeResult {
+    /// Number of incidents geocoded (missing coordinates).
+    pub missing_geocoded: u64,
+    /// Number of incidents re-geocoded (imprecise coordinates).
+    pub re_geocoded: u64,
+}
+
+impl GeocodeResult {
+    /// Total incidents processed.
+    #[must_use]
+    pub const fn total(&self) -> u64 {
+        self.missing_geocoded + self.re_geocoded
+    }
+}
+
+// ── High-level orchestration functions ───────────────────────────
+
+/// Syncs data from the specified sources (or all enabled sources if
+/// `args.source_ids` is empty).
+///
+/// Opens each source's `DuckDB` file, calls [`sync_source`], and
+/// collects results. Returns a [`SyncResult`] with the list of any
+/// sources that failed so the caller can decide how to handle them.
+///
+/// # Errors
+///
+/// Only returns `Err` for fatal/unrecoverable errors (none currently).
+/// Per-source failures are captured in [`SyncResult::failed`].
+#[allow(clippy::future_not_send)]
+pub async fn run_sync(args: &SyncArgs, progress: Option<&Arc<dyn ProgressCallback>>) -> SyncResult {
+    let sources = resolve_source_defs(&args.source_ids);
+
+    log::info!(
+        "Syncing {} source(s): {}",
+        sources.len(),
+        sources
+            .iter()
+            .map(SourceDefinition::id)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    let mut result = SyncResult {
+        succeeded: 0,
+        failed: Vec::new(),
+    };
+
+    for (i, src) in sources.iter().enumerate() {
+        if let Some(p) = progress {
+            p.set_message(format!(
+                "Source {}/{}: {}",
+                i + 1,
+                sources.len(),
+                src.name()
+            ));
+        }
+
+        match source_db::open_by_id(src.id()) {
+            Ok(conn) => {
+                if let Err(e) = sync_source(&conn, src, args.limit, args.force, None).await {
+                    log::error!("Failed to sync {}: {e}", src.id());
+                    result.failed.push(src.id().to_string());
+                } else {
+                    result.succeeded += 1;
+                }
+            }
+            Err(e) => {
+                log::error!("Failed to open DB for {}: {e}", src.id());
+                result.failed.push(src.id().to_string());
+            }
+        }
+
+        if let Some(p) = progress {
+            p.inc(1);
+        }
+    }
+
+    result
+}
+
+/// Runs the two-phase geocode pipeline: first geocodes incidents missing
+/// coordinates, then re-geocodes sources with imprecise block-centroid
+/// coordinates.
+///
+/// # Errors
+///
+/// Returns an error if database connections, geocoding, or batch updates
+/// fail.
+#[allow(clippy::needless_pass_by_value)] // progress is cloned into child calls
+pub fn run_geocode(
+    args: &GeocodeArgs,
+    progress: Option<Arc<dyn ProgressCallback>>,
+) -> Result<GeocodeResult, Box<dyn std::error::Error>> {
+    let all_defs = all_sources();
+    let target_sources: Vec<&SourceDefinition> = if args.source_ids.is_empty() {
+        all_defs.iter().collect()
+    } else {
+        all_defs
+            .iter()
+            .filter(|s| args.source_ids.contains(&s.id().to_string()))
+            .collect()
+    };
+
+    let cache_conn = geocode_cache::open_default()?;
+    let rt = tokio::runtime::Handle::current();
+
+    let mut missing_geocoded = 0u64;
+
+    // Phase 1: Geocode incidents missing coordinates
+    for src in &target_sources {
+        let source_conn = source_db::open_by_id(src.id())?;
+        let count = geocode_missing(
+            &source_conn,
+            &cache_conn,
+            args.batch_size,
+            args.limit,
+            args.nominatim_only,
+            progress.clone(),
+            &rt,
+        )?;
+        missing_geocoded += count;
+
+        if args.limit.is_some_and(|l| missing_geocoded >= l) {
+            break;
+        }
+    }
+
+    // Phase 2: Re-geocode sources with imprecise coords
+    let mut re_geocoded = 0u64;
+    let remaining_limit = args.limit.map(|l| l.saturating_sub(missing_geocoded));
+    if remaining_limit.is_none_or(|l| l > 0) {
+        let re_geocode_sources: Vec<&&SourceDefinition> =
+            target_sources.iter().filter(|s| s.re_geocode()).collect();
+
+        if !re_geocode_sources.is_empty() {
+            log::info!(
+                "Re-geocoding {} source(s) with imprecise coordinates...",
+                re_geocode_sources.len()
+            );
+            for src in re_geocode_sources {
+                let source_conn = source_db::open_by_id(src.id())?;
+                let count = re_geocode_source(
+                    &source_conn,
+                    &cache_conn,
+                    args.batch_size,
+                    remaining_limit,
+                    args.nominatim_only,
+                    progress.clone(),
+                    &rt,
+                )?;
+                re_geocoded += count;
+            }
+        }
+    }
+
+    Ok(GeocodeResult {
+        missing_geocoded,
+        re_geocoded,
+    })
+}
+
+/// Resolves source IDs to definitions. If `source_ids` is empty, returns
+/// all enabled sources (respecting `CRIME_MAP_SOURCES` env var).
+fn resolve_source_defs(source_ids: &[String]) -> Vec<SourceDefinition> {
+    if source_ids.is_empty() {
+        enabled_sources(None)
+    } else {
+        let all = all_sources();
+        all.into_iter()
+            .filter(|s| source_ids.contains(&s.id().to_string()))
+            .collect()
+    }
+}
+
 /// Returns all configured data sources from the TOML registry.
 #[must_use]
 pub fn all_sources() -> Vec<SourceDefinition> {

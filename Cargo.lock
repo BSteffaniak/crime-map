@@ -1488,6 +1488,7 @@ name = "crime_map_cli_utils"
 version = "0.1.0"
 dependencies = [
  "crime_map_source",
+ "dialoguer",
  "indicatif",
  "indicatif-log-bridge",
  "log",

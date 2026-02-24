@@ -10,6 +10,7 @@ version = "0.1.0"
 [dependencies]
 crime_map_source = { workspace = true }
 
+dialoguer = { workspace = true }
 indicatif = { workspace = true }
 indicatif-log-bridge = { workspace = true }
 log = { workspace = true }
