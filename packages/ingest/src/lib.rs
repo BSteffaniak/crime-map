@@ -339,7 +339,9 @@ pub async fn sync_source(
                 },
             );
             (since, 0)
-        } else if max_occurred.is_some() {
+        } else {
+            // Not fully synced yet — check if we can resume from a
+            // previous partial run by counting existing records.
             let record_count = source_db::get_record_count(conn)?;
             if record_count > 0 {
                 log::info!(
@@ -350,9 +352,6 @@ pub async fn sync_source(
                 log::info!("{}: full sync (first run)", source.name());
             }
             (None, record_count)
-        } else {
-            log::info!("{}: full sync (first run)", source.name());
-            (None, 0)
         }
     };
 
@@ -400,6 +399,11 @@ pub async fn sync_source(
     // Wait for the fetcher task to finish and check for errors
     let fetch_result = fetch_handle.await?;
     if let Err(e) = fetch_result {
+        // Save progress so the next run can resume from where we left off
+        // (don't mark as fully_synced since we didn't finish).
+        if let Err(meta_err) = source_db::update_sync_metadata(conn, source.name()) {
+            log::warn!("Failed to save sync metadata after fetch error: {meta_err}");
+        }
         return Err(format!("Fetch error for {}: {e}", source.name()).into());
     }
 

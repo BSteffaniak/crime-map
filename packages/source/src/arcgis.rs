@@ -106,6 +106,7 @@ pub async fn fetch_arcgis(
     let where_clause = build_where_clause(base_where, config.date_column, options.since.as_ref());
     let num_layers = config.query_urls.len();
     let mut total_fetched: u64 = 0;
+    let display_offset: u64 = options.resume_offset;
 
     // ── Pre-fetch count ──────────────────────────────────────────────
     let total_available = query_arcgis_counts(&client, config, &where_clause).await;
@@ -206,8 +207,9 @@ pub async fn fetch_arcgis(
                     String::new()
                 };
                 log::info!(
-                    "{}: {layer_label}{total_fetched} / {target} fetched",
+                    "{}: {layer_label}{} / {target} fetched",
                     config.label,
+                    display_offset + total_fetched,
                 );
             } else {
                 log::info!("{}: offset={offset}, limit={page_limit}", config.label);
@@ -252,12 +254,13 @@ pub async fn fetch_arcgis(
         }
     }
 
+    let total_with_resumed = display_offset + total_fetched;
     log::info!(
-        "{}: download complete — {total_fetched} records",
+        "{}: download complete — {total_with_resumed} records",
         config.label,
     );
     progress.finish(format!(
-        "{}: download complete -- {total_fetched} records",
+        "{}: download complete -- {total_with_resumed} records",
         config.label
     ));
     Ok(total_fetched)

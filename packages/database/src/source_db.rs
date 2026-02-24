@@ -226,6 +226,9 @@ pub fn get_record_count(conn: &Connection) -> Result<u64, DbError> {
 /// Returns the maximum `occurred_at` timestamp, or `None` if no
 /// incidents exist.
 ///
+/// Tries multiple timestamp formats to handle `DuckDB`'s text cast
+/// variations (with/without fractional seconds, with/without timezone).
+///
 /// # Errors
 ///
 /// Returns [`DbError`] if the query fails.
@@ -237,13 +240,40 @@ pub fn get_max_occurred_at(
     )?;
     let result: Option<String> = stmt.query_row([], |row| row.get(0))?;
 
-    Ok(result.and_then(|s| {
-        chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S")
-            .ok()
-            .map(|naive| {
-                chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc)
-            })
-    }))
+    Ok(result.and_then(|s| parse_timestamp(&s)))
+}
+
+/// Parses a `DuckDB` timestamp text representation into a UTC `DateTime`.
+///
+/// `DuckDB`'s `::TEXT` cast can produce several formats depending on the
+/// stored precision:
+/// - `2024-01-15 10:30:00` (no fractional seconds)
+/// - `2024-01-15 10:30:00.123` (fractional seconds)
+/// - `2024-01-15 10:30:00+00` (with timezone)
+/// - `2024-01-15 10:30:00.123+00` (both)
+///
+/// This function tries them in order and returns the first successful parse.
+fn parse_timestamp(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::{DateTime, NaiveDateTime, Utc};
+
+    // Try parsing as a full DateTime with timezone first
+    if let Ok(dt) = DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%z") {
+        return Some(dt.with_timezone(&Utc));
+    }
+    if let Ok(dt) = DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f%z") {
+        return Some(dt.with_timezone(&Utc));
+    }
+
+    // Fall back to naive (no timezone) — assume UTC
+    if let Ok(naive) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+        return Some(DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc));
+    }
+    if let Ok(naive) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f") {
+        return Some(DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc));
+    }
+
+    log::warn!("Failed to parse timestamp: {s:?}");
+    None
 }
 
 /// Gets a metadata value from the `_meta` table.
