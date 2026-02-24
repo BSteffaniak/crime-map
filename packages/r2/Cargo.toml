@@ -13,10 +13,12 @@ crime_map_source = { workspace = true }
 
 aws-sdk-s3 = { workspace = true, features = [
   "behavior-version-latest",
+  "rt-tokio",
   "rustls",
 ] }
 aws-config = { workspace = true, features = [
   "behavior-version-latest",
+  "rt-tokio",
   "rustls",
 ] }
 
