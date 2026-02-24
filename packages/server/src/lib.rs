@@ -57,27 +57,22 @@ pub struct DuckDbPool {
 impl DuckDbPool {
     /// Opens `size` read-only connections to the `DuckDB` file at `path`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if any connection fails to open.
-    #[must_use]
-    pub fn new(path: &Path, size: usize) -> Self {
-        let connections = (0..size)
-            .map(|_| {
-                let conn = duckdb::Connection::open_with_flags(
-                    path,
-                    duckdb::Config::default()
-                        .access_mode(duckdb::AccessMode::ReadOnly)
-                        .expect("Failed to set DuckDB access mode"),
-                )
-                .expect("Failed to open DuckDB connection for pool");
-                Mutex::new(conn)
-            })
-            .collect();
-        Self {
+    /// Returns a `duckdb::Error` if any connection fails to open.
+    pub fn new(path: &Path, size: usize) -> Result<Self, duckdb::Error> {
+        let mut connections = Vec::with_capacity(size);
+        for _ in 0..size {
+            let conn = duckdb::Connection::open_with_flags(
+                path,
+                duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?,
+            )?;
+            connections.push(Mutex::new(conn));
+        }
+        Ok(Self {
             connections,
             next: AtomicUsize::new(0),
-        }
+        })
     }
 
     /// Acquires the next connection from the pool (round-robin).
@@ -160,7 +155,8 @@ fn init_data_state(dir: &Path) -> Result<DataState, Box<dyn std::error::Error>> 
 
     log::info!("Opening H3 hexbin DuckDB connection pool...");
     let h3_path = dir.join("h3.duckdb");
-    let h3_pool = DuckDbPool::new(&h3_path, 4);
+    let h3_pool =
+        DuckDbPool::new(&h3_path, 4).map_err(|e| format!("Failed to open H3 DuckDB pool: {e}"))?;
 
     log::info!("Opening analytics DuckDB database...");
     let analytics_path = dir.join("analytics.duckdb");

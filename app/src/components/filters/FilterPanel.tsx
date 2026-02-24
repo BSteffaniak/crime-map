@@ -32,7 +32,7 @@ interface FilterPanelProps {
   onSetSeverityMin: (value: number) => void;
   onSetDatePreset: (preset: string | null) => void;
   onSetArrestFilter: (value: boolean | null) => void;
-  onToggleSource: (sourceId: number) => void;
+  onToggleSource: (sourceId: string) => void;
   onClearSources: () => void;
   onToggleBoundary: (type: string, geoid: string) => void;
   onClearBoundaryFilter: (type: string) => void;
@@ -65,7 +65,8 @@ export default function FilterPanel({
     const matchesSearch = (s: ApiSource) =>
       !q ||
       s.name.toLowerCase().includes(q) ||
-      s.coverageArea.toLowerCase().includes(q);
+      s.city.toLowerCase().includes(q) ||
+      s.state.toLowerCase().includes(q);
 
     // Pinned: selected sources, always shown (even if 0 in viewport after panning away)
     const pinned = sources

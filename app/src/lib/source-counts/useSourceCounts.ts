@@ -2,7 +2,7 @@
  * React hook for fetching per-source incident counts from the server.
  *
  * Queries GET /api/source-counts with the current viewport and filters.
- * Returns a Record<number, number> mapping source_id to viewport count.
+ * Returns a Record<string, number> mapping source_id to viewport count.
  * Only sources with >0 incidents in the viewport are included.
  *
  * Fetch scheduling matches the hexbins/sidebar pattern:
@@ -18,7 +18,7 @@ import { VIEWPORT_DEBOUNCE_MS } from "../map-config";
 import { appendBoundaryParams } from "../boundary-params";
 
 /** source_id -> viewport incident count */
-export type SourceCounts = Record<number, number>;
+export type SourceCounts = Record<string, number>;
 
 /**
  * Builds the query string for the source-counts API.

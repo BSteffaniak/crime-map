@@ -112,8 +112,8 @@ function parseFiltersFromUrl(): FilterState {
   if (sources) {
     filters.sources = sources
       .split(",")
-      .map((s) => parseInt(s, 10))
-      .filter((n) => !isNaN(n));
+      .map((s) => s.trim())
+      .filter(Boolean);
   }
 
   // Boundary filters
@@ -247,7 +247,7 @@ export function useFilters() {
     setFilters((prev) => ({ ...prev, arrestMade: value }));
   }, []);
 
-  const toggleSource = useCallback((sourceId: number) => {
+  const toggleSource = useCallback((sourceId: string) => {
     setFilters((prev) => {
       const exists = prev.sources.includes(sourceId);
       return {
@@ -259,7 +259,7 @@ export function useFilters() {
     });
   }, []);
 
-  const setSources = useCallback((sourceIds: number[]) => {
+  const setSources = useCallback((sourceIds: string[]) => {
     setFilters((prev) => ({ ...prev, sources: sourceIds }));
   }, []);
 

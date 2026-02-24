@@ -15,8 +15,8 @@ export default function SourcesPanel({ sources }: SourcesPanelProps) {
     return sources.filter(
       (s) =>
         s.name.toLowerCase().includes(q) ||
-        s.coverageArea.toLowerCase().includes(q) ||
-        s.sourceType.toLowerCase().includes(q),
+        s.city.toLowerCase().includes(q) ||
+        s.state.toLowerCase().includes(q),
     );
   }, [sources, search]);
 
@@ -80,10 +80,7 @@ export default function SourcesPanel({ sources }: SourcesPanelProps) {
             </div>
 
             <div className="mt-1 ml-[22px] flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-              <span>{source.coverageArea}</span>
-              <span className="rounded bg-accent px-1.5 py-0.5 text-[10px] font-medium uppercase">
-                {source.sourceType.replace(/_/g, " ")}
-              </span>
+              <span>{source.city}, {source.state}</span>
               <span className="tabular-nums">
                 {source.recordCount.toLocaleString()} records
               </span>

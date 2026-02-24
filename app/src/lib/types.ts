@@ -101,7 +101,7 @@ export interface FilterState {
   dateTo: string | null;
   datePreset: string | null;
   arrestMade: boolean | null;
-  sources: number[];
+  sources: string[];
   /** Selected state FIPS codes. */
   stateFips: string[];
   /** Selected county GEOIDs. */
@@ -154,10 +154,10 @@ export function categoryColor(category: string): string {
 
 /** A data source as returned by GET /api/sources. */
 export interface ApiSource {
-  id: number;
+  id: string;
   name: string;
-  sourceType: string;
   recordCount: number;
-  coverageArea: string;
+  city: string;
+  state: string;
   portalUrl: string | null;
 }

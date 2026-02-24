@@ -23,7 +23,7 @@ export default function IncidentSidebar({ bbox, filters, settledRef, sources }: 
     useSidebar(bbox, filters, settledRef);
 
   // Build a map from source ID to portal URL for quick lookup
-  const portalUrlMap = useRef(new Map<number, string | null>());
+  const portalUrlMap = useRef(new Map<string, string | null>());
   portalUrlMap.current = new Map(sources.map((s) => [s.id, s.portalUrl]));
 
   const scrollRef = useRef<HTMLDivElement>(null);

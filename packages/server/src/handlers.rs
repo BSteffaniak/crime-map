@@ -337,7 +337,7 @@ fn parse_sidebar_row(row: &Row) -> SidebarIncident {
 
     SidebarIncident {
         id: row.to_value("id").unwrap_or(0),
-        source_id: row.to_value("source_id").unwrap_or(0),
+        source_id: row.to_value("source_id").unwrap_or_default(),
         source_name: row.to_value("source_name").unwrap_or_default(),
         source_incident_id: row.to_value("source_incident_id").unwrap_or(None),
         subcategory: row.to_value("subcategory").unwrap_or_default(),
@@ -425,7 +425,7 @@ fn build_features_query(
         feat_idx += 1;
     }
 
-    // Source filter — source IDs are integers, stored as source_id in SQLite
+    // Source filter — source IDs are strings (e.g., "dc_mpd", "chicago_pd")
     if let Some(ref sources_raw) = params.sources {
         let source_ids: Vec<&str> = sources_raw
             .split(',')
@@ -443,9 +443,7 @@ fn build_features_query(
                 .collect();
             conditions.push(format!("source_id IN ({})", placeholders.join(", ")));
             for id_str in &source_ids {
-                if let Ok(id) = id_str.parse::<i32>() {
-                    feature_params.push(DatabaseValue::Int32(id));
-                }
+                feature_params.push(DatabaseValue::String((*id_str).to_string()));
             }
         }
     }
@@ -590,7 +588,7 @@ fn execute_duckdb_source_counts(
     db_conn: &duckdb::Connection,
     params: &CountFilterParams,
     bbox: Option<&BoundingBox>,
-) -> Result<BTreeMap<i32, u64>, String> {
+) -> Result<BTreeMap<String, u64>, String> {
     let mut conditions: Vec<String> = Vec::new();
     let mut bind_values: Vec<DuckValue> = Vec::new();
 
@@ -626,7 +624,7 @@ fn execute_duckdb_source_counts(
         .next()
         .map_err(|e| format!("DuckDB source counts row error: {e}"))?
     {
-        let source_id: i32 = row.get(0).map_err(|e| format!("get source_id: {e}"))?;
+        let source_id: String = row.get(0).map_err(|e| format!("get source_id: {e}"))?;
         let count: i64 = row.get(1).map_err(|e| format!("get count: {e}"))?;
         #[allow(clippy::cast_sign_loss)]
         let count_u64 = count as u64;
@@ -1287,8 +1285,8 @@ fn build_count_conditions(
         bind_values.push(DuckValue::Int(i32::from(arrest)));
     }
 
-    // Source ID filter — integer-based
-    add_count_int_in_filter(
+    // Source ID filter — string-based (e.g., "dc_mpd", "chicago_pd")
+    add_count_in_filter(
         params.sources.as_deref(),
         "source_id",
         conditions,
@@ -1353,32 +1351,6 @@ fn add_count_in_filter(
     }
 }
 
-/// Adds an `IN (...)` filter for a comma-separated integer parameter to the
-/// `DuckDB` count query conditions and bind values.
-fn add_count_int_in_filter(
-    param_value: Option<&str>,
-    column: &str,
-    conditions: &mut Vec<String>,
-    bind_values: &mut Vec<DuckValue>,
-) {
-    let Some(raw) = param_value else { return };
-    let items: Vec<i32> = raw
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .filter_map(|s| s.parse::<i32>().ok())
-        .collect();
-    if items.is_empty() {
-        return;
-    }
-
-    let placeholders: Vec<&str> = items.iter().map(|_| "?").collect();
-    conditions.push(format!("{column} IN ({})", placeholders.join(", ")));
-    for item in items {
-        bind_values.push(DuckValue::Int(item));
-    }
-}
-
 /// Helper enum for `DuckDB` parameter binding.
 enum DuckValue {
     Int(i32),
@@ -1439,7 +1411,7 @@ fn build_h3_conditions(
         bind_values.push(DuckValue::Int(i32::from(arrest)));
     }
 
-    add_count_int_in_filter(
+    add_count_in_filter(
         params.sources.as_deref(),
         "h.source_id",
         conditions,

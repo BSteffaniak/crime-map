@@ -199,8 +199,8 @@ pub struct SidebarResponse {
 pub struct SidebarIncident {
     /// Unique incident ID.
     pub id: i64,
-    /// Database source ID (foreign key to `crime_sources`).
-    pub source_id: i32,
+    /// Source identifier (e.g., `"dc_mpd"`).
+    pub source_id: String,
     /// Human-readable data source name.
     pub source_name: String,
     /// Source-specific incident ID.
@@ -418,16 +418,18 @@ pub struct HexbinEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiSource {
-    /// Database primary key.
-    pub id: i32,
+    /// Source identifier (e.g., `"dc_mpd"`, `"chicago_pd"`).
+    pub id: String,
     /// Human-readable source name.
     pub name: String,
-    /// Type of data provider.
-    pub source_type: String,
     /// Total number of records from this source.
     pub record_count: i64,
-    /// Coverage area description.
-    pub coverage_area: String,
+    /// City covered by this source.
+    #[serde(default)]
+    pub city: String,
+    /// State abbreviation covered by this source.
+    #[serde(default)]
+    pub state: String,
     /// Human-readable portal URL for the dataset.
     pub portal_url: Option<String>,
 }
