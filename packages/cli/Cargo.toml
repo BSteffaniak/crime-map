@@ -15,6 +15,7 @@ path = "src/main.rs"
 crime_map_conversations = { workspace = true }
 crime_map_cli_utils = { workspace = true }
 crime_map_database = { workspace = true }
+crime_map_geography_models = { workspace = true }
 crime_map_ingest = { workspace = true }
 crime_map_generate = { workspace = true }
 crime_map_discover = { workspace = true }

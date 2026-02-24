@@ -33,6 +33,28 @@ pub type AddressGroup<'a> = (String, &'a (String, String, String), &'a Vec<Strin
 
 // ── High-level orchestration args ────────────────────────────────
 
+/// Arguments for [`run_ingest_boundaries`].
+pub struct IngestBoundariesArgs {
+    /// State FIPS codes to ingest boundaries for. Empty means all states.
+    pub state_fips: Vec<String>,
+    /// Force re-import even if boundaries already exist.
+    pub force: bool,
+}
+
+/// Result of a [`run_ingest_boundaries`] call.
+pub struct IngestBoundariesResult {
+    /// Number of census tracts ingested.
+    pub tracts: u64,
+    /// Number of census places ingested.
+    pub places: u64,
+    /// Number of counties ingested.
+    pub counties: u64,
+    /// Number of states ingested.
+    pub states: u64,
+    /// Number of neighborhoods ingested.
+    pub neighborhoods: u64,
+}
+
 /// Arguments for [`run_sync`].
 pub struct SyncArgs {
     /// Source IDs to sync. Empty means all enabled sources.
@@ -223,6 +245,166 @@ pub fn run_geocode(
         missing_geocoded,
         re_geocoded,
     })
+}
+
+/// Ingests census boundaries (tracts, places, counties, states) and
+/// neighborhoods into the shared `boundaries.duckdb`.
+///
+/// Each boundary type has fast skip logic: a single `COUNT(*)` query per
+/// state checks whether data already exists, skipping states that are
+/// already populated (no network I/O). Pass `force = true` to re-fetch
+/// everything.
+///
+/// If `args.state_fips` is empty, ingests all 51 states + DC.
+///
+/// # Errors
+///
+/// Returns an error if database connections or any ingestion step fails.
+#[allow(clippy::too_many_lines, clippy::future_not_send)]
+pub async fn run_ingest_boundaries(
+    args: &IngestBoundariesArgs,
+) -> Result<IngestBoundariesResult, Box<dyn std::error::Error>> {
+    let boundaries_conn = crime_map_database::boundaries_db::open_default()?;
+
+    let fips_refs: Vec<&str> = args.state_fips.iter().map(String::as_str).collect();
+    let has_filter = !fips_refs.is_empty();
+
+    // --- Tracts ---
+    let tracts = if has_filter {
+        log::info!(
+            "Ingesting census tracts for states: {}",
+            fips_refs.join(",")
+        );
+        crime_map_geography::ingest::ingest_tracts_for_states(
+            &boundaries_conn,
+            &fips_refs,
+            args.force,
+        )
+        .await?
+    } else {
+        log::info!("Ingesting census tracts for all states...");
+        crime_map_geography::ingest::ingest_all_tracts(&boundaries_conn, args.force).await?
+    };
+    log::info!("Census tracts: {tracts} ingested");
+
+    // --- Places ---
+    let places = if has_filter {
+        log::info!(
+            "Ingesting census places for states: {}",
+            fips_refs.join(",")
+        );
+        crime_map_geography::ingest::ingest_places_for_states(
+            &boundaries_conn,
+            &fips_refs,
+            args.force,
+        )
+        .await?
+    } else {
+        log::info!("Ingesting census places for all states...");
+        crime_map_geography::ingest::ingest_all_places(&boundaries_conn, args.force).await?
+    };
+    log::info!("Census places: {places} ingested");
+
+    // --- Counties ---
+    let counties = if has_filter {
+        log::info!(
+            "Ingesting county boundaries for states: {}",
+            fips_refs.join(",")
+        );
+        crime_map_geography::ingest::ingest_counties_for_states(
+            &boundaries_conn,
+            &fips_refs,
+            args.force,
+        )
+        .await?
+    } else {
+        log::info!("Ingesting county boundaries for all states...");
+        crime_map_geography::ingest::ingest_all_counties(&boundaries_conn, args.force).await?
+    };
+    log::info!("Counties: {counties} ingested");
+
+    // --- States (always all — there's no per-state filter for state boundaries) ---
+    log::info!("Ingesting US state boundaries...");
+    let states =
+        crime_map_geography::ingest::ingest_all_states(&boundaries_conn, args.force).await?;
+    log::info!("States: {states} ingested");
+
+    // --- Neighborhoods ---
+    let all_nbhd_sources = crime_map_neighborhood::registry::all_sources();
+    let mut neighborhoods = 0u64;
+
+    if !all_nbhd_sources.is_empty() {
+        let client = reqwest::Client::builder()
+            .user_agent("crime-map/1.0")
+            .build()?;
+
+        let mut new_ingested = false;
+        for source in &all_nbhd_sources {
+            // Skip sources that already have neighborhoods (unless force)
+            if !args.force {
+                let existing: i64 = boundaries_conn.query_row(
+                    "SELECT COUNT(*) FROM neighborhoods WHERE source_id = ?",
+                    duckdb::params![source.id()],
+                    |row| row.get(0),
+                )?;
+                if existing > 0 {
+                    log::info!(
+                        "{}: {existing} neighborhoods already exist, skipping",
+                        source.id()
+                    );
+                    continue;
+                }
+            }
+
+            match crime_map_neighborhood::ingest::ingest_source(&boundaries_conn, &client, source)
+                .await
+            {
+                Ok(count) => {
+                    neighborhoods += count;
+                    if count > 0 {
+                        new_ingested = true;
+                    }
+                }
+                Err(e) => {
+                    log::error!("Failed to ingest neighborhoods from {}: {e}", source.id());
+                }
+            }
+        }
+
+        // Build crosswalk only if new data was ingested
+        if new_ingested
+            && let Err(e) = crime_map_neighborhood::ingest::build_crosswalk(&boundaries_conn)
+        {
+            log::error!("Failed to build tract-neighborhood crosswalk: {e}");
+        }
+    }
+    log::info!("Neighborhoods: {neighborhoods} ingested");
+
+    Ok(IngestBoundariesResult {
+        tracts,
+        places,
+        counties,
+        states,
+        neighborhoods,
+    })
+}
+
+/// Returns the number of census tracts in `boundaries.duckdb` that have
+/// geometry data. A zero return means boundary counts and fills will be
+/// empty after generation.
+///
+/// # Errors
+///
+/// Returns an error if the database connection or query fails.
+pub fn boundary_tract_count() -> Result<u64, Box<dyn std::error::Error>> {
+    let conn = crime_map_database::boundaries_db::open_default()?;
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM census_tracts WHERE boundary_geojson IS NOT NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    #[allow(clippy::cast_sign_loss)]
+    Ok(count as u64)
 }
 
 /// Resolves source IDs to definitions. If `source_ids` is empty, returns

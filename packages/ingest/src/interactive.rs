@@ -18,6 +18,8 @@ enum IngestAction {
     Geocode,
     IngestTracts,
     IngestPlaces,
+    IngestCounties,
+    IngestStates,
     IngestNeighborhoods,
 }
 
@@ -28,6 +30,8 @@ impl IngestAction {
         Self::Geocode,
         Self::IngestTracts,
         Self::IngestPlaces,
+        Self::IngestCounties,
+        Self::IngestStates,
         Self::IngestNeighborhoods,
     ];
 
@@ -39,6 +43,8 @@ impl IngestAction {
             Self::Geocode => "Geocode missing coordinates",
             Self::IngestTracts => "Ingest census tracts",
             Self::IngestPlaces => "Ingest census places",
+            Self::IngestCounties => "Ingest counties",
+            Self::IngestStates => "Ingest US state boundaries",
             Self::IngestNeighborhoods => "Ingest neighborhoods",
         }
     }
@@ -70,6 +76,8 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
         IngestAction::Geocode => geocode_interactive(multi)?,
         IngestAction::IngestTracts => ingest_census_tracts().await?,
         IngestAction::IngestPlaces => ingest_census_places().await?,
+        IngestAction::IngestCounties => ingest_census_counties().await?,
+        IngestAction::IngestStates => ingest_census_states().await?,
         IngestAction::IngestNeighborhoods => ingest_neighborhoods().await?,
     }
 
@@ -232,6 +240,58 @@ async fn ingest_census_places() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Prompts for state FIPS codes and ingests county boundaries.
+#[allow(clippy::future_not_send)]
+async fn ingest_census_counties() -> Result<(), Box<dyn std::error::Error>> {
+    let boundaries_conn = crime_map_database::boundaries_db::open_default()?;
+
+    let states_str: String = Input::new()
+        .with_prompt("Comma-separated state FIPS codes (empty for all)")
+        .allow_empty(true)
+        .interact_text()?;
+
+    let start = Instant::now();
+    let total = if states_str.trim().is_empty() {
+        log::info!("Ingesting county boundaries for all states...");
+        crime_map_geography::ingest::ingest_all_counties(&boundaries_conn, false).await?
+    } else {
+        let fips_codes: Vec<&str> = states_str.split(',').map(str::trim).collect();
+        log::info!("Ingesting county boundaries for states: {states_str}");
+        crime_map_geography::ingest::ingest_counties_for_states(
+            &boundaries_conn,
+            &fips_codes,
+            false,
+        )
+        .await?
+    };
+
+    let elapsed = start.elapsed();
+    log::info!(
+        "County boundary ingestion complete: {total} counties in {:.1}s",
+        elapsed.as_secs_f64()
+    );
+
+    Ok(())
+}
+
+/// Ingests US state boundaries (all 50 states + DC).
+#[allow(clippy::future_not_send)]
+async fn ingest_census_states() -> Result<(), Box<dyn std::error::Error>> {
+    let boundaries_conn = crime_map_database::boundaries_db::open_default()?;
+
+    let start = Instant::now();
+    log::info!("Ingesting US state boundaries...");
+    let total = crime_map_geography::ingest::ingest_all_states(&boundaries_conn, false).await?;
+
+    let elapsed = start.elapsed();
+    log::info!(
+        "State boundary ingestion complete: {total} states in {:.1}s",
+        elapsed.as_secs_f64()
+    );
+
+    Ok(())
+}
+
 /// Prompts for source filter and ingests neighborhood boundaries.
 #[allow(clippy::future_not_send)]
 async fn ingest_neighborhoods() -> Result<(), Box<dyn std::error::Error>> {
@@ -272,20 +332,44 @@ async fn ingest_neighborhoods() -> Result<(), Box<dyn std::error::Error>> {
 
     let start = Instant::now();
     let mut total = 0u64;
+    let mut new_ingested = false;
 
     for source in &sources_to_ingest {
+        // Skip sources that already have neighborhoods
+        let existing: i64 = boundaries_conn.query_row(
+            "SELECT COUNT(*) FROM neighborhoods WHERE source_id = ?",
+            duckdb::params![source.id()],
+            |row| row.get(0),
+        )?;
+        if existing > 0 {
+            log::info!(
+                "{}: {existing} neighborhoods already exist, skipping",
+                source.id()
+            );
+            continue;
+        }
+
         match crime_map_neighborhood::ingest::ingest_source(&boundaries_conn, &client, source).await
         {
-            Ok(count) => total += count,
+            Ok(count) => {
+                total += count;
+                if count > 0 {
+                    new_ingested = true;
+                }
+            }
             Err(e) => {
                 log::error!("Failed to ingest {}: {e}", source.id());
             }
         }
     }
 
-    // Build the tract-to-neighborhood crosswalk
-    if let Err(e) = crime_map_neighborhood::ingest::build_crosswalk(&boundaries_conn) {
-        log::error!("Failed to build crosswalk: {e}");
+    // Build the tract-to-neighborhood crosswalk only if new data was ingested
+    if new_ingested {
+        if let Err(e) = crime_map_neighborhood::ingest::build_crosswalk(&boundaries_conn) {
+            log::error!("Failed to build crosswalk: {e}");
+        }
+    } else {
+        log::info!("No new neighborhoods ingested, skipping crosswalk rebuild");
     }
 
     let elapsed = start.elapsed();

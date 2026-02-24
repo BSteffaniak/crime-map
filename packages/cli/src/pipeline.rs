@@ -15,13 +15,14 @@ use crime_map_generate::{
     GenerateArgs, OUTPUT_ANALYTICS_DB, OUTPUT_BOUNDARIES_DB, OUTPUT_BOUNDARIES_PMTILES,
     OUTPUT_COUNT_DB, OUTPUT_H3_DB, OUTPUT_INCIDENTS_DB, OUTPUT_INCIDENTS_PMTILES, OUTPUT_METADATA,
 };
-use crime_map_ingest::{GeocodeArgs, SyncArgs};
-use dialoguer::{Confirm, Input, MultiSelect};
+use crime_map_ingest::{GeocodeArgs, IngestBoundariesArgs, SyncArgs};
+use dialoguer::{Confirm, Input, MultiSelect, Select};
 
 /// Steps available in the pipeline.
 enum PipelineStep {
     Sync,
     Geocode,
+    IngestBoundaries,
     Generate,
     R2Pull,
     R2Push,
@@ -31,6 +32,7 @@ impl PipelineStep {
     const ALL: &[Self] = &[
         Self::Sync,
         Self::Geocode,
+        Self::IngestBoundaries,
         Self::Generate,
         Self::R2Pull,
         Self::R2Push,
@@ -41,6 +43,7 @@ impl PipelineStep {
         match self {
             Self::Sync => "Sync sources",
             Self::Geocode => "Geocode",
+            Self::IngestBoundaries => "Ingest boundaries (tracts, places, counties, states)",
             Self::Generate => "Generate tiles & databases",
             Self::R2Pull => "Pull from R2 (before sync)",
             Self::R2Push => "Push to R2 (after pipeline)",
@@ -51,7 +54,7 @@ impl PipelineStep {
     #[must_use]
     const fn default_enabled(&self) -> bool {
         match self {
-            Self::Sync | Self::Geocode | Self::Generate => true,
+            Self::Sync | Self::Geocode | Self::IngestBoundaries | Self::Generate => true,
             Self::R2Pull | Self::R2Push => false,
         }
     }
@@ -94,6 +97,9 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
     let has_geocode = selected_steps
         .iter()
         .any(|&i| matches!(PipelineStep::ALL[i], PipelineStep::Geocode));
+    let has_ingest_boundaries = selected_steps
+        .iter()
+        .any(|&i| matches!(PipelineStep::ALL[i], PipelineStep::IngestBoundaries));
     let has_generate = selected_steps
         .iter()
         .any(|&i| matches!(PipelineStep::ALL[i], PipelineStep::Generate));
@@ -128,10 +134,61 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
         (false, None)
     };
 
-    // --- 4. Advanced options gate ---
+    // --- 4. Boundary ingestion scope ---
+    let boundary_state_fips: Vec<String> = if has_ingest_boundaries {
+        let scope = Select::new()
+            .with_prompt("Boundary ingestion scope")
+            .items([
+                "All states (50 + DC)",
+                "Only states with active sources",
+                "Specific state FIPS codes",
+            ])
+            .default(1)
+            .interact()?;
+
+        match scope {
+            0 => Vec::new(), // empty = all states
+            1 => {
+                // Derive state FIPS from the selected source definitions
+                let all_defs = crime_map_ingest::all_sources();
+                let selected_defs: Vec<_> = all_defs
+                    .iter()
+                    .filter(|s| source_ids.contains(&s.id().to_string()))
+                    .collect();
+                let mut fips: std::collections::BTreeSet<String> =
+                    std::collections::BTreeSet::new();
+                for def in &selected_defs {
+                    if let Some(code) = crime_map_geography_models::fips::abbr_to_fips(&def.state) {
+                        fips.insert(code.to_string());
+                    }
+                }
+                if fips.is_empty() {
+                    log::warn!(
+                        "No state FIPS codes derived from selected sources, falling back to all"
+                    );
+                }
+                fips.into_iter().collect()
+            }
+            _ => {
+                let input: String = Input::new()
+                    .with_prompt("Comma-separated state FIPS codes (e.g., 11,24,06)")
+                    .interact_text()?;
+                input
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    // --- 5. Advanced options gate ---
     let mut geocode_batch_size = 50_000u64;
     let mut geocode_nominatim_only = false;
     let mut generate_force = false;
+    let mut boundary_force = false;
     let mut r2_pull_shared = true; // default: pull shared before sync
     let mut r2_push_shared = false; // default: don't push shared (unchanged by pipeline)
 
@@ -157,6 +214,13 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
         if has_generate {
             generate_force = Confirm::new()
                 .with_prompt("Force regeneration?")
+                .default(false)
+                .interact()?;
+        }
+
+        if has_ingest_boundaries {
+            boundary_force = Confirm::new()
+                .with_prompt("Force boundary re-import (even if already populated)?")
                 .default(false)
                 .interact()?;
         }
@@ -267,6 +331,62 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
                 if !ask_continue()? {
                     return Ok(());
                 }
+            }
+        }
+    }
+
+    // --- Ingest Boundaries ---
+    if has_ingest_boundaries {
+        current_step += 1;
+        log::info!("[{current_step}/{total_steps}] Ingesting boundaries...");
+
+        let args = IngestBoundariesArgs {
+            state_fips: boundary_state_fips,
+            force: boundary_force,
+        };
+
+        match crime_map_ingest::run_ingest_boundaries(&args).await {
+            Ok(result) => {
+                let total = result.tracts
+                    + result.places
+                    + result.counties
+                    + result.states
+                    + result.neighborhoods;
+                log::info!(
+                    "[{current_step}/{total_steps}] Boundary ingestion complete: {total} total \
+                     (tracts={}, places={}, counties={}, states={}, neighborhoods={})",
+                    result.tracts,
+                    result.places,
+                    result.counties,
+                    result.states,
+                    result.neighborhoods,
+                );
+            }
+            Err(e) => {
+                log::error!("Boundary ingestion failed: {e}");
+                if !ask_continue()? {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    // --- Pre-generate boundary check ---
+    if has_generate && !has_ingest_boundaries {
+        // Warn if boundaries.duckdb is empty and the user didn't run boundary ingestion
+        match crime_map_ingest::boundary_tract_count() {
+            Ok(0) => {
+                log::warn!(
+                    "WARNING: boundaries.duckdb has 0 census tracts. \
+                     Boundary counts and fills will be empty after generation. \
+                     Consider running boundary ingestion first."
+                );
+            }
+            Ok(n) => {
+                log::info!("Boundary check: {n} census tracts available for spatial lookups");
+            }
+            Err(e) => {
+                log::warn!("Could not check boundary data: {e}");
             }
         }
     }
