@@ -58,7 +58,7 @@ runs:
       id: cache-duckdb
       uses: actions/cache@v4
       with:
-        path: /usr/local/lib/duckdb
+        path: ~/duckdb-lib
         key: duckdb-linux-amd64-v1.4.4
 
     - name: Install DuckDB native library
@@ -66,36 +66,34 @@ runs:
       shell: bash
       run: |
         wget -q https://github.com/duckdb/duckdb/releases/download/v1.4.4/libduckdb-linux-amd64.zip
-        sudo mkdir -p /usr/local/lib/duckdb
-        sudo unzip -o libduckdb-linux-amd64.zip -d /usr/local/lib/duckdb
+        mkdir -p ~/duckdb-lib
+        unzip -o libduckdb-linux-amd64.zip -d ~/duckdb-lib
 
     - name: Set DuckDB environment variables
       shell: bash
       run: |
-        echo "DUCKDB_LIB_DIR=/usr/local/lib/duckdb" >> "$GITHUB_ENV"
-        echo "DUCKDB_INCLUDE_DIR=/usr/local/lib/duckdb" >> "$GITHUB_ENV"
-        echo "LD_LIBRARY_PATH=/usr/local/lib/duckdb" >> "$GITHUB_ENV"
+        echo "DUCKDB_LIB_DIR=$HOME/duckdb-lib" >> "$GITHUB_ENV"
+        echo "DUCKDB_INCLUDE_DIR=$HOME/duckdb-lib" >> "$GITHUB_ENV"
+        echo "LD_LIBRARY_PATH=$HOME/duckdb-lib" >> "$GITHUB_ENV"
 
-    - name: Cache tippecanoe
+    - name: Cache tippecanoe + tile-join
       id: cache-tippecanoe
       uses: actions/cache@v4
       with:
-        path: /usr/local/bin/tippecanoe
-        key: tippecanoe-v2-linux-amd64
-
-    - name: Cache tile-join
-      id: cache-tile-join
-      uses: actions/cache@v4
-      with:
-        path: /usr/local/bin/tile-join
-        key: tile-join-v2-linux-amd64
+        path: ~/tools
+        key: tippecanoe-tile-join-v2-linux-amd64
 
     - name: Install tippecanoe + tile-join
-      if: steps.cache-tippecanoe.outputs.cache-hit != 'true' || steps.cache-tile-join.outputs.cache-hit != 'true'
+      if: steps.cache-tippecanoe.outputs.cache-hit != 'true'
       shell: bash
       run: |
         git clone --depth 1 https://github.com/felt/tippecanoe.git /tmp/tippecanoe
         make -j$(nproc) -C /tmp/tippecanoe
-        sudo cp /tmp/tippecanoe/tippecanoe /usr/local/bin/tippecanoe
-        sudo cp /tmp/tippecanoe/tile-join /usr/local/bin/tile-join
+        mkdir -p ~/tools
+        cp /tmp/tippecanoe/tippecanoe ~/tools/tippecanoe
+        cp /tmp/tippecanoe/tile-join ~/tools/tile-join
         rm -rf /tmp/tippecanoe
+
+    - name: Add tools to PATH
+      shell: bash
+      run: echo "$HOME/tools" >> "$GITHUB_PATH"

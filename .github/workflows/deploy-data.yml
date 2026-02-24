@@ -64,9 +64,6 @@ jobs:
 
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/crime_map
-      DUCKDB_LIB_DIR: /usr/local/lib/duckdb
-      DUCKDB_INCLUDE_DIR: /usr/local/lib/duckdb
-      LD_LIBRARY_PATH: /usr/local/lib/duckdb
 
     services:
       postgres:
