@@ -103,10 +103,28 @@ jobs:
             command: cargo ingest states
           - type: counties
             command: cargo ingest counties
-          - type: places
-            command: cargo ingest places
-          - type: tracts
-            command: cargo ingest tracts
+          # Tracts split into 5 chunks (~10 states each) for parallelism
+          - type: tracts-1
+            command: cargo ingest tracts --states=01,02,04,05,06,08,09,10,11,12
+          - type: tracts-2
+            command: cargo ingest tracts --states=13,15,16,17,18,19,20,21,22,23
+          - type: tracts-3
+            command: cargo ingest tracts --states=24,25,26,27,28,29,30,31,32,33
+          - type: tracts-4
+            command: cargo ingest tracts --states=34,35,36,37,38,39,40,41,42,44
+          - type: tracts-5
+            command: cargo ingest tracts --states=45,46,47,48,49,50,51,53,54,55,56
+          # Places split into 5 chunks (~10 states each) for parallelism
+          - type: places-1
+            command: cargo ingest places --states=01,02,04,05,06,08,09,10,11,12
+          - type: places-2
+            command: cargo ingest places --states=13,15,16,17,18,19,20,21,22,23
+          - type: places-3
+            command: cargo ingest places --states=24,25,26,27,28,29,30,31,32,33
+          - type: places-4
+            command: cargo ingest places --states=34,35,36,37,38,39,40,41,42,44
+          - type: places-5
+            command: cargo ingest places --states=45,46,47,48,49,50,51,53,54,55,56
           - type: neighborhoods
             command: cargo ingest neighborhoods
 
