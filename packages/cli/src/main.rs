@@ -14,6 +14,7 @@
 //! lines and progress bars never fight for the terminal.
 
 mod pipeline;
+mod r2;
 
 use dialoguer::Select;
 
@@ -25,6 +26,7 @@ enum Tool {
     Conversations,
     Server,
     Discover,
+    R2Sync,
 }
 
 impl Tool {
@@ -35,6 +37,7 @@ impl Tool {
         Self::Conversations,
         Self::Server,
         Self::Discover,
+        Self::R2Sync,
     ];
 
     #[must_use]
@@ -46,6 +49,7 @@ impl Tool {
             Self::Conversations => "Browse AI conversations",
             Self::Server => "Start server",
             Self::Discover => "Discover sources",
+            Self::R2Sync => "Sync R2 data",
         }
     }
 }
@@ -79,6 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await??;
         }
         Tool::Discover => crime_map_discover::interactive::run().await?,
+        Tool::R2Sync => r2::run().await?,
     }
 
     Ok(())

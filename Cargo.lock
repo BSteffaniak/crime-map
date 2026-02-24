@@ -1476,6 +1476,7 @@ dependencies = [
  "crime_map_discover",
  "crime_map_generate",
  "crime_map_ingest",
+ "crime_map_r2",
  "crime_map_server",
  "crime_map_source",
  "dialoguer",

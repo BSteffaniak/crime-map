@@ -18,6 +18,7 @@ crime_map_database = { workspace = true }
 crime_map_ingest = { workspace = true }
 crime_map_generate = { workspace = true }
 crime_map_discover = { workspace = true }
+crime_map_r2 = { workspace = true }
 crime_map_server = { workspace = true }
 crime_map_source = { workspace = true }
 
@@ -32,6 +33,7 @@ bedrock = ["crime_map_server/bedrock"]
 duckdb-bundled = [
   "crime_map_database/duckdb-bundled",
   "crime_map_generate/duckdb-bundled",
+  "crime_map_r2/duckdb-bundled",
   "crime_map_server/duckdb-bundled",
 ]
 fail-on-warnings = [
@@ -41,6 +43,7 @@ fail-on-warnings = [
   "crime_map_discover/fail-on-warnings",
   "crime_map_generate/fail-on-warnings",
   "crime_map_ingest/fail-on-warnings",
+  "crime_map_r2/fail-on-warnings",
   "crime_map_server/fail-on-warnings",
   "crime_map_source/fail-on-warnings",
 ]

@@ -23,10 +23,18 @@ enum PipelineStep {
     Sync,
     Geocode,
     Generate,
+    R2Pull,
+    R2Push,
 }
 
 impl PipelineStep {
-    const ALL: &[Self] = &[Self::Sync, Self::Geocode, Self::Generate];
+    const ALL: &[Self] = &[
+        Self::Sync,
+        Self::Geocode,
+        Self::Generate,
+        Self::R2Pull,
+        Self::R2Push,
+    ];
 
     #[must_use]
     const fn label(&self) -> &'static str {
@@ -34,6 +42,17 @@ impl PipelineStep {
             Self::Sync => "Sync sources",
             Self::Geocode => "Geocode",
             Self::Generate => "Generate tiles & databases",
+            Self::R2Pull => "Pull from R2 (before sync)",
+            Self::R2Push => "Push to R2 (after pipeline)",
+        }
+    }
+
+    /// Whether this step is enabled by default in the multi-select.
+    #[must_use]
+    const fn default_enabled(&self) -> bool {
+        match self {
+            Self::Sync | Self::Geocode | Self::Generate => true,
+            Self::R2Pull | Self::R2Push => false,
         }
     }
 }
@@ -53,7 +72,10 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
 
     // --- 1. Select pipeline steps ---
     let step_labels: Vec<&str> = PipelineStep::ALL.iter().map(PipelineStep::label).collect();
-    let defaults = vec![true; PipelineStep::ALL.len()];
+    let defaults: Vec<bool> = PipelineStep::ALL
+        .iter()
+        .map(PipelineStep::default_enabled)
+        .collect();
 
     let selected_steps = MultiSelect::new()
         .with_prompt("Pipeline steps (space=toggle, a=all, enter=confirm)")
@@ -75,6 +97,12 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
     let has_generate = selected_steps
         .iter()
         .any(|&i| matches!(PipelineStep::ALL[i], PipelineStep::Generate));
+    let has_r2_pull = selected_steps
+        .iter()
+        .any(|&i| matches!(PipelineStep::ALL[i], PipelineStep::R2Pull));
+    let has_r2_push = selected_steps
+        .iter()
+        .any(|&i| matches!(PipelineStep::ALL[i], PipelineStep::R2Push));
 
     // --- 2. Source selection (shared across all steps) ---
     let source_ids = crime_map_cli_utils::prompt_source_multiselect(
@@ -104,6 +132,8 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
     let mut geocode_batch_size = 50_000u64;
     let mut geocode_nominatim_only = false;
     let mut generate_force = false;
+    let mut r2_pull_shared = true; // default: pull shared before sync
+    let mut r2_push_shared = false; // default: don't push shared (unchanged by pipeline)
 
     let advanced = Confirm::new()
         .with_prompt("Configure advanced options?")
@@ -130,6 +160,20 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
                 .default(false)
                 .interact()?;
         }
+
+        if has_r2_pull {
+            r2_pull_shared = Confirm::new()
+                .with_prompt("R2 pull: include shared databases?")
+                .default(true)
+                .interact()?;
+        }
+
+        if has_r2_push {
+            r2_push_shared = Confirm::new()
+                .with_prompt("R2 push: include shared databases?")
+                .default(false)
+                .interact()?;
+        }
     }
 
     // --- 5. Execute pipeline ---
@@ -138,6 +182,29 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
     let mut current_step = 0usize;
 
     log::info!("Starting pipeline ({total_steps} steps)...");
+
+    // --- R2 Pull (before sync) ---
+    if has_r2_pull {
+        current_step += 1;
+        log::info!("[{current_step}/{total_steps}] Pulling from R2...");
+
+        match crime_map_r2::R2Client::from_env() {
+            Ok(r2) => {
+                let mut pulled = 0u64;
+                pulled += r2.pull_sources(&source_ids).await?;
+                if r2_pull_shared {
+                    pulled += r2.pull_shared().await?;
+                }
+                log::info!("[{current_step}/{total_steps}] R2 pull complete: {pulled} file(s)");
+            }
+            Err(e) => {
+                log::warn!("R2 not configured: {e}");
+                if !ask_continue()? {
+                    return Ok(());
+                }
+            }
+        }
+    }
 
     // --- Sync ---
     if has_sync {
@@ -238,6 +305,29 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
             }
             Err(e) => {
                 log::error!("Generation failed: {e}");
+                if !ask_continue()? {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    // --- R2 Push (after pipeline) ---
+    if has_r2_push {
+        current_step += 1;
+        log::info!("[{current_step}/{total_steps}] Pushing to R2...");
+
+        match crime_map_r2::R2Client::from_env() {
+            Ok(r2) => {
+                let mut pushed = 0u64;
+                pushed += r2.push_sources(&source_ids).await?;
+                if r2_push_shared {
+                    pushed += r2.push_shared().await?;
+                }
+                log::info!("[{current_step}/{total_steps}] R2 push complete: {pushed} file(s)");
+            }
+            Err(e) => {
+                log::warn!("R2 not configured: {e}");
                 if !ask_continue()? {
                     return Ok(());
                 }
