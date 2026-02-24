@@ -36,7 +36,6 @@ jobs:
   setup:
     name: Compute Partitions
     runs-on: ubuntu-latest
-    timeout-minutes: 5
     outputs:
       matrix: ${{ steps.partitions.outputs.matrix }}
       partition_count: ${{ steps.partitions.outputs.count }}
@@ -96,7 +95,6 @@ jobs:
     name: Ingest Boundaries
     runs-on: ubuntu-latest
     needs: setup
-    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -177,7 +175,6 @@ jobs:
     name: "${{ matrix.name }}"
     runs-on: ubuntu-latest
     needs: [setup, boundaries]
-    timeout-minutes: 120
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJSON(inputs.max_parallel || '20') }}
@@ -253,7 +250,6 @@ jobs:
     name: Merge Artifacts
     runs-on: ubuntu-latest
     needs: [setup, partition]
-    timeout-minutes: 60
 
     steps:
       - name: Checkout
