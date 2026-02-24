@@ -148,16 +148,19 @@ pub fn merge_from(target: &Connection, source_path: &Path) -> Result<u64, DbErro
 
     for table in MERGE_TABLES {
         // Check if the table exists in the source and has rows.
+        // DuckDB uses `table_catalog` for the attached database alias
+        // and `table_schema` for the schema within that database (usually `main`).
         let has_table: bool = target
             .prepare(&format!(
                 "SELECT COUNT(*) FROM information_schema.tables
-                 WHERE table_schema = '{alias}' AND table_name = '{table}'"
+                 WHERE table_catalog = '{alias}' AND table_name = '{table}'"
             ))?
             .query_row([], |row| row.get::<_, i64>(0))
             .map(|c| c > 0)
             .unwrap_or(false);
 
         if !has_table {
+            log::debug!("  {table}: not found in source, skipping");
             continue;
         }
 
@@ -166,6 +169,7 @@ pub fn merge_from(target: &Connection, source_path: &Path) -> Result<u64, DbErro
             .query_row([], |row| row.get(0))?;
 
         if count == 0 {
+            log::debug!("  {table}: 0 rows in source, skipping");
             continue;
         }
 
