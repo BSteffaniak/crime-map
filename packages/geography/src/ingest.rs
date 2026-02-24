@@ -349,19 +349,24 @@ pub async fn ingest_all_tracts(db: &dyn Database, force: bool) -> Result<u64, Ge
     let client = build_tigerweb_client()?;
 
     let mut total = 0u64;
+    let mut prev_fetched = false;
 
-    for (i, fips) in STATE_FIPS.iter().enumerate() {
-        if i > 0 {
+    for fips in STATE_FIPS {
+        if prev_fetched {
             tokio::time::sleep(INTER_STATE_DELAY).await;
         }
+        prev_fetched = false;
         match ingest_state(db, &client, fips, force).await {
             Ok(count) => {
                 total += count;
+                if count > 0 {
+                    prev_fetched = true;
+                }
                 // Populate supplemental data for this state
-                if let Err(e) = populate_population(db, &client, fips).await {
+                if let Err(e) = populate_population(db, &client, fips, force).await {
                     log::error!("Failed to populate population for state {fips}: {e}");
                 }
-                if let Err(e) = populate_county_names(db, &client, fips).await {
+                if let Err(e) = populate_county_names(db, &client, fips, force).await {
                     log::error!("Failed to populate county names for state {fips}: {e}");
                 }
             }
@@ -391,18 +396,23 @@ pub async fn ingest_tracts_for_states(
     let client = build_tigerweb_client()?;
 
     let mut total = 0u64;
+    let mut prev_fetched = false;
 
-    for (i, fips) in state_fips_codes.iter().enumerate() {
-        if i > 0 {
+    for fips in state_fips_codes {
+        if prev_fetched {
             tokio::time::sleep(INTER_STATE_DELAY).await;
         }
+        prev_fetched = false;
         match ingest_state(db, &client, fips, force).await {
             Ok(count) => {
                 total += count;
-                if let Err(e) = populate_population(db, &client, fips).await {
+                if count > 0 {
+                    prev_fetched = true;
+                }
+                if let Err(e) = populate_population(db, &client, fips, force).await {
                     log::error!("Failed to populate population for state {fips}: {e}");
                 }
-                if let Err(e) = populate_county_names(db, &client, fips).await {
+                if let Err(e) = populate_county_names(db, &client, fips, force).await {
                     log::error!("Failed to populate county names for state {fips}: {e}");
                 }
             }
@@ -428,7 +438,25 @@ async fn populate_population(
     db: &dyn Database,
     client: &reqwest::Client,
     state_fips: &str,
+    force: bool,
 ) -> Result<(), GeoError> {
+    // Skip if all tracts in this state already have population data
+    if !force {
+        let rows = db
+            .query_raw_params(
+                "SELECT COUNT(*) as cnt FROM census_tracts \
+                 WHERE state_fips = $1 AND population IS NULL AND boundary IS NOT NULL",
+                &[DatabaseValue::String(state_fips.to_string())],
+            )
+            .await?;
+        let unpopulated: i64 = rows.first().map_or(0, |r| r.to_value("cnt").unwrap_or(0));
+        if unpopulated == 0 {
+            let abbr = state_abbr(state_fips);
+            log::info!("State {state_fips} ({abbr}): tract population already populated, skipping");
+            return Ok(());
+        }
+    }
+
     let url = format!(
         "https://api.census.gov/data/2023/acs/acs5\
          ?get=B01001_001E\
@@ -491,7 +519,27 @@ async fn populate_county_names(
     db: &dyn Database,
     client: &reqwest::Client,
     state_fips: &str,
+    force: bool,
 ) -> Result<(), GeoError> {
+    // Skip if all tracts in this state already have county names
+    if !force {
+        let rows = db
+            .query_raw_params(
+                "SELECT COUNT(*) as cnt FROM census_tracts \
+                 WHERE state_fips = $1 AND county_name IS NULL AND boundary IS NOT NULL",
+                &[DatabaseValue::String(state_fips.to_string())],
+            )
+            .await?;
+        let unpopulated: i64 = rows.first().map_or(0, |r| r.to_value("cnt").unwrap_or(0));
+        if unpopulated == 0 {
+            let abbr = state_abbr(state_fips);
+            log::info!(
+                "State {state_fips} ({abbr}): tract county names already populated, skipping"
+            );
+            return Ok(());
+        }
+    }
+
     let url = format!(
         "https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/tigerWMS_ACS2023/MapServer/82/query\
          ?where=STATE%3D%27{state_fips}%27\
@@ -686,7 +734,7 @@ async fn ingest_state_places(
     }
 
     // Populate population data
-    if let Err(e) = populate_place_population(db, client, state_fips).await {
+    if let Err(e) = populate_place_population(db, client, state_fips, force).await {
         log::error!("Failed to populate place population for state {state_fips}: {e}");
     }
 
@@ -703,7 +751,25 @@ async fn populate_place_population(
     db: &dyn Database,
     client: &reqwest::Client,
     state_fips: &str,
+    force: bool,
 ) -> Result<(), GeoError> {
+    // Skip if all places in this state already have population data
+    if !force {
+        let rows = db
+            .query_raw_params(
+                "SELECT COUNT(*) as cnt FROM census_places \
+                 WHERE state_fips = $1 AND population IS NULL AND boundary IS NOT NULL",
+                &[DatabaseValue::String(state_fips.to_string())],
+            )
+            .await?;
+        let unpopulated: i64 = rows.first().map_or(0, |r| r.to_value("cnt").unwrap_or(0));
+        if unpopulated == 0 {
+            let abbr = state_abbr(state_fips);
+            log::info!("State {state_fips} ({abbr}): place population already populated, skipping");
+            return Ok(());
+        }
+    }
+
     let url = format!(
         "https://api.census.gov/data/2023/acs/acs5\
          ?get=B01001_001E\
@@ -762,13 +828,20 @@ pub async fn ingest_all_places(db: &dyn Database, force: bool) -> Result<u64, Ge
     let client = build_tigerweb_client()?;
 
     let mut total = 0u64;
+    let mut prev_fetched = false;
 
-    for (i, fips) in STATE_FIPS.iter().enumerate() {
-        if i > 0 {
+    for fips in STATE_FIPS {
+        if prev_fetched {
             tokio::time::sleep(INTER_STATE_DELAY).await;
         }
+        prev_fetched = false;
         match ingest_state_places(db, &client, fips, force).await {
-            Ok(count) => total += count,
+            Ok(count) => {
+                total += count;
+                if count > 0 {
+                    prev_fetched = true;
+                }
+            }
             Err(e) => log::error!("Failed to ingest places for state {fips}: {e}"),
         }
     }
@@ -790,13 +863,20 @@ pub async fn ingest_places_for_states(
     let client = build_tigerweb_client()?;
 
     let mut total = 0u64;
+    let mut prev_fetched = false;
 
-    for (i, fips) in state_fips_codes.iter().enumerate() {
-        if i > 0 {
+    for fips in state_fips_codes {
+        if prev_fetched {
             tokio::time::sleep(INTER_STATE_DELAY).await;
         }
+        prev_fetched = false;
         match ingest_state_places(db, &client, fips, force).await {
-            Ok(count) => total += count,
+            Ok(count) => {
+                total += count;
+                if count > 0 {
+                    prev_fetched = true;
+                }
+            }
             Err(e) => log::error!("Failed to ingest places for state {fips}: {e}"),
         }
     }
@@ -923,7 +1003,7 @@ async fn ingest_state_counties(
     );
 
     // Populate county population
-    if let Err(e) = populate_county_population(db, client, state_fips).await {
+    if let Err(e) = populate_county_population(db, client, state_fips, force).await {
         log::error!("Failed to populate county population for state {state_fips}: {e}");
     }
 
@@ -936,7 +1016,27 @@ async fn populate_county_population(
     db: &dyn Database,
     client: &reqwest::Client,
     state_fips: &str,
+    force: bool,
 ) -> Result<(), GeoError> {
+    // Skip if all counties in this state already have population data
+    if !force {
+        let rows = db
+            .query_raw_params(
+                "SELECT COUNT(*) as cnt FROM census_counties \
+                 WHERE state_fips = $1 AND population IS NULL AND boundary IS NOT NULL",
+                &[DatabaseValue::String(state_fips.to_string())],
+            )
+            .await?;
+        let unpopulated: i64 = rows.first().map_or(0, |r| r.to_value("cnt").unwrap_or(0));
+        if unpopulated == 0 {
+            let abbr = state_abbr(state_fips);
+            log::info!(
+                "State {state_fips} ({abbr}): county population already populated, skipping"
+            );
+            return Ok(());
+        }
+    }
+
     let url = format!(
         "https://api.census.gov/data/2023/acs/acs5\
          ?get=B01001_001E\
@@ -993,13 +1093,20 @@ pub async fn ingest_all_counties(db: &dyn Database, force: bool) -> Result<u64, 
     let client = build_tigerweb_client()?;
 
     let mut total = 0u64;
+    let mut prev_fetched = false;
 
-    for (i, fips) in STATE_FIPS.iter().enumerate() {
-        if i > 0 {
+    for fips in STATE_FIPS {
+        if prev_fetched {
             tokio::time::sleep(INTER_STATE_DELAY).await;
         }
+        prev_fetched = false;
         match ingest_state_counties(db, &client, fips, force).await {
-            Ok(count) => total += count,
+            Ok(count) => {
+                total += count;
+                if count > 0 {
+                    prev_fetched = true;
+                }
+            }
             Err(e) => log::error!("Failed to ingest counties for state {fips}: {e}"),
         }
     }
@@ -1021,13 +1128,20 @@ pub async fn ingest_counties_for_states(
     let client = build_tigerweb_client()?;
 
     let mut total = 0u64;
+    let mut prev_fetched = false;
 
-    for (i, fips) in state_fips_codes.iter().enumerate() {
-        if i > 0 {
+    for fips in state_fips_codes {
+        if prev_fetched {
             tokio::time::sleep(INTER_STATE_DELAY).await;
         }
+        prev_fetched = false;
         match ingest_state_counties(db, &client, fips, force).await {
-            Ok(count) => total += count,
+            Ok(count) => {
+                total += count;
+                if count > 0 {
+                    prev_fetched = true;
+                }
+            }
             Err(e) => log::error!("Failed to ingest counties for state {fips}: {e}"),
         }
     }

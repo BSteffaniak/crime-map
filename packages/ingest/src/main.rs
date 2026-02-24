@@ -72,6 +72,9 @@ enum Commands {
         /// If not specified, ingests from all configured sources.
         #[arg(long)]
         sources: Option<String>,
+        /// Force re-import even if neighborhoods already exist.
+        #[arg(long)]
+        force: bool,
     },
     /// Ingest Census place boundaries (incorporated cities and CDPs) from `TIGERweb`
     Places {
@@ -328,9 +331,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 elapsed.as_secs_f64()
             );
         }
-        Commands::Neighborhoods { sources } => {
+        Commands::Neighborhoods { sources, force } => {
             let db = db::connect_from_env().await?;
             run_migrations(db.as_ref()).await?;
+
+            // Skip if neighborhoods already exist (unless --force)
+            if !force {
+                let rows = db
+                    .as_ref()
+                    .query_raw_params("SELECT COUNT(*) as cnt FROM neighborhoods", &[])
+                    .await?;
+                let count: i64 = rows.first().map_or(0, |r| {
+                    moosicbox_json_utils::database::ToValue::to_value(r, "cnt").unwrap_or(0)
+                });
+                if count > 0 {
+                    log::info!(
+                        "{count} neighborhoods already exist, skipping \
+                         (use --force to re-import)"
+                    );
+                    return Ok(());
+                }
+            }
 
             let all_sources = crime_map_neighborhood::registry::all_sources();
             let sources_to_ingest = if let Some(filter_str) = sources {
