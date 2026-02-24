@@ -1,9 +1,16 @@
 name: Setup Data Pipeline Tools
-description: Installs Rust, DuckDB native library, tippecanoe, and caches all tools
+description: >
+  Installs runtime dependencies (DuckDB, tippecanoe, libssl) and optionally
+  the Rust toolchain + build cache. Set install-rust to false when using
+  pre-built binaries from an earlier build job.
 
 inputs:
+  install-rust:
+    description: Whether to install Rust toolchain and build cache (set false when using pre-built binaries)
+    required: false
+    default: 'true'
   rust-cache-key:
-    description: Additional cache key suffix for Rust build cache
+    description: Additional cache key suffix for Rust build cache (only used when install-rust is true)
     required: false
     default: ''
   db-host:
@@ -32,9 +39,11 @@ runs:
         fi
 
     - name: Setup Rust toolchain
+      if: inputs.install-rust == 'true'
       uses: dtolnay/rust-toolchain@stable
 
     - name: Rust build cache
+      if: inputs.install-rust == 'true'
       uses: Swatinem/rust-cache@v2
       with:
         key: ${{ inputs.rust-cache-key }}

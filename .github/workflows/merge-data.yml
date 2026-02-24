@@ -16,18 +16,57 @@ env:
   RUST_LOG: crime_map=debug
 
 jobs:
-  merge:
-    name: Merge Artifacts
+  build:
+    name: Build Binaries
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup pipeline tools
+      - name: Setup pipeline tools (with Rust)
         uses: ./.github/actions/setup-pipeline
         with:
-          rust-cache-key: merge
+          install-rust: 'true'
+          rust-cache-key: merge-build
+
+      - name: Build release binaries
+        run: cargo build --release -p crime_map_generate
+
+      - name: Stage binaries for upload
+        run: |
+          mkdir -p staging
+          cp target/release/crime_map_generate staging/
+
+      - name: Upload pipeline binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-binaries
+          path: staging/
+          retention-days: 1
+
+  merge:
+    name: Merge Artifacts
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pipeline tools (no Rust)
+        uses: ./.github/actions/setup-pipeline
+        with:
+          install-rust: 'false'
+
+      - name: Download pipeline binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: pipeline-binaries
+          path: /usr/local/bin
+
+      - name: Make binaries executable
+        run: chmod +x /usr/local/bin/crime_map_generate
 
       - name: Download boundary artifacts
         uses: actions/download-artifact@v4
@@ -58,7 +97,7 @@ jobs:
           echo "Merging partition dirs: $PARTITION_DIRS"
 
           mkdir -p data/generated
-          cargo generate merge \
+          crime_map_generate merge \
             --partition-dirs "$PARTITION_DIRS" \
             --boundaries-dir data/boundaries \
             --output-dir data/generated
