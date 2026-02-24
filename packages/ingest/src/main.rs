@@ -289,6 +289,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let source_bar = IndicatifProgress::steps_bar(&multi, "Sources", num_sources as u64);
 
+            let mut failed_sources: Vec<String> = Vec::new();
+
             for (i, src) in sources.iter().enumerate() {
                 let fetch_bar = IndicatifProgress::records_bar(&multi, src.name());
                 source_bar.set_message(format!("Source {}/{num_sources}: {}", i + 1, src.name()));
@@ -299,12 +301,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if let Err(e) = result {
                     log::error!("Failed to sync {}: {e}", src.id());
+                    failed_sources.push(src.id().to_string());
                 }
 
                 source_bar.inc(1);
             }
 
             source_bar.finish(format!("Synced {num_sources} source(s)"));
+
+            if !failed_sources.is_empty() {
+                return Err(format!(
+                    "{} source(s) failed to sync: {}",
+                    failed_sources.len(),
+                    failed_sources.join(", ")
+                )
+                .into());
+            }
         }
         Commands::Tracts { states, force } => {
             let db = db::connect_from_env().await?;
