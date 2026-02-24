@@ -1137,9 +1137,11 @@ async fn generate_sidebar_db(
                 #[allow(clippy::cast_possible_truncation)]
                 let batch_len = batch.len() as u64;
 
-                // Insert batch into SQLite within a transaction
-                sqlite
-                    .exec_raw("BEGIN")
+                // Insert batch into SQLite within a transaction.
+                // begin_transaction() pins all operations to one pooled
+                // connection, avoiding "database is locked" errors.
+                let tx = sqlite
+                    .begin_transaction()
                     .await
                     .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
@@ -1165,7 +1167,7 @@ async fn generate_sidebar_db(
 
                     let arrest_int = incident.arrest_made.map(i32::from);
 
-                    sqlite
+                    tx
                         .exec_raw_params(
                             "INSERT INTO incidents (source_id, source_name, source_incident_id,
                                 subcategory, category,
@@ -1200,8 +1202,7 @@ async fn generate_sidebar_db(
                         .map_err(|e| format!("Failed to insert incident: {e}"))?;
                 }
 
-                sqlite
-                    .exec_raw("COMMIT")
+                tx.commit()
                     .await
                     .map_err(|e| format!("Failed to commit transaction: {e}"))?;
 
@@ -2529,8 +2530,8 @@ async fn generate_boundaries_db(
             .prepare("SELECT fips, name, abbr, population FROM census_states ORDER BY fips")?;
         let mut src_rows = src_stmt.query([])?;
 
-        sqlite
-            .exec_raw("BEGIN")
+        let tx = sqlite
+            .begin_transaction()
             .await
             .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
@@ -2540,24 +2541,22 @@ async fn generate_boundaries_db(
             let name: String = row.get::<_, Option<String>>(1)?.unwrap_or_default();
             let abbr: String = row.get::<_, Option<String>>(2)?.unwrap_or_default();
             let population: Option<i64> = row.get(3)?;
-            sqlite
-                .exec_raw_params(
-                    "INSERT INTO boundaries (type, geoid, name, full_name, state_abbr, population)
-                     VALUES ('state', $1, $2, $3, $4, $5)",
-                    &[
-                        DatabaseValue::String(fips),
-                        DatabaseValue::String(name.clone()),
-                        DatabaseValue::String(name),
-                        DatabaseValue::String(abbr),
-                        population.map_or(DatabaseValue::Null, DatabaseValue::Int64),
-                    ],
-                )
-                .await
-                .map_err(|e| format!("Failed to insert state boundary: {e}"))?;
+            tx.exec_raw_params(
+                "INSERT INTO boundaries (type, geoid, name, full_name, state_abbr, population)
+                 VALUES ('state', $1, $2, $3, $4, $5)",
+                &[
+                    DatabaseValue::String(fips),
+                    DatabaseValue::String(name.clone()),
+                    DatabaseValue::String(name),
+                    DatabaseValue::String(abbr),
+                    population.map_or(DatabaseValue::Null, DatabaseValue::Int64),
+                ],
+            )
+            .await
+            .map_err(|e| format!("Failed to insert state boundary: {e}"))?;
             count += 1;
         }
-        sqlite
-            .exec_raw("COMMIT")
+        tx.commit()
             .await
             .map_err(|e| format!("Failed to commit transaction: {e}"))?;
         log::info!("Inserted {count} state boundaries");
@@ -2571,8 +2570,8 @@ async fn generate_boundaries_db(
         )?;
         let mut src_rows = src_stmt.query([])?;
 
-        sqlite
-            .exec_raw("BEGIN")
+        let tx = sqlite
+            .begin_transaction()
             .await
             .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
@@ -2583,24 +2582,22 @@ async fn generate_boundaries_db(
             let full_name: String = row.get::<_, Option<String>>(2)?.unwrap_or_default();
             let state_abbr: Option<String> = row.get(3)?;
             let population: Option<i32> = row.get(4)?;
-            sqlite
-                .exec_raw_params(
-                    "INSERT INTO boundaries (type, geoid, name, full_name, state_abbr, population)
-                     VALUES ('county', $1, $2, $3, $4, $5)",
-                    &[
-                        DatabaseValue::String(geoid),
-                        DatabaseValue::String(name),
-                        DatabaseValue::String(full_name),
-                        state_abbr.map_or(DatabaseValue::Null, DatabaseValue::String),
-                        population.map_or(DatabaseValue::Null, DatabaseValue::Int32),
-                    ],
-                )
-                .await
-                .map_err(|e| format!("Failed to insert county boundary: {e}"))?;
+            tx.exec_raw_params(
+                "INSERT INTO boundaries (type, geoid, name, full_name, state_abbr, population)
+                 VALUES ('county', $1, $2, $3, $4, $5)",
+                &[
+                    DatabaseValue::String(geoid),
+                    DatabaseValue::String(name),
+                    DatabaseValue::String(full_name),
+                    state_abbr.map_or(DatabaseValue::Null, DatabaseValue::String),
+                    population.map_or(DatabaseValue::Null, DatabaseValue::Int32),
+                ],
+            )
+            .await
+            .map_err(|e| format!("Failed to insert county boundary: {e}"))?;
             count += 1;
         }
-        sqlite
-            .exec_raw("COMMIT")
+        tx.commit()
             .await
             .map_err(|e| format!("Failed to commit transaction: {e}"))?;
         log::info!("Inserted {count} county boundaries");
@@ -2614,8 +2611,8 @@ async fn generate_boundaries_db(
         )?;
         let mut src_rows = src_stmt.query([])?;
 
-        sqlite
-            .exec_raw("BEGIN")
+        let tx = sqlite
+            .begin_transaction()
             .await
             .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
@@ -2626,24 +2623,22 @@ async fn generate_boundaries_db(
             let full_name: String = row.get::<_, Option<String>>(2)?.unwrap_or_default();
             let state_abbr: Option<String> = row.get(3)?;
             let population: Option<i32> = row.get(4)?;
-            sqlite
-                .exec_raw_params(
-                    "INSERT INTO boundaries (type, geoid, name, full_name, state_abbr, population)
-                     VALUES ('place', $1, $2, $3, $4, $5)",
-                    &[
-                        DatabaseValue::String(geoid),
-                        DatabaseValue::String(name),
-                        DatabaseValue::String(full_name),
-                        state_abbr.map_or(DatabaseValue::Null, DatabaseValue::String),
-                        population.map_or(DatabaseValue::Null, DatabaseValue::Int32),
-                    ],
-                )
-                .await
-                .map_err(|e| format!("Failed to insert place boundary: {e}"))?;
+            tx.exec_raw_params(
+                "INSERT INTO boundaries (type, geoid, name, full_name, state_abbr, population)
+                 VALUES ('place', $1, $2, $3, $4, $5)",
+                &[
+                    DatabaseValue::String(geoid),
+                    DatabaseValue::String(name),
+                    DatabaseValue::String(full_name),
+                    state_abbr.map_or(DatabaseValue::Null, DatabaseValue::String),
+                    population.map_or(DatabaseValue::Null, DatabaseValue::Int32),
+                ],
+            )
+            .await
+            .map_err(|e| format!("Failed to insert place boundary: {e}"))?;
             count += 1;
         }
-        sqlite
-            .exec_raw("COMMIT")
+        tx.commit()
             .await
             .map_err(|e| format!("Failed to commit transaction: {e}"))?;
         log::info!("Inserted {count} place boundaries");
@@ -2657,8 +2652,8 @@ async fn generate_boundaries_db(
         )?;
         let mut src_rows = src_stmt.query([])?;
 
-        sqlite
-            .exec_raw("BEGIN")
+        let tx = sqlite
+            .begin_transaction()
             .await
             .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
@@ -2675,24 +2670,22 @@ async fn generate_boundaries_db(
                 (None, Some(s)) => format!("Tract {name}, {s}"),
                 (None, None) => format!("Tract {name}"),
             };
-            sqlite
-                .exec_raw_params(
-                    "INSERT INTO boundaries (type, geoid, name, full_name, state_abbr, population)
-                     VALUES ('tract', $1, $2, $3, $4, $5)",
-                    &[
-                        DatabaseValue::String(geoid),
-                        DatabaseValue::String(name),
-                        DatabaseValue::String(full_name),
-                        state_abbr.map_or(DatabaseValue::Null, DatabaseValue::String),
-                        population.map_or(DatabaseValue::Null, DatabaseValue::Int32),
-                    ],
-                )
-                .await
-                .map_err(|e| format!("Failed to insert tract boundary: {e}"))?;
+            tx.exec_raw_params(
+                "INSERT INTO boundaries (type, geoid, name, full_name, state_abbr, population)
+                 VALUES ('tract', $1, $2, $3, $4, $5)",
+                &[
+                    DatabaseValue::String(geoid),
+                    DatabaseValue::String(name),
+                    DatabaseValue::String(full_name),
+                    state_abbr.map_or(DatabaseValue::Null, DatabaseValue::String),
+                    population.map_or(DatabaseValue::Null, DatabaseValue::Int32),
+                ],
+            )
+            .await
+            .map_err(|e| format!("Failed to insert tract boundary: {e}"))?;
             count += 1;
         }
-        sqlite
-            .exec_raw("COMMIT")
+        tx.commit()
             .await
             .map_err(|e| format!("Failed to commit transaction: {e}"))?;
         log::info!("Inserted {count} tract boundaries");
@@ -2704,8 +2697,8 @@ async fn generate_boundaries_db(
             .prepare("SELECT id, name, city, state FROM neighborhoods ORDER BY id")?;
         let mut src_rows = src_stmt.query([])?;
 
-        sqlite
-            .exec_raw("BEGIN")
+        let tx = sqlite
+            .begin_transaction()
             .await
             .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
@@ -2717,23 +2710,21 @@ async fn generate_boundaries_db(
             let state: String = row.get::<_, Option<String>>(3)?.unwrap_or_default();
             let geoid = format!("nbhd-{id}");
             let full_name = format!("{name}, {city}, {state}");
-            sqlite
-                .exec_raw_params(
-                    "INSERT INTO boundaries (type, geoid, name, full_name, state_abbr, population)
-                     VALUES ('neighborhood', $1, $2, $3, $4, NULL)",
-                    &[
-                        DatabaseValue::String(geoid),
-                        DatabaseValue::String(name),
-                        DatabaseValue::String(full_name),
-                        DatabaseValue::String(state),
-                    ],
-                )
-                .await
-                .map_err(|e| format!("Failed to insert neighborhood boundary: {e}"))?;
+            tx.exec_raw_params(
+                "INSERT INTO boundaries (type, geoid, name, full_name, state_abbr, population)
+                 VALUES ('neighborhood', $1, $2, $3, $4, NULL)",
+                &[
+                    DatabaseValue::String(geoid),
+                    DatabaseValue::String(name),
+                    DatabaseValue::String(full_name),
+                    DatabaseValue::String(state),
+                ],
+            )
+            .await
+            .map_err(|e| format!("Failed to insert neighborhood boundary: {e}"))?;
             count += 1;
         }
-        sqlite
-            .exec_raw("COMMIT")
+        tx.commit()
             .await
             .map_err(|e| format!("Failed to commit transaction: {e}"))?;
         log::info!("Inserted {count} neighborhood boundaries");
