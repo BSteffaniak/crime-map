@@ -182,6 +182,33 @@ pub async fn insert_incidents(
     let mut total_inserted = 0u64;
 
     for chunk in valid.chunks(CHUNK_SIZE) {
+        // Deduplicate within chunk: if the same source_incident_id appears
+        // multiple times (e.g., multi-offense records from ArcGIS), keep only
+        // the last occurrence.  PostgreSQL's ON CONFLICT DO UPDATE cannot
+        // handle two proposed rows targeting the same conflict key in one
+        // statement.
+        let mut last_seen: BTreeMap<&str, usize> = BTreeMap::new();
+        for (i, (incident, _)) in chunk.iter().enumerate() {
+            last_seen.insert(&incident.source_incident_id, i);
+        }
+        let deduped: Vec<&(&NormalizedIncident, i32)> = chunk
+            .iter()
+            .enumerate()
+            .filter(|(i, (incident, _))| {
+                last_seen.get(incident.source_incident_id.as_str()) == Some(i)
+            })
+            .map(|(_, item)| item)
+            .collect();
+
+        if deduped.len() < chunk.len() {
+            log::info!(
+                "Deduplicated INSERT chunk: {} -> {} rows ({} duplicates removed)",
+                chunk.len(),
+                deduped.len(),
+                chunk.len() - deduped.len(),
+            );
+        }
+
         let mut sql = String::from(
             "INSERT INTO crime_incidents (\
                 source_id, source_incident_id, category_id, parent_category_id, location, \
@@ -191,10 +218,10 @@ pub async fn insert_incidents(
             ) VALUES ",
         );
         let mut params: Vec<DatabaseValue> =
-            Vec::with_capacity(chunk.len() * PARAMS_PER_ROW as usize);
+            Vec::with_capacity(deduped.len() * PARAMS_PER_ROW as usize);
         let mut idx = 1u32;
 
-        for (i, (incident, cat_id)) in chunk.iter().enumerate() {
+        for (i, (incident, cat_id)) in deduped.iter().enumerate() {
             if i > 0 {
                 sql.push_str(", ");
             }
