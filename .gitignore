@@ -6,9 +6,14 @@ target/
 .env.local
 
 # Data files (generated, large)
-data/generated/
-data/downloads/
+data/generated
+data/downloads
+data/sources
+data/shared
+data/partitions
 *.db
+*.duckdb
+*.duckdb.wal
 
 # Node/Frontend
 node_modules
