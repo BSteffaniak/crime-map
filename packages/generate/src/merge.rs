@@ -152,6 +152,10 @@ async fn merge_sidebar_db(
     let sqlite = switchy_database_connection::init_sqlite_rusqlite(Some(&output_path))
         .map_err(|e| format!("Failed to open merged SQLite: {e}"))?;
 
+    // WAL mode + generous busy timeout to avoid "database is locked" errors.
+    sqlite.exec_raw("PRAGMA journal_mode=WAL").await?;
+    sqlite.exec_raw("PRAGMA busy_timeout=5000").await?;
+
     // Create the schema (matches generate_sidebar_db in lib.rs)
     sqlite
         .exec_raw(

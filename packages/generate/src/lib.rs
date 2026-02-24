@@ -1014,6 +1014,11 @@ async fn generate_sidebar_db(
     let sqlite = switchy_database_connection::init_sqlite_rusqlite(Some(&db_path))
         .map_err(|e| format!("Failed to open sidebar SQLite: {e}"))?;
 
+    // WAL mode + generous busy timeout to avoid "database is locked" errors
+    // when the connection pool uses multiple connections.
+    sqlite.exec_raw("PRAGMA journal_mode=WAL").await?;
+    sqlite.exec_raw("PRAGMA busy_timeout=5000").await?;
+
     // Create schema
     sqlite
         .exec_raw(
@@ -2498,6 +2503,10 @@ async fn generate_boundaries_db(
     log::info!("Creating boundaries search SQLite database...");
     let sqlite = switchy_database_connection::init_sqlite_rusqlite(Some(&db_path))
         .map_err(|e| format!("Failed to open boundaries SQLite: {e}"))?;
+
+    // WAL mode + generous busy timeout to avoid "database is locked" errors.
+    sqlite.exec_raw("PRAGMA journal_mode=WAL").await?;
+    sqlite.exec_raw("PRAGMA busy_timeout=5000").await?;
 
     sqlite
         .exec_raw(
