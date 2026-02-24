@@ -54,3 +54,11 @@ variable "r2_bucket_name" {
   default     = "crime-map-tiles"
   description = "Cloudflare R2 bucket name for PMTiles storage"
 }
+
+# ── Pelias Tunnel ────────────────────────────────────────────────
+
+variable "pelias_tunnel_secret" {
+  type        = string
+  sensitive   = true
+  description = "Base64-encoded secret for the Pelias Cloudflare Tunnel (min 32 bytes). Generate with: openssl rand -base64 32"
+}

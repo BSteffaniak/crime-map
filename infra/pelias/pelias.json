@@ -1,0 +1,114 @@
+{
+  "logger": { "level": "info" },
+  "esclient": {
+    "apiVersion": "7.x",
+    "hosts": [
+      { "host": "elasticsearch" }
+    ]
+  },
+  "elasticsearch": {
+    "settings": {
+      "index": {
+        "number_of_replicas": "0",
+        "number_of_shards": "1",
+        "refresh_interval": "10s"
+      }
+    }
+  },
+  "acceptance-tests": { "endpoints": { "local": "http://api:4000/v1/" } },
+  "api": {
+    "services": {
+      "pip": { "url": "http://pip:4200" },
+      "placeholder": { "url": "http://placeholder:4100" }
+    },
+    "defaultParameters": {
+      "boundary.country": "USA"
+    }
+  },
+  "imports": {
+    "adminLookup": { "enabled": true },
+    "openstreetmap": {
+      "download": [
+        {
+          "sourceURL": "https://download.geofabrik.de/north-america/us-latest.osm.pbf"
+        }
+      ],
+      "leveldbpath": "/tmp/leveldb",
+      "importVenues": true,
+      "importAddresses": true
+    },
+    "openaddresses": {
+      "files": [
+        "us/nationwide/openaddresses-us_nationwide.csv"
+      ]
+    },
+    "polylines": {
+      "files": [ "extract.0sv" ]
+    },
+    "whosonfirst": {
+      "importVenues": false,
+      "countryCode": ["US"],
+      "datapath": "/data/whosonfirst"
+    },
+    "interpolation": {
+      "download": {
+        "tiger": {
+          "datapath": "/data/tiger",
+          "states": [
+            { "state_code": "01", "county_code": null },
+            { "state_code": "02", "county_code": null },
+            { "state_code": "04", "county_code": null },
+            { "state_code": "05", "county_code": null },
+            { "state_code": "06", "county_code": null },
+            { "state_code": "08", "county_code": null },
+            { "state_code": "09", "county_code": null },
+            { "state_code": "10", "county_code": null },
+            { "state_code": "11", "county_code": null },
+            { "state_code": "12", "county_code": null },
+            { "state_code": "13", "county_code": null },
+            { "state_code": "15", "county_code": null },
+            { "state_code": "16", "county_code": null },
+            { "state_code": "17", "county_code": null },
+            { "state_code": "18", "county_code": null },
+            { "state_code": "19", "county_code": null },
+            { "state_code": "20", "county_code": null },
+            { "state_code": "21", "county_code": null },
+            { "state_code": "22", "county_code": null },
+            { "state_code": "23", "county_code": null },
+            { "state_code": "24", "county_code": null },
+            { "state_code": "25", "county_code": null },
+            { "state_code": "26", "county_code": null },
+            { "state_code": "27", "county_code": null },
+            { "state_code": "28", "county_code": null },
+            { "state_code": "29", "county_code": null },
+            { "state_code": "30", "county_code": null },
+            { "state_code": "31", "county_code": null },
+            { "state_code": "32", "county_code": null },
+            { "state_code": "33", "county_code": null },
+            { "state_code": "34", "county_code": null },
+            { "state_code": "35", "county_code": null },
+            { "state_code": "36", "county_code": null },
+            { "state_code": "37", "county_code": null },
+            { "state_code": "38", "county_code": null },
+            { "state_code": "39", "county_code": null },
+            { "state_code": "40", "county_code": null },
+            { "state_code": "41", "county_code": null },
+            { "state_code": "42", "county_code": null },
+            { "state_code": "44", "county_code": null },
+            { "state_code": "45", "county_code": null },
+            { "state_code": "46", "county_code": null },
+            { "state_code": "47", "county_code": null },
+            { "state_code": "48", "county_code": null },
+            { "state_code": "49", "county_code": null },
+            { "state_code": "50", "county_code": null },
+            { "state_code": "51", "county_code": null },
+            { "state_code": "53", "county_code": null },
+            { "state_code": "54", "county_code": null },
+            { "state_code": "55", "county_code": null },
+            { "state_code": "56", "county_code": null }
+          ]
+        }
+      }
+    }
+  }
+}

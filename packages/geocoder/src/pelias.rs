@@ -7,9 +7,44 @@
 //! the caller controls concurrency via `concurrent_requests` in the
 //! service TOML configuration.
 //!
+//! When the Pelias instance is exposed through a Cloudflare Tunnel with
+//! Zero Trust Access, set `CF_ACCESS_CLIENT_ID` and
+//! `CF_ACCESS_CLIENT_SECRET` environment variables.  The client will
+//! include the required headers on every request automatically.
+//!
 //! See <https://github.com/pelias/documentation/blob/master/search.md>
 
 use crate::{GeocodeError, GeocodedAddress, GeocodingProvider, MatchQuality};
+
+/// Cloudflare Access credentials read from environment variables.
+///
+/// When both `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` are
+/// set, the geocoder includes the corresponding headers on every
+/// request so that Cloudflare Access allows the traffic through.
+#[derive(Debug, Clone)]
+pub struct CfAccessCredentials {
+    /// Value for the `CF-Access-Client-Id` header.
+    pub client_id: String,
+    /// Value for the `CF-Access-Client-Secret` header.
+    pub client_secret: String,
+}
+
+/// Reads Cloudflare Access credentials from environment variables.
+///
+/// Returns `Some` only when **both** `CF_ACCESS_CLIENT_ID` and
+/// `CF_ACCESS_CLIENT_SECRET` are set and non-empty.
+#[must_use]
+pub fn cf_access_credentials_from_env() -> Option<CfAccessCredentials> {
+    let client_id = std::env::var("CF_ACCESS_CLIENT_ID").ok()?;
+    let client_secret = std::env::var("CF_ACCESS_CLIENT_SECRET").ok()?;
+    if client_id.is_empty() || client_secret.is_empty() {
+        return None;
+    }
+    Some(CfAccessCredentials {
+        client_id,
+        client_secret,
+    })
+}
 
 /// Geocodes a single free-form address query against a Pelias instance.
 ///
@@ -21,18 +56,23 @@ pub async fn geocode_freeform(
     base_url: &str,
     country_code: &str,
     query: &str,
+    cf_access: Option<&CfAccessCredentials>,
 ) -> Result<Option<GeocodedAddress>, GeocodeError> {
     let url = format!("{base_url}/v1/search");
 
-    let resp = client
-        .get(&url)
-        .query(&[
-            ("text", query),
-            ("boundary.country", country_code),
-            ("size", "1"),
-        ])
-        .send()
-        .await?;
+    let mut req = client.get(&url).query(&[
+        ("text", query),
+        ("boundary.country", country_code),
+        ("size", "1"),
+    ]);
+
+    if let Some(creds) = cf_access {
+        req = req
+            .header("CF-Access-Client-Id", &creds.client_id)
+            .header("CF-Access-Client-Secret", &creds.client_secret);
+    }
+
+    let resp = req.send().await?;
 
     if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
         return Err(GeocodeError::RateLimited);
@@ -52,14 +92,21 @@ pub async fn geocode_freeform(
 ///
 /// Issues a lightweight `GET /v1` request and returns `true` if the
 /// server responds with any successful status code within 3 seconds.
-pub async fn is_available(client: &reqwest::Client, base_url: &str) -> bool {
+pub async fn is_available(
+    client: &reqwest::Client,
+    base_url: &str,
+    cf_access: Option<&CfAccessCredentials>,
+) -> bool {
     let url = format!("{base_url}/v1");
-    client
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(3))
-        .send()
-        .await
-        .is_ok_and(|r| r.status().is_success())
+    let mut req = client.get(&url).timeout(std::time::Duration::from_secs(3));
+
+    if let Some(creds) = cf_access {
+        req = req
+            .header("CF-Access-Client-Id", &creds.client_id)
+            .header("CF-Access-Client-Secret", &creds.client_secret);
+    }
+
+    req.send().await.is_ok_and(|r| r.status().is_success())
 }
 
 /// Parses a Pelias `GeoJSON` `FeatureCollection` response.
@@ -179,5 +226,16 @@ mod tests {
         });
         let result = parse_response(&body).unwrap().unwrap();
         assert_eq!(result.match_quality, MatchQuality::Approximate);
+    }
+
+    #[test]
+    fn cf_credentials_from_env_returns_none_when_unset() {
+        // In a test environment these vars should not be set
+        // Safety: test-only; no other threads depend on these env vars.
+        unsafe {
+            std::env::remove_var("CF_ACCESS_CLIENT_ID");
+            std::env::remove_var("CF_ACCESS_CLIENT_SECRET");
+        }
+        assert!(cf_access_credentials_from_env().is_none());
     }
 }

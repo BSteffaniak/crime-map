@@ -1,7 +1,7 @@
-# Pelias Geocoder Infrastructure
+# Pelias Geocoder (Local)
 
-OpenTofu configuration for deploying a self-hosted [Pelias](https://pelias.io)
-geocoder on Oracle Cloud's Always Free tier.
+Docker Compose setup for running a self-hosted [Pelias](https://pelias.io)
+geocoder locally, exposed to CI via a Cloudflare Tunnel.
 
 ## Why Pelias?
 
@@ -18,125 +18,140 @@ but rate-limited to 1 req/1.1s):
 
 ## Prerequisites
 
-1. **Oracle Cloud Account** with Always Free tier
-   - Sign up at https://cloud.oracle.com
-   - Create an API signing key: Profile > API Keys > Add API Key
-   - Note your tenancy OCID, user OCID, and key fingerprint
+- **Docker** and **Docker Compose** installed
+- **~16 GB RAM** available (4 GB for Elasticsearch heap + OS/services)
+- **~150 GB free disk** for geocoding data (Elasticsearch indices, OSM, WOF)
+- **OpenTofu** (or Terraform) for one-time tunnel setup
 
-2. **OpenTofu** (or Terraform) installed
-   - `brew install opentofu` or see https://opentofu.org/docs/intro/install/
-
-3. **SSH key pair** for instance access
-
-## Setup
-
-### 1. Create a variables file
+On Linux, Elasticsearch requires a kernel tuning parameter:
 
 ```bash
-cp terraform.tfvars.example terraform.tfvars
-# Edit with your OCI credentials
+sudo sysctl -w vm.max_map_count=262144
+echo "vm.max_map_count=262144" | sudo tee /etc/sysctl.d/99-elasticsearch.conf
 ```
 
-Create `terraform.tfvars`:
+## One-Time Setup
 
-```hcl
-tenancy_ocid        = "ocid1.tenancy.oc1..aaaaaa..."
-user_ocid           = "ocid1.user.oc1..aaaaaa..."
-api_key_fingerprint = "aa:bb:cc:dd:..."
-private_key_path    = "~/.oci/oci_api_key.pem"
-region              = "us-ashburn-1"
-ssh_public_key_path = "~/.ssh/id_ed25519.pub"
-```
+### 1. Create the Cloudflare Tunnel
 
-### 2. Deploy the instance
+The tunnel lets CI reach your local Pelias instance through
+`pelias.opencrimemap.com` without opening any inbound ports.
 
 ```bash
-tofu init
-tofu plan
-tofu apply
+cd ../deploy
+tofu apply   # Creates the tunnel, DNS record, and Access policy
 ```
 
-This creates:
-- ARM VM (4 OCPU, 24 GB RAM) with 150 GB boot volume
-- VCN with public subnet, internet gateway
-- Security rules for SSH (22) and Pelias API (4000)
-- Docker + Docker Compose pre-installed via cloud-init
-
-### 3. Import geocoding data
-
-SSH into the instance and run the import script:
+### 2. Configure the tunnel token
 
 ```bash
-ssh ubuntu@$(tofu output -raw instance_public_ip)
+cd ../pelias
+cp .env.example .env
 
-# Wait for cloud-init to finish (check with):
-cloud-init status --wait
+# Get the tunnel token from Terraform output
+cd ../deploy
+tofu output -raw pelias_tunnel_token
+# Paste this into .env as TUNNEL_TOKEN
+```
 
-# Run the import (6-12 hours for full US data)
-sudo /data/pelias/import.sh
+### 3. Add GitHub secrets
+
+From the Terraform outputs, add these GitHub repository secrets:
+
+| Secret | Source |
+|--------|--------|
+| `PELIAS_URL` | `https://pelias.opencrimemap.com` |
+| `CF_ACCESS_CLIENT_ID` | `tofu output -raw pelias_cf_access_client_id` |
+| `CF_ACCESS_CLIENT_SECRET` | `tofu output -raw pelias_cf_access_client_secret` |
+
+### 4. Import geocoding data
+
+This downloads and indexes US geocoding data. Only needs to be done once
+(data persists in `data/` directory).
+
+```bash
+./import.sh
 ```
 
 The import downloads and indexes:
-- **Who's On First** — administrative boundaries (states, counties, cities)
-- **OpenStreetMap** — US extract (venues, addresses)
-- **Placeholder** — coarse geocoding (city/state lookups)
+- **Who's On First** -- administrative boundaries (states, counties, cities)
+- **OpenStreetMap** -- US extract (venues, addresses)
+- **Placeholder** -- coarse geocoding (city/state lookups)
 
-### 4. Verify
+Expected time: **6-12 hours** depending on network speed.
+
+### 5. Verify
 
 ```bash
-curl 'http://<PUBLIC_IP>:4000/v1/search?text=1600+Pennsylvania+Ave+Washington+DC&size=1' | jq .
+curl 'http://localhost:4000/v1/search?text=1600+Pennsylvania+Ave+Washington+DC&size=1' | jq .
 ```
 
-### 5. Update the geocoder config
+## Daily Usage
 
-Edit `packages/geocoder/services/pelias.toml` and set `base_url` to
-your instance's public IP:
+### Start Pelias (before running the pipeline)
 
-```toml
-base_url = "http://<PUBLIC_IP>:4000"
+```bash
+cd infra/pelias
+docker compose up -d
 ```
 
-## Instance Details
+This starts all 5 services:
 
-| Resource | Spec |
-|----------|------|
-| Shape    | VM.Standard.A1.Flex (ARM) |
-| CPU      | 4 OCPU (Ampere A1) |
-| RAM      | 24 GB |
-| Storage  | 150 GB boot volume |
-| OS       | Ubuntu 24.04 ARM |
-| Cost     | $0/month (Always Free) |
+| Service | Port | Purpose |
+|---------|------|---------|
+| Elasticsearch | 9200 (internal) | Full-text search index |
+| Pelias API | 4000 (local) | HTTP geocoding endpoint |
+| Placeholder | 4100 (internal) | Coarse geocoding |
+| PIP Service | 4200 (internal) | Point-in-polygon lookups |
+| cloudflared | -- | Tunnel to Cloudflare edge |
+
+### Run the pipeline
+
+Locally:
+
+```bash
+cargo ingest sync-all
+# Pelias is used automatically at localhost:4000
+```
+
+Via CI:
+
+```bash
+# Trigger the GitHub Actions workflow -- it reaches Pelias through
+# the Cloudflare Tunnel at pelias.opencrimemap.com
+gh workflow run data-pipeline.yml
+```
+
+### Stop Pelias (when done)
+
+```bash
+docker compose down
+# Data persists in ./data/ for next time
+```
 
 ## Operations
 
 ### Check service status
 
 ```bash
-ssh ubuntu@$(tofu output -raw instance_public_ip)
-cd /data/pelias
 docker compose ps
 docker compose logs -f api
-```
-
-### Restart services
-
-```bash
-cd /data/pelias
-docker compose restart
 ```
 
 ### Update Pelias containers
 
 ```bash
-cd /data/pelias
 docker compose pull
 docker compose up -d
 ```
 
-### Destroy infrastructure
+### Re-import data
+
+To update the geocoding data (new OSM extract, updated WOF, etc.):
 
 ```bash
-tofu destroy
+docker compose down
+./import.sh
 ```
 
 ## Architecture
@@ -152,11 +167,27 @@ tofu destroy
        Batch API   Self-hosted   Public API
        10K/req     ~100 req/s   ~0.9 req/s
                         |
-                  OCI Always Free
-                  ARM VM (4c/24GB)
-                        |
+              +---------+---------+
+              |    Local Docker   |
+              |    Compose Stack  |
               +---------+---------+
               |         |         |
            Elastic   Pelias    PIP
            Search     API    Service
+              |
+         cloudflared
+              |
+      Cloudflare Tunnel
+              |
+    pelias.opencrimemap.com
+         (CI access)
 ```
+
+## Environment Variables
+
+| Variable | Used By | Description |
+|----------|---------|-------------|
+| `PELIAS_URL` | Rust ingest binary | Override compile-time Pelias URL (e.g., `https://pelias.opencrimemap.com`) |
+| `CF_ACCESS_CLIENT_ID` | Rust ingest binary | Cloudflare Access service token client ID |
+| `CF_ACCESS_CLIENT_SECRET` | Rust ingest binary | Cloudflare Access service token client secret |
+| `TUNNEL_TOKEN` | cloudflared container | Cloudflare Tunnel authentication token |

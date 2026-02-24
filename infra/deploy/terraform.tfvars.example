@@ -8,3 +8,6 @@ cloudflare_api_token  = "your-cloudflare-api-token"
 cloudflare_account_id = "your-cloudflare-account-id"
 domain                = "opencrimemap.com"
 r2_bucket_name        = "crime-map-tiles"
+
+# Pelias tunnel secret (generate with: openssl rand -base64 32)
+pelias_tunnel_secret = "your-base64-tunnel-secret"

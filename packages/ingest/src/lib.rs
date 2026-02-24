@@ -685,19 +685,30 @@ pub async fn resolve_addresses(
                 country_code,
                 concurrent_requests,
             } => {
+                // Allow overriding the compile-time base URL via env var
+                // (e.g. for CI connecting through a Cloudflare Tunnel).
+                let base_url = std::env::var("PELIAS_URL").unwrap_or_else(|_| base_url.clone());
+
+                // Load optional Cloudflare Access credentials for tunneled
+                // instances protected by Zero Trust.
+                let cf_access = crime_map_geocoder::pelias::cf_access_credentials_from_env();
+
                 // Health check — skip if the instance is unreachable
-                if !crime_map_geocoder::pelias::is_available(client, base_url).await {
+                if !crime_map_geocoder::pelias::is_available(client, &base_url, cf_access.as_ref())
+                    .await
+                {
                     log::info!("Pelias at {base_url} is not reachable, skipping");
                     continue;
                 }
                 resolve_via_pelias(
                     client,
-                    base_url,
+                    &base_url,
                     country_code,
                     *concurrent_requests,
                     &unresolved,
                     &mut state,
                     progress.as_ref(),
+                    cf_access.as_ref(),
                 )
                 .await?;
             }
@@ -839,6 +850,7 @@ async fn resolve_via_census(
 }
 
 /// Resolves addresses via a self-hosted Pelias instance.
+#[allow(clippy::too_many_arguments)]
 async fn resolve_via_pelias(
     client: &reqwest::Client,
     base_url: &str,
@@ -847,6 +859,7 @@ async fn resolve_via_pelias(
     unresolved: &[AddressGroup<'_>],
     state: &mut ResolveState,
     progress: Option<&Arc<dyn ProgressCallback>>,
+    cf_access: Option<&crime_map_geocoder::pelias::CfAccessCredentials>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use futures::stream::{self, StreamExt as _};
 
@@ -855,14 +868,22 @@ async fn resolve_via_pelias(
         unresolved.len()
     );
 
+    let cf_access_owned = cf_access.cloned();
+
     // Fire concurrent requests via buffered stream
     let results: Vec<_> = stream::iter(unresolved.iter().map(|(address_key, _, ids)| {
         let key = address_key.clone();
         let ids_clone = (*ids).clone();
+        let creds = cf_access_owned.clone();
         async move {
-            let result =
-                crime_map_geocoder::pelias::geocode_freeform(client, base_url, country_code, &key)
-                    .await;
+            let result = crime_map_geocoder::pelias::geocode_freeform(
+                client,
+                base_url,
+                country_code,
+                &key,
+                creds.as_ref(),
+            )
+            .await;
             (key, ids_clone, result)
         }
     }))

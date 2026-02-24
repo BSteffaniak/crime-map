@@ -1,0 +1,62 @@
+services:
+  api:
+    image: pelias/api:latest
+    container_name: pelias_api
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      - PORT=4000
+    volumes:
+      - ./pelias.json:/code/pelias.json:ro
+
+  placeholder:
+    image: pelias/placeholder:latest
+    container_name: pelias_placeholder
+    restart: unless-stopped
+    environment:
+      - PORT=4100
+    volumes:
+      - ./pelias.json:/code/pelias.json:ro
+      - ./data/placeholder:/data/placeholder
+
+  pip:
+    image: pelias/pip-service:latest
+    container_name: pelias_pip
+    restart: unless-stopped
+    environment:
+      - PORT=4200
+    volumes:
+      - ./pelias.json:/code/pelias.json:ro
+      - ./data/whosonfirst:/data/whosonfirst
+
+  elasticsearch:
+    image: pelias/elasticsearch:7.17.1
+    container_name: pelias_elasticsearch
+    restart: unless-stopped
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    environment:
+      - "ES_JAVA_OPTS=-Xms4g -Xmx4g"
+      - "discovery.type=single-node"
+      - "bootstrap.memory_lock=true"
+    volumes:
+      - ./data/elasticsearch:/usr/share/elasticsearch/data
+
+  # Cloudflare Tunnel — exposes the Pelias API to CI via
+  # pelias.opencrimemap.com without opening any inbound ports.
+  # Set TUNNEL_TOKEN in .env (from `tofu output -raw pelias_tunnel_token`).
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: pelias_cloudflared
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    depends_on:
+      - api
