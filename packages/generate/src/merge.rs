@@ -99,6 +99,10 @@ fn merge_pmtiles(
         .arg("-o")
         .arg(&output_path);
 
+    if std::env::var("CI").is_ok() {
+        cmd.arg("--quiet");
+    }
+
     for input in &inputs {
         cmd.arg(input);
     }

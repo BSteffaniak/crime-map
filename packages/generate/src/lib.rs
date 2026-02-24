@@ -737,21 +737,26 @@ async fn generate_pmtiles(
 
     let output_path = dir.join("incidents.pmtiles");
 
-    let status = Command::new("tippecanoe")
-        .args([
-            "-o",
-            &output_path.to_string_lossy(),
-            "--force",
-            "--no-feature-limit",
-            "--no-tile-size-limit",
-            "--minimum-zoom=0",
-            "--maximum-zoom=14",
-            "--drop-densest-as-needed",
-            "--extend-zooms-if-still-dropping",
-            "--layer=incidents",
-            &geojsonseq_path.to_string_lossy(),
-        ])
-        .status()?;
+    let mut cmd = Command::new("tippecanoe");
+    cmd.args([
+        "-o",
+        &*output_path.to_string_lossy(),
+        "--force",
+        "--no-feature-limit",
+        "--no-tile-size-limit",
+        "--minimum-zoom=0",
+        "--maximum-zoom=14",
+        "--drop-densest-as-needed",
+        "--extend-zooms-if-still-dropping",
+        "--layer=incidents",
+        &*geojsonseq_path.to_string_lossy(),
+    ]);
+
+    if std::env::var("CI").is_ok() {
+        cmd.arg("--quiet");
+    }
+
+    let status = cmd.status()?;
 
     if !status.success() {
         return Err("tippecanoe failed".into());
@@ -2425,7 +2430,7 @@ async fn generate_boundaries_pmtiles(
     let mut cmd = Command::new("tippecanoe");
     cmd.args([
         "-o",
-        &output_path.to_string_lossy(),
+        &*output_path.to_string_lossy(),
         "--force",
         "--no-feature-limit",
         "--no-tile-size-limit",
@@ -2434,6 +2439,10 @@ async fn generate_boundaries_pmtiles(
         "--coalesce-densest-as-needed",
         "--detect-shared-borders",
     ]);
+
+    if std::env::var("CI").is_ok() {
+        cmd.arg("--quiet");
+    }
 
     // Add each layer as a named-layer with its GeoJSONSeq file
     for &(layer_name, filename) in BOUNDARY_LAYERS {
