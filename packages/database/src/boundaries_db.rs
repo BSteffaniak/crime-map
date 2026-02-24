@@ -113,3 +113,73 @@ fn create_schema(conn: &Connection) -> Result<(), DbError> {
 
     Ok(())
 }
+
+/// Tables in the boundaries schema that support upsert via `INSERT OR
+/// REPLACE`.
+const MERGE_TABLES: &[&str] = &[
+    "census_states",
+    "census_counties",
+    "census_tracts",
+    "census_places",
+    "neighborhoods",
+    "tract_neighborhoods",
+];
+
+/// Merges rows from a source boundaries `DuckDB` file into the target
+/// connection.
+///
+/// For each table present in the source, rows are upserted into the
+/// target using `INSERT OR REPLACE`. This is safe because each parallel
+/// boundary partition writes to non-overlapping rows (different states,
+/// different boundary types).
+///
+/// Returns the total number of rows merged across all tables.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if ATTACH, INSERT, or DETACH fails.
+pub fn merge_from(target: &Connection, source_path: &Path) -> Result<u64, DbError> {
+    let path_str = source_path.display().to_string();
+    let alias = "src_boundaries";
+
+    target.execute_batch(&format!("ATTACH '{path_str}' AS {alias} (READ_ONLY);"))?;
+
+    let mut total = 0u64;
+
+    for table in MERGE_TABLES {
+        // Check if the table exists in the source and has rows.
+        let has_table: bool = target
+            .prepare(&format!(
+                "SELECT COUNT(*) FROM information_schema.tables
+                 WHERE table_schema = '{alias}' AND table_name = '{table}'"
+            ))?
+            .query_row([], |row| row.get::<_, i64>(0))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+
+        if !has_table {
+            continue;
+        }
+
+        let count: i64 = target
+            .prepare(&format!("SELECT COUNT(*) FROM {alias}.{table}"))?
+            .query_row([], |row| row.get(0))?;
+
+        if count == 0 {
+            continue;
+        }
+
+        target.execute_batch(&format!(
+            "INSERT OR REPLACE INTO {table} SELECT * FROM {alias}.{table};"
+        ))?;
+
+        #[allow(clippy::cast_sign_loss)]
+        let count_u = count as u64;
+        total += count_u;
+        log::info!("  merged {count_u} rows from {table}");
+    }
+
+    target.execute_batch(&format!("DETACH {alias};"))?;
+
+    Ok(total)
+}

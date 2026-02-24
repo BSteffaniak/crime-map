@@ -60,6 +60,28 @@ pub enum R2Error {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
+    /// S3 `DeleteObject` failed.
+    #[error("Failed to delete s3://{bucket}/{key}: {source}")]
+    Delete {
+        /// Bucket name.
+        bucket: String,
+        /// Object key.
+        key: String,
+        /// Underlying SDK error.
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// S3 `ListObjectsV2` failed.
+    #[error("Failed to list s3://{bucket}/{prefix}: {source}")]
+    List {
+        /// Bucket name.
+        bucket: String,
+        /// Key prefix.
+        prefix: String,
+        /// Underlying SDK error.
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     /// I/O error reading or writing local files.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -215,7 +237,12 @@ impl R2Client {
     ///
     /// Returns `true` if the file was downloaded, `false` if the object
     /// doesn't exist in R2 (logged as a warning).
-    async fn download(&self, key: &str, local_path: &Path) -> Result<bool, R2Error> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`R2Error::Download`] on S3 failures, [`R2Error::Io`] on
+    /// local filesystem errors.
+    pub async fn download(&self, key: &str, local_path: &Path) -> Result<bool, R2Error> {
         log::info!("Pulling s3://{BUCKET}/{key} -> {}", local_path.display());
 
         let result = self
@@ -264,7 +291,12 @@ impl R2Client {
     ///
     /// Returns `true` if the file was uploaded, `false` if the local file
     /// doesn't exist (logged as a warning).
-    async fn upload(&self, key: &str, local_path: &Path) -> Result<bool, R2Error> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`R2Error::Upload`] on S3 failures, [`R2Error::Io`] on
+    /// local filesystem errors.
+    pub async fn upload(&self, key: &str, local_path: &Path) -> Result<bool, R2Error> {
         if !local_path.exists() {
             log::warn!(
                 "  {} does not exist locally, skipping",
@@ -300,6 +332,75 @@ impl R2Client {
 
         log::info!("  uploaded {key}");
         Ok(true)
+    }
+
+    /// Deletes an object from R2.
+    ///
+    /// Silently succeeds if the object doesn't exist (S3 `DeleteObject`
+    /// is idempotent).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`R2Error::Delete`] on S3 failures.
+    pub async fn delete(&self, key: &str) -> Result<(), R2Error> {
+        log::info!("Deleting s3://{BUCKET}/{key}");
+
+        self.client
+            .delete_object()
+            .bucket(BUCKET)
+            .key(key)
+            .send()
+            .await
+            .map_err(|e| R2Error::Delete {
+                bucket: BUCKET.to_string(),
+                key: key.to_string(),
+                source: Box::new(e),
+            })?;
+
+        Ok(())
+    }
+
+    /// Lists all object keys under a prefix in R2.
+    ///
+    /// Returns the full keys (not stripped of the prefix).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`R2Error::List`] on S3 failures.
+    pub async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, R2Error> {
+        log::info!("Listing s3://{BUCKET}/{prefix}*");
+
+        let mut keys = Vec::new();
+        let mut continuation_token: Option<String> = None;
+
+        loop {
+            let mut request = self.client.list_objects_v2().bucket(BUCKET).prefix(prefix);
+
+            if let Some(token) = &continuation_token {
+                request = request.continuation_token(token);
+            }
+
+            let output = request.send().await.map_err(|e| R2Error::List {
+                bucket: BUCKET.to_string(),
+                prefix: prefix.to_string(),
+                source: Box::new(e),
+            })?;
+
+            for obj in output.contents() {
+                if let Some(key) = obj.key() {
+                    keys.push(key.to_string());
+                }
+            }
+
+            if output.is_truncated() == Some(true) {
+                continuation_token = output.next_continuation_token().map(String::from);
+            } else {
+                break;
+            }
+        }
+
+        log::info!("  found {} objects", keys.len());
+        Ok(keys)
     }
 }
 

@@ -140,6 +140,20 @@ enum Commands {
         #[arg(long)]
         shared_only: bool,
     },
+    /// Push the local `boundaries.duckdb` to R2 as a named partition
+    /// (used by parallel CI boundary ingestion jobs).
+    PushBoundaryPart {
+        /// Partition name (e.g., "states", "tracts-1", "neighborhoods").
+        /// The file is uploaded to `boundaries-part/{name}.duckdb` in R2.
+        #[arg(long)]
+        name: String,
+    },
+    /// Merge boundary partitions from R2 into a single `boundaries.duckdb`.
+    ///
+    /// Downloads all `boundaries-part/*.duckdb` files from R2, merges them
+    /// into the local `boundaries.duckdb`, pushes the merged result to R2,
+    /// and cleans up the partition files from R2.
+    MergeBoundaries,
 }
 
 /// Resolves source IDs from `--sources` and/or `--states` flags to a
@@ -499,6 +513,69 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let elapsed = start.elapsed();
             log::info!(
                 "Push complete: {total} file(s) uploaded in {:.1}s",
+                elapsed.as_secs_f64()
+            );
+        }
+        Commands::PushBoundaryPart { name } => {
+            let r2 = crime_map_r2::R2Client::from_env()?;
+            let local = crime_map_database::paths::boundaries_db_path();
+            let key = format!("boundaries-part/{name}.duckdb");
+            r2.upload(&key, &local).await?;
+            log::info!("Pushed boundary partition '{name}' to R2");
+        }
+        Commands::MergeBoundaries => {
+            let r2 = crime_map_r2::R2Client::from_env()?;
+            let start = Instant::now();
+
+            // List all boundary partition files in R2
+            let keys = r2.list_keys("boundaries-part/").await?;
+            if keys.is_empty() {
+                log::warn!("No boundary partitions found in R2, nothing to merge");
+                return Ok(());
+            }
+            log::info!("Found {} boundary partition(s) to merge", keys.len());
+
+            // Download each partition to a temp directory
+            let tmp_dir = std::env::temp_dir().join("boundary-parts");
+            std::fs::create_dir_all(&tmp_dir)?;
+
+            let mut local_parts: Vec<std::path::PathBuf> = Vec::new();
+            for key in &keys {
+                let filename = key.rsplit('/').next().unwrap_or(key);
+                let local_path = tmp_dir.join(filename);
+                r2.download(key, &local_path).await?;
+                local_parts.push(local_path);
+            }
+
+            // Open (or create) the target boundaries DB and merge
+            let target = crime_map_database::boundaries_db::open_default()?;
+            let mut total_rows = 0u64;
+
+            for part_path in &local_parts {
+                log::info!("Merging {}", part_path.display());
+                total_rows += crime_map_database::boundaries_db::merge_from(&target, part_path)?;
+            }
+
+            drop(target);
+
+            // Push merged boundaries.duckdb to R2
+            r2.push_shared().await?;
+
+            // Clean up partition files from R2
+            for key in &keys {
+                r2.delete(key).await?;
+            }
+            log::info!("Deleted {} boundary partition(s) from R2", keys.len());
+
+            // Clean up local temp files
+            if let Err(e) = std::fs::remove_dir_all(&tmp_dir) {
+                log::warn!("Failed to clean up temp dir: {e}");
+            }
+
+            let elapsed = start.elapsed();
+            log::info!(
+                "Merge complete: {total_rows} rows merged from {} partitions in {:.1}s",
+                keys.len(),
                 elapsed.as_secs_f64()
             );
         }

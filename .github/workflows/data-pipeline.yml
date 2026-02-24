@@ -136,6 +136,9 @@ jobs:
           retention-days: 7
 
   # ── Step 1a: Ingest census boundaries in parallel ───────────────────
+  #
+  # Each job writes to its own local boundaries.duckdb and pushes it to
+  # R2 as boundaries-part/{type}.duckdb. No shared state between jobs.
   boundaries-ingest:
     name: "Boundaries (${{ matrix.type }})"
     runs-on: ubuntu-latest
@@ -191,20 +194,44 @@ jobs:
       - name: Make binaries executable
         run: chmod +x /usr/local/bin/crime_map_ingest /usr/local/bin/crime_map_generate
 
-      - name: Pull shared databases from R2
-        run: crime_map_ingest pull --shared-only
-
       - name: "Ingest ${{ matrix.type }}"
         run: ${{ matrix.command }}
 
-      - name: Push shared databases to R2
-        run: crime_map_ingest push --shared-only
+      - name: Push boundary partition to R2
+        run: crime_map_ingest push-boundary-part --name ${{ matrix.type }}
 
-  # ── Step 1b: Generate boundary artifacts after all ingestion ────────
+  # ── Step 1b: Merge boundary partitions from R2 ──────────────────────
+  boundaries-merge:
+    name: Merge Boundaries
+    runs-on: ubuntu-latest
+    needs: [build, boundaries-ingest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pipeline tools (no Rust)
+        uses: ./.github/actions/setup-pipeline
+        with:
+          install-rust: 'false'
+
+      - name: Download pipeline binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: pipeline-binaries
+          path: /usr/local/bin
+
+      - name: Make binaries executable
+        run: chmod +x /usr/local/bin/crime_map_ingest /usr/local/bin/crime_map_generate
+
+      - name: Merge boundary partitions
+        run: crime_map_ingest merge-boundaries
+
+  # ── Step 1c: Generate boundary artifacts after merge ────────────────
   boundaries-generate:
     name: Generate Boundaries
     runs-on: ubuntu-latest
-    needs: [build, boundaries-ingest]
+    needs: [build, boundaries-merge]
 
     steps:
       - name: Checkout
@@ -245,7 +272,7 @@ jobs:
   partition:
     name: "${{ matrix.name }}"
     runs-on: ubuntu-latest
-    needs: [setup, build, boundaries-ingest]
+    needs: [setup, build, boundaries-merge]
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJSON(inputs.max_parallel || '20') }}
