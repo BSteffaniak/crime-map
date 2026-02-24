@@ -21,7 +21,7 @@
 use std::path::Path;
 
 use aws_config::Region;
-use aws_sdk_s3::config::Credentials;
+use aws_sdk_s3::config::{Credentials, StalledStreamProtectionConfig};
 use crime_map_database::paths;
 use crime_map_source::registry;
 
@@ -92,6 +92,7 @@ impl R2Client {
             .region(Region::new("auto"))
             .credentials_provider(creds)
             .force_path_style(true)
+            .stalled_stream_protection(StalledStreamProtectionConfig::disabled())
             .build();
 
         Ok(Self {
