@@ -13,7 +13,8 @@
 //! | `incidents.db` | SQLite `ATTACH` + `INSERT` with auto-assigned IDs, R-tree rebuild |
 //! | `counts.duckdb` | DuckDB `ATTACH` + `INSERT INTO ... SELECT` (UNION ALL) |
 //! | `h3.duckdb` | DuckDB `ATTACH` + `INSERT INTO ... SELECT`, deduplicate `h3_boundaries` |
-//! | `metadata.json` | JSON merge: union cities, MIN/MAX dates |
+//! | `analytics.duckdb` | DuckDB `ATTACH` + UNION ALL incidents, copy reference tables from first partition |
+//! | `metadata.json` | JSON merge: union cities, union sources, MIN/MAX dates |
 //! | `boundaries.pmtiles` | Copy from `--boundaries-dir` |
 //! | `boundaries.db` | Copy from `--boundaries-dir` |
 
@@ -55,6 +56,7 @@ pub async fn run(
     merge_sidebar_db(partition_dirs, output_dir).await?;
     merge_count_db(partition_dirs, output_dir)?;
     merge_h3_db(partition_dirs, output_dir)?;
+    merge_analytics_db(partition_dirs, output_dir)?;
     merge_metadata(partition_dirs, output_dir)?;
 
     // Copy boundary artifacts if provided
@@ -399,13 +401,110 @@ fn merge_h3_db(
 }
 
 // ============================================================
+// DuckDB analytics.duckdb merge
+// ============================================================
+
+/// Reference tables in `analytics.duckdb` that are identical across partitions.
+///
+/// These are populated from the shared `PostGIS` census/boundary data, so
+/// every partition produces the same rows. We copy them from the first
+/// partition that has the table.
+const ANALYTICS_REFERENCE_TABLES: &[&str] = &[
+    "census_tracts",
+    "neighborhoods",
+    "tract_neighborhoods",
+    "census_places",
+    "crime_categories",
+];
+
+/// Merges `analytics.duckdb` from all partitions.
+///
+/// The `incidents` table is unioned from all partitions (each partition
+/// has a disjoint set of source data). Reference tables (`census_tracts`,
+/// `neighborhoods`, etc.) are identical across partitions and are copied
+/// from the first partition.
+#[allow(clippy::too_many_lines)]
+fn merge_analytics_db(
+    partition_dirs: &[PathBuf],
+    output_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let inputs: Vec<PathBuf> = partition_dirs
+        .iter()
+        .map(|d| d.join("analytics.duckdb"))
+        .filter(|p| p.exists())
+        .collect();
+
+    if inputs.is_empty() {
+        log::warn!("No analytics.duckdb files found in any partition; skipping analytics merge");
+        return Ok(());
+    }
+
+    let output_path = output_dir.join("analytics.duckdb");
+    // Remove existing file + WAL
+    for ext in &["", ".wal"] {
+        let p = output_dir.join(format!("analytics.duckdb{ext}"));
+        if p.exists() {
+            std::fs::remove_file(&p)?;
+        }
+    }
+
+    log::info!("Merging {} analytics.duckdb files...", inputs.len());
+    let duck = duckdb::Connection::open(&output_path)?;
+
+    // Attach all partitions
+    for (i, input) in inputs.iter().enumerate() {
+        let alias = format!("p{i}");
+        let path_str = input.to_string_lossy();
+        duck.execute_batch(&format!("ATTACH '{path_str}' AS {alias} (READ_ONLY)"))?;
+    }
+
+    // UNION ALL incidents from all partitions
+    let incidents_union: Vec<String> = (0..inputs.len())
+        .map(|i| format!("SELECT * FROM p{i}.incidents"))
+        .collect();
+
+    duck.execute_batch(&format!(
+        "CREATE TABLE incidents AS {}",
+        incidents_union.join(" UNION ALL ")
+    ))?;
+
+    log::info!("  Merged incidents from {} partitions", inputs.len());
+
+    // Create indexes on the merged incidents table
+    duck.execute_batch(
+        "CREATE INDEX idx_analytics_city ON incidents (city);
+         CREATE INDEX idx_analytics_state ON incidents (state);
+         CREATE INDEX idx_analytics_occurred_at ON incidents (occurred_at);
+         CREATE INDEX idx_analytics_category ON incidents (category);
+         CREATE INDEX idx_analytics_place_geoid ON incidents (census_place_geoid);
+         CREATE INDEX idx_analytics_tract_geoid ON incidents (census_tract_geoid);
+         CREATE INDEX idx_analytics_neighborhood_id ON incidents (neighborhood_id)",
+    )?;
+
+    // Copy reference tables from the first partition (they're identical across all)
+    for &table in ANALYTICS_REFERENCE_TABLES {
+        duck.execute_batch(&format!("CREATE TABLE {table} AS SELECT * FROM p0.{table}"))?;
+        log::info!("  Copied reference table: {table}");
+    }
+
+    // Detach all
+    for i in 0..inputs.len() {
+        duck.execute_batch(&format!("DETACH p{i}"))?;
+    }
+
+    log::info!("Analytics merge complete: {}", output_path.display());
+    Ok(())
+}
+
+// ============================================================
 // metadata.json merge
 // ============================================================
 
 /// Merges `metadata.json` from all partitions.
 ///
-/// Unions city arrays (deduplicated and sorted), takes the MIN of all
-/// `minDate` values and the MAX of all `maxDate` values.
+/// Unions city arrays (deduplicated and sorted), unions source arrays
+/// (deduplicated by `id`), takes the MIN of all `minDate` values and the
+/// MAX of all `maxDate` values.
 fn merge_metadata(
     partition_dirs: &[PathBuf],
     output_dir: &Path,
@@ -424,6 +523,8 @@ fn merge_metadata(
     log::info!("Merging {} metadata.json files...", inputs.len());
 
     let mut all_cities: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut all_sources: std::collections::BTreeMap<i64, serde_json::Value> =
+        std::collections::BTreeMap::new();
     let mut min_date: Option<String> = None;
     let mut max_date: Option<String> = None;
 
@@ -435,6 +536,15 @@ fn merge_metadata(
         if let Some(cities) = meta.get("cities").and_then(|c| c.as_array()) {
             for city in cities {
                 all_cities.insert(city.to_string());
+            }
+        }
+
+        // Collect sources (deduplicate by id)
+        if let Some(sources) = meta.get("sources").and_then(|s| s.as_array()) {
+            for source in sources {
+                if let Some(id) = source.get("id").and_then(serde_json::Value::as_i64) {
+                    all_sources.entry(id).or_insert_with(|| source.clone());
+                }
             }
         }
 
@@ -459,10 +569,14 @@ fn merge_metadata(
         .filter_map(|s| serde_json::from_str(&s).ok())
         .collect();
 
+    // Collect sources sorted by id
+    let sources: Vec<serde_json::Value> = all_sources.into_values().collect();
+
     let merged = serde_json::json!({
         "cities": cities,
         "minDate": min_date,
         "maxDate": max_date,
+        "sources": sources,
     });
 
     let path = output_dir.join("metadata.json");

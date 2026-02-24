@@ -262,6 +262,7 @@ jobs:
             data/partitions/${{ matrix.name }}/incidents.db
             data/partitions/${{ matrix.name }}/counts.duckdb
             data/partitions/${{ matrix.name }}/h3.duckdb
+            data/partitions/${{ matrix.name }}/analytics.duckdb
             data/partitions/${{ matrix.name }}/metadata.json
           retention-days: 7
 

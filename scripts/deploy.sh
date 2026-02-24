@@ -64,6 +64,7 @@ command_data() {
         "boundaries.db"
         "counts.duckdb"
         "h3.duckdb"
+        "analytics.duckdb"
         "metadata.json"
         "manifest.json"
     )
