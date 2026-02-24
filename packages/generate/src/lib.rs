@@ -2910,6 +2910,24 @@ fn export_boundary_layer(
         _ => return Err(format!("Unknown boundary layer: {layer}").into()),
     };
 
+    // Check row count first to avoid DuckDB type-inference edge cases on
+    // empty tables (can trigger InvalidColumnType errors in the Rust crate).
+    let count_query = match layer {
+        "states" => "SELECT COUNT(*) FROM census_states WHERE boundary_geojson IS NOT NULL",
+        "counties" => "SELECT COUNT(*) FROM census_counties WHERE boundary_geojson IS NOT NULL",
+        "places" => "SELECT COUNT(*) FROM census_places WHERE boundary_geojson IS NOT NULL",
+        "tracts" => "SELECT COUNT(*) FROM census_tracts WHERE boundary_geojson IS NOT NULL",
+        "neighborhoods" => "SELECT COUNT(*) FROM neighborhoods WHERE boundary_geojson IS NOT NULL",
+        _ => return Err(format!("Unknown boundary layer: {layer}").into()),
+    };
+    let total: u64 = boundaries_conn.query_row(count_query, [], |row| row.get(0))?;
+
+    if total == 0 {
+        progress.inc(0);
+        log::info!("Exported 0 {layer} boundary features to {filename} (table empty)");
+        return Ok(());
+    }
+
     let mut stmt = boundaries_conn.prepare(query)?;
     let mut rows = stmt.query([])?;
 

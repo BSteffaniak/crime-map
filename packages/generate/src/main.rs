@@ -55,6 +55,11 @@ struct CliGenerateArgs {
     /// Force regeneration even if source data hasn't changed.
     #[arg(long)]
     force: bool,
+
+    /// Skip boundary outputs (boundaries `PMTiles` and boundaries search DB).
+    /// Useful for partition jobs where boundaries are generated separately.
+    #[arg(long)]
+    skip_boundaries: bool,
 }
 
 impl From<&CliGenerateArgs> for GenerateArgs {
@@ -153,7 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[allow(clippy::future_not_send)]
 async fn run_generate_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
-    let (cli_args, outputs): (&CliGenerateArgs, &[&str]) = match &command {
+    let (cli_args, base_outputs): (&CliGenerateArgs, &[&str]) = match &command {
         Commands::Pmtiles { args } => (args, &[OUTPUT_INCIDENTS_PMTILES]),
         Commands::Sidebar { args } => (args, &[OUTPUT_INCIDENTS_DB]),
         Commands::CountDb { args } => (args, &[OUTPUT_COUNT_DB]),
@@ -175,12 +180,23 @@ async fn run_generate_command(command: Commands) -> Result<(), Box<dyn std::erro
         Commands::Merge { .. } => unreachable!("Merge handled separately"),
     };
 
+    // Filter out boundary outputs if --skip-boundaries is set
+    let outputs: Vec<&str> = if cli_args.skip_boundaries {
+        base_outputs
+            .iter()
+            .copied()
+            .filter(|&o| o != OUTPUT_BOUNDARIES_PMTILES && o != OUTPUT_BOUNDARIES_DB)
+            .collect()
+    } else {
+        base_outputs.to_vec()
+    };
+
     let dir = cli_args.output_dir.clone().unwrap_or_else(output_dir);
     std::fs::create_dir_all(&dir)?;
 
     let args = GenerateArgs::from(cli_args);
     let source_ids = resolve_source_ids(&args)?;
-    run_with_cache(&args, &source_ids, &dir, outputs, None).await?;
+    run_with_cache(&args, &source_ids, &dir, &outputs, None).await?;
 
     Ok(())
 }

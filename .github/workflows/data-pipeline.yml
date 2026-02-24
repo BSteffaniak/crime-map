@@ -297,7 +297,9 @@ jobs:
         run: chmod +x /usr/local/bin/crime_map_ingest /usr/local/bin/crime_map_generate
 
       - name: Pull data from R2
-        run: crime_map_ingest pull --sources ${{ matrix.sources }}
+        run: |
+          crime_map_ingest pull --sources ${{ matrix.sources }}
+          crime_map_ingest pull --shared-only
 
       - name: Ingest sources
         run: |
@@ -319,7 +321,7 @@ jobs:
 
       - name: Generate artifacts
         run: |
-          GENERATE_ARGS="all --sources ${{ matrix.sources }} --output-dir data/partitions/${{ matrix.name }}"
+          GENERATE_ARGS="all --skip-boundaries --sources ${{ matrix.sources }} --output-dir data/partitions/${{ matrix.name }}"
           if [ "${{ inputs.force }}" = "true" ]; then
             GENERATE_ARGS="$GENERATE_ARGS --force"
           fi
