@@ -204,7 +204,7 @@ Addresses without coordinates are geocoded through a priority-based provider cha
 | 2 | **Pelias** (self-hosted) | Concurrent fuzzy search against OpenAddresses + OSM | ~100 req/s |
 | 3 | **Nominatim** | Public OSM API, strict rate limit | ~0.9 req/s |
 
-Pelias is optional -- if unreachable, the pipeline skips it and falls through to Nominatim. See [`infra/README.md`](infra/README.md) for deploying Pelias on Oracle Cloud's Always Free tier ($0/month).
+Pelias is optional -- if unreachable, the pipeline skips it and falls through to Nominatim. See [`infra/pelias/README.md`](infra/pelias/README.md) for running Pelias locally with a Cloudflare Tunnel for CI access.
 
 ### Adding a new geocoding provider
 

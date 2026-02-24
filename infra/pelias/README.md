@@ -32,44 +32,116 @@ echo "vm.max_map_count=262144" | sudo tee /etc/sysctl.d/99-elasticsearch.conf
 
 ## One-Time Setup
 
-### 1. Create the Cloudflare Tunnel
+### 1. Generate a tunnel secret
 
-The tunnel lets CI reach your local Pelias instance through
-`pelias.opencrimemap.com` without opening any inbound ports.
-
-```bash
-cd ../deploy
-tofu apply   # Creates the tunnel, DNS record, and Access policy
-```
-
-### 2. Configure the tunnel token
+This secret authenticates the Cloudflare Tunnel. Generate a random
+base64-encoded value (min 32 bytes):
 
 ```bash
-cd ../pelias
-cp .env.example .env
-
-# Get the tunnel token from Terraform output
-cd ../deploy
-tofu output -raw pelias_tunnel_token
-# Paste this into .env as TUNNEL_TOKEN
+openssl rand -base64 32
 ```
 
-### 3. Add GitHub secrets
+Save this value -- you'll need it in the next two steps.
 
-From the Terraform outputs, add these GitHub repository secrets:
+### 2. Update Cloudflare API token permissions
 
-| Secret | Source |
-|--------|--------|
+The existing Cloudflare API token (stored as `CLOUDFLARE_API_TOKEN` in
+GitHub secrets) likely only has Zone and R2 permissions. The new tunnel
+and Access resources require three additional **account-level** permissions.
+
+Go to **Cloudflare Dashboard** > **My Profile** > **API Tokens**, edit the
+existing token (or create a new one), and ensure it has:
+
+| Scope | Permission | Needed for |
+|-------|------------|------------|
+| Zone | Zone:Edit | DNS records (already have this) |
+| Zone | DNS:Edit | DNS records (already have this) |
+| Account | Cloudflare R2 Storage:Edit | R2 bucket (already have this) |
+| Account | **Cloudflare Tunnel:Edit** | Tunnel + tunnel config |
+| Account | **Access: Service Tokens:Edit** | CI service token |
+| Account | **Access: Apps and Policies:Edit** | Access application + policy |
+
+If you created a new token, update `CLOUDFLARE_API_TOKEN` in GitHub
+repository secrets and in your local `infra/deploy/terraform.tfvars`.
+
+### 3. Add secrets and variables
+
+The tunnel secret needs to be stored in two places:
+
+**GitHub repository secret** (Settings > Secrets and variables > Actions):
+
+| Secret | Value |
+|--------|-------|
+| `PELIAS_TUNNEL_SECRET` | The base64 string from step 1 |
+
+**Local Terraform variables** (`infra/deploy/terraform.tfvars`):
+
+```hcl
+pelias_tunnel_secret = "<the base64 string from step 1>"
+```
+
+### 4. Deploy Cloudflare infrastructure
+
+This creates the tunnel, DNS record (`pelias.opencrimemap.com`), Access
+application, and a service token that CI uses to authenticate.
+
+Locally:
+
+```bash
+cd infra/deploy
+tofu init     # pick up the new resources
+tofu plan     # review the changes
+tofu apply
+```
+
+Or trigger the **Deploy Infrastructure** workflow from GitHub Actions
+(it will work now that `PELIAS_TUNNEL_SECRET` is in secrets).
+
+### 5. Add remaining GitHub secrets
+
+After `tofu apply` succeeds, grab the outputs:
+
+```bash
+cd infra/deploy
+tofu output -raw pelias_cf_access_client_id
+tofu output -raw pelias_cf_access_client_secret
+```
+
+Add these as GitHub repository secrets (Settings > Secrets and variables > Actions):
+
+| Secret | Value |
+|--------|-------|
 | `PELIAS_URL` | `https://pelias.opencrimemap.com` |
-| `CF_ACCESS_CLIENT_ID` | `tofu output -raw pelias_cf_access_client_id` |
-| `CF_ACCESS_CLIENT_SECRET` | `tofu output -raw pelias_cf_access_client_secret` |
+| `CF_ACCESS_CLIENT_ID` | Output from `tofu output -raw pelias_cf_access_client_id` |
+| `CF_ACCESS_CLIENT_SECRET` | Output from `tofu output -raw pelias_cf_access_client_secret` |
 
-### 4. Import geocoding data
+### 6. Configure local tunnel token
+
+```bash
+cd infra/pelias
+cp .env.example .env
+```
+
+Get the tunnel token and paste it into `.env`:
+
+```bash
+cd infra/deploy
+tofu output -raw pelias_tunnel_token
+```
+
+> **Tunnel secret vs. tunnel token**: The `pelias_tunnel_secret` (from step 1)
+> is the raw shared secret you generated. The `pelias_tunnel_token` is a
+> base64-encoded JSON blob that Terraform computes by combining your Cloudflare
+> account ID, the tunnel UUID (assigned by Cloudflare), and the secret. The
+> token is what `cloudflared` actually needs to connect.
+
+### 7. Import geocoding data
 
 This downloads and indexes US geocoding data. Only needs to be done once
-(data persists in `data/` directory).
+(data persists in the `data/` directory).
 
 ```bash
+cd infra/pelias
 ./import.sh
 ```
 
@@ -80,11 +152,30 @@ The import downloads and indexes:
 
 Expected time: **6-12 hours** depending on network speed.
 
-### 5. Verify
+### 8. Verify locally
 
 ```bash
+cd infra/pelias
+docker compose up -d
+
+# Wait ~30 seconds for services to start, then:
 curl 'http://localhost:4000/v1/search?text=1600+Pennsylvania+Ave+Washington+DC&size=1' | jq .
 ```
+
+You should get a GeoJSON response with coordinates for the White House.
+
+### 9. Verify tunnel access
+
+With Pelias still running, test that CI can reach it through the tunnel:
+
+```bash
+curl -H "CF-Access-Client-Id: <client_id from step 5>" \
+     -H "CF-Access-Client-Secret: <client_secret from step 5>" \
+     'https://pelias.opencrimemap.com/v1/search?text=1600+Pennsylvania+Ave+Washington+DC&size=1' | jq .
+```
+
+Same response should come back. If it does, CI will be able to reach
+your local Pelias instance.
 
 ## Daily Usage
 
@@ -121,6 +212,10 @@ Via CI:
 # the Cloudflare Tunnel at pelias.opencrimemap.com
 gh workflow run data-pipeline.yml
 ```
+
+**Important**: Your machine must be running Pelias + cloudflared when CI
+runs. Since the data pipeline is manually triggered, start Pelias before
+triggering the workflow.
 
 ### Stop Pelias (when done)
 
@@ -183,6 +278,15 @@ docker compose down
          (CI access)
 ```
 
+## GitHub Secrets Reference
+
+| Secret | Where Used | Description |
+|--------|------------|-------------|
+| `PELIAS_TUNNEL_SECRET` | `deploy-infra.yml` | Raw tunnel secret (input to Terraform) |
+| `PELIAS_URL` | `data-pipeline.yml` | `https://pelias.opencrimemap.com` |
+| `CF_ACCESS_CLIENT_ID` | `data-pipeline.yml` | Cloudflare Access service token client ID |
+| `CF_ACCESS_CLIENT_SECRET` | `data-pipeline.yml` | Cloudflare Access service token client secret |
+
 ## Environment Variables
 
 | Variable | Used By | Description |
@@ -190,4 +294,4 @@ docker compose down
 | `PELIAS_URL` | Rust ingest binary | Override compile-time Pelias URL (e.g., `https://pelias.opencrimemap.com`) |
 | `CF_ACCESS_CLIENT_ID` | Rust ingest binary | Cloudflare Access service token client ID |
 | `CF_ACCESS_CLIENT_SECRET` | Rust ingest binary | Cloudflare Access service token client secret |
-| `TUNNEL_TOKEN` | cloudflared container | Cloudflare Tunnel authentication token |
+| `TUNNEL_TOKEN` | cloudflared container | Cloudflare Tunnel authentication token (from `tofu output -raw pelias_tunnel_token`) |
