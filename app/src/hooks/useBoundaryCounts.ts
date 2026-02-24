@@ -6,14 +6,14 @@
  * {geoid: count} so all visible layers can render choropleth simultaneously,
  * with more detailed layers stacking on top of coarser ones.
  *
- * Debounced on map move, immediate on moveend.
+ * Counts are fetched **without a bbox filter** so that each boundary gets
+ * its true total regardless of what portion is visible in the viewport.
+ * This prevents colors from changing as the user pans.
  */
 
-import { type MutableRefObject, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FilterState, CategoryId } from "@/lib/types";
 import { CRIME_CATEGORIES } from "@/lib/types";
-import type { BBox } from "@/lib/sidebar/types";
-import { VIEWPORT_DEBOUNCE_MS } from "@/lib/map-config";
 import { appendBoundaryParams } from "@/lib/boundary-params";
 
 /** geoid -> incident count */
@@ -51,14 +51,13 @@ function getVisibleBoundaryTypes(layers: Record<string, boolean>): BoundaryType[
 }
 
 function buildQueryString(
-  bbox: BBox,
   boundaryType: BoundaryType,
   filters: FilterState,
 ): string {
   const params = new URLSearchParams();
 
   params.set("type", boundaryType);
-  params.set("bbox", bbox.join(","));
+  // No bbox — we want full boundary totals regardless of viewport
 
   if (filters.dateFrom) params.set("from", filters.dateFrom);
   if (filters.dateTo) params.set("to", filters.dateTo);
@@ -102,18 +101,18 @@ interface UseBoundaryCountsResult {
  * Fetches per-boundary incident counts for **all** visible boundary
  * layers in parallel. Each visible layer gets its own fetch, and results
  * are merged into a single `AllBoundaryCounts` map.
+ *
+ * No bbox filter — returns full totals per boundary so colors are stable
+ * regardless of viewport position.
  */
 export function useBoundaryCounts(
-  bbox: BBox | null,
   filters: FilterState,
   layers: Record<string, boolean>,
-  settledRef: MutableRefObject<boolean>,
 ): UseBoundaryCountsResult {
   const [allBoundaryCounts, setAllBoundaryCounts] = useState<AllBoundaryCounts>({});
   const [loading, setLoading] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const genRef = useRef(0);
 
   const visibleBoundaryTypes = getVisibleBoundaryTypes(layers);
@@ -121,11 +120,6 @@ export function useBoundaryCounts(
   const visibleKey = visibleBoundaryTypes.join(",");
 
   useEffect(() => {
-    if (debounceRef.current) {
-      clearTimeout(debounceRef.current);
-      debounceRef.current = null;
-    }
-
     // No boundary layers visible — clear counts
     if (visibleBoundaryTypes.length === 0) {
       setAllBoundaryCounts({});
@@ -133,66 +127,45 @@ export function useBoundaryCounts(
       return;
     }
 
-    const settled = settledRef.current;
+    abortRef.current?.abort();
+    const gen = ++genRef.current;
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setLoading(true);
 
-    const doFetch = () => {
-      abortRef.current?.abort();
+    // Fetch counts for every visible boundary type in parallel
+    const fetches = visibleBoundaryTypes.map((boundaryType) => {
+      const qs = buildQueryString(boundaryType, filters);
+      return fetch(`/api/boundary-counts?${qs}`, { signal: controller.signal })
+        .then((res) => {
+          if (!res.ok) throw new Error(`Boundary counts API ${res.status}`);
+          return res.json() as Promise<{ type: string; counts: BoundaryCounts }>;
+        })
+        .then((data) => ({ type: boundaryType, counts: data.counts }));
+    });
 
-      const gen = ++genRef.current;
-
-      if (!bbox) {
+    Promise.all(fetches)
+      .then((results) => {
+        if (gen !== genRef.current) return;
+        const merged: AllBoundaryCounts = {};
+        for (const { type, counts } of results) {
+          merged[type] = counts;
+        }
+        setAllBoundaryCounts(merged);
+        setLoading(false);
+      })
+      .catch((err) => {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        console.error("Boundary counts fetch failed:", err);
+        if (gen !== genRef.current) return;
         setAllBoundaryCounts({});
         setLoading(false);
-        return;
-      }
-
-      const controller = new AbortController();
-      abortRef.current = controller;
-      setLoading(true);
-
-      // Fetch counts for every visible boundary type in parallel
-      const fetches = visibleBoundaryTypes.map((boundaryType) => {
-        const qs = buildQueryString(bbox, boundaryType, filters);
-        return fetch(`/api/boundary-counts?${qs}`, { signal: controller.signal })
-          .then((res) => {
-            if (!res.ok) throw new Error(`Boundary counts API ${res.status}`);
-            return res.json() as Promise<{ type: string; counts: BoundaryCounts }>;
-          })
-          .then((data) => ({ type: boundaryType, counts: data.counts }));
       });
 
-      Promise.all(fetches)
-        .then((results) => {
-          if (gen !== genRef.current) return;
-          const merged: AllBoundaryCounts = {};
-          for (const { type, counts } of results) {
-            merged[type] = counts;
-          }
-          setAllBoundaryCounts(merged);
-          setLoading(false);
-        })
-        .catch((err) => {
-          if (err instanceof DOMException && err.name === "AbortError") return;
-          console.error("Boundary counts fetch failed:", err);
-          if (gen !== genRef.current) return;
-          setAllBoundaryCounts({});
-          setLoading(false);
-        });
-    };
-
-    if (settled) {
-      doFetch();
-    } else {
-      debounceRef.current = setTimeout(doFetch, VIEWPORT_DEBOUNCE_MS);
-    }
-
     return () => {
-      if (debounceRef.current) {
-        clearTimeout(debounceRef.current);
-        debounceRef.current = null;
-      }
+      controller.abort();
     };
-  }, [bbox, filters, visibleKey, settledRef]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [filters, visibleKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Cleanup on unmount
   useEffect(() => {

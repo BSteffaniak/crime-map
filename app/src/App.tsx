@@ -64,7 +64,7 @@ export default function App() {
 
   const { hexbins } = useHexbins(bbox, zoom, filters, settledRef);
   const { sourceCounts } = useSourceCounts(bbox, filters, settledRef);
-  const { allBoundaryCounts, visibleBoundaryTypes } = useBoundaryCounts(bbox, filters, layers, settledRef);
+  const { allBoundaryCounts, visibleBoundaryTypes } = useBoundaryCounts(filters, layers);
 
   return (
     <div className="relative h-dvh w-screen overflow-hidden bg-background text-foreground">
