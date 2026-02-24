@@ -282,7 +282,23 @@ pub async fn insert_incidents(
             idx += PARAMS_PER_ROW;
         }
 
-        sql.push_str(" ON CONFLICT (source_id, source_incident_id) DO NOTHING");
+        sql.push_str(
+            " ON CONFLICT (source_id, source_incident_id) DO UPDATE SET \
+             category_id = EXCLUDED.category_id, \
+             parent_category_id = EXCLUDED.parent_category_id, \
+             location = EXCLUDED.location, \
+             occurred_at = EXCLUDED.occurred_at, \
+             reported_at = EXCLUDED.reported_at, \
+             description = EXCLUDED.description, \
+             block_address = EXCLUDED.block_address, \
+             city = EXCLUDED.city, \
+             state = EXCLUDED.state, \
+             arrest_made = EXCLUDED.arrest_made, \
+             domestic = EXCLUDED.domestic, \
+             location_type = EXCLUDED.location_type, \
+             has_coordinates = EXCLUDED.has_coordinates, \
+             geocoded = EXCLUDED.geocoded",
+        );
 
         total_inserted += db.exec_raw_params(&sql, &params).await?;
     }
