@@ -733,6 +733,17 @@ async fn generate_pmtiles(
     )
     .await?;
 
+    // Skip tippecanoe if no features were exported (empty GeoJSONSeq).
+    // tippecanoe crashes with "Did not read any valid geometries" on empty input.
+    let file_size = std::fs::metadata(&geojsonseq_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    if file_size == 0 {
+        log::warn!("No incident features to tile; skipping PMTiles generation");
+        std::fs::remove_file(&geojsonseq_path).ok();
+        return Ok(());
+    }
+
     log::info!("Running tippecanoe to generate PMTiles...");
 
     let output_path = dir.join("incidents.pmtiles");
@@ -2445,15 +2456,32 @@ async fn generate_boundaries_pmtiles(
     }
 
     // Add each layer as a named-layer with its GeoJSONSeq file
+    let mut has_layers = false;
     for &(layer_name, filename) in BOUNDARY_LAYERS {
         let layer_path = dir.join(filename);
-        if layer_path.exists() {
+        let non_empty = layer_path.exists()
+            && std::fs::metadata(&layer_path)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false);
+        if non_empty {
             let arg = format!(
                 "--named-layer={layer_name}:{}",
                 layer_path.to_string_lossy()
             );
             cmd.arg(arg);
+            has_layers = true;
         }
+    }
+
+    // Skip tippecanoe if all layer files are empty
+    if !has_layers {
+        log::warn!("No boundary features to tile; skipping boundaries PMTiles generation");
+        // Clean up empty layer files
+        for &(_, filename) in BOUNDARY_LAYERS {
+            let path = dir.join(filename);
+            std::fs::remove_file(&path).ok();
+        }
+        return Ok(());
     }
 
     let status = cmd.status()?;
