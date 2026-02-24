@@ -140,6 +140,18 @@ enum Commands {
         #[arg(long)]
         shared_only: bool,
     },
+    /// Pull a cached boundary partition from R2 into the local
+    /// `boundaries.duckdb` (used by CI boundary ingestion jobs to reuse
+    /// previously-ingested data and avoid redundant Census API calls).
+    ///
+    /// Downloads `boundaries-part/{name}.duckdb` from R2 into the local
+    /// `data/shared/boundaries.duckdb` path. If the partition doesn't
+    /// exist on R2 yet (first run), logs a warning and continues.
+    PullBoundaryPart {
+        /// Partition name (e.g., "states", "tracts-1", "neighborhoods").
+        #[arg(long)]
+        name: String,
+    },
     /// Push the local `boundaries.duckdb` to R2 as a named partition
     /// (used by parallel CI boundary ingestion jobs).
     PushBoundaryPart {
@@ -151,8 +163,8 @@ enum Commands {
     /// Merge boundary partitions from R2 into a single `boundaries.duckdb`.
     ///
     /// Downloads all `boundaries-part/*.duckdb` files from R2, merges them
-    /// into the local `boundaries.duckdb`, pushes the merged result to R2,
-    /// and cleans up the partition files from R2.
+    /// into the local `boundaries.duckdb`, and pushes the merged result to
+    /// R2. Partition files are kept on R2 as cache for future runs.
     MergeBoundaries,
 }
 
@@ -516,6 +528,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 elapsed.as_secs_f64()
             );
         }
+        Commands::PullBoundaryPart { name } => {
+            let r2 = crime_map_r2::R2Client::from_env()?;
+            let local = crime_map_database::paths::boundaries_db_path();
+            let key = format!("boundaries-part/{name}.duckdb");
+            if r2.download(&key, &local).await? {
+                log::info!("Pulled boundary partition '{name}' from R2");
+            } else {
+                log::info!(
+                    "No cached boundary partition '{name}' on R2 (first run), starting fresh"
+                );
+            }
+        }
         Commands::PushBoundaryPart { name } => {
             let r2 = crime_map_r2::R2Client::from_env()?;
             let local = crime_map_database::paths::boundaries_db_path();
@@ -561,11 +585,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Push merged boundaries.duckdb to R2
             r2.push_shared().await?;
 
-            // Clean up partition files from R2
-            for key in &keys {
-                r2.delete(key).await?;
-            }
-            log::info!("Deleted {} boundary partition(s) from R2", keys.len());
+            // Partition files are intentionally kept on R2 as cache —
+            // future boundary ingestion jobs pull their partition first
+            // so the skip-if-exists logic avoids redundant Census API calls.
 
             // Clean up local temp files
             if let Err(e) = std::fs::remove_dir_all(&tmp_dir) {

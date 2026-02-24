@@ -194,8 +194,16 @@ jobs:
       - name: Make binaries executable
         run: chmod +x /usr/local/bin/crime_map_ingest /usr/local/bin/crime_map_generate
 
+      - name: Pull cached boundary partition from R2
+        run: crime_map_ingest pull-boundary-part --name ${{ matrix.type }}
+
       - name: "Ingest ${{ matrix.type }}"
-        run: ${{ matrix.command }}
+        run: |
+          CMD="${{ matrix.command }}"
+          if [ "${{ inputs.force }}" = "true" ]; then
+            CMD="$CMD --force"
+          fi
+          $CMD
 
       - name: Push boundary partition to R2
         run: crime_map_ingest push-boundary-part --name ${{ matrix.type }}
