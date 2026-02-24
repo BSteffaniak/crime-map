@@ -44,7 +44,7 @@ const MAX_TOOL_RESULT_BYTES: usize = 8000;
 /// context into the conversation telling the agent to wrap up, while
 /// the hard limit forces termination.
 pub struct AgentLimits {
-    /// Timeout for a single tool execution (e.g. a `PostGIS` query).
+    /// Timeout for a single tool execution (e.g. a `DuckDB` query).
     /// If exceeded, the tool returns an error and the agent continues.
     pub per_tool_timeout: Duration,
 

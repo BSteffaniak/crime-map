@@ -1,6 +1,6 @@
 [package]
 authors = { workspace = true }
-description = "Database connection, queries, and migrations for crime map"
+description = "DuckDB-based data storage for crime map ingestion and generation"
 edition = { workspace = true }
 license = { workspace = true }
 name = "crime_map_database"
@@ -13,21 +13,15 @@ crime_map_source_models = { workspace = true }
 crime_map_database_models = { workspace = true }
 crime_map_source = { workspace = true }
 
-switchy_database = { workspace = true, features = ["postgres-raw", "schema"] }
-switchy_database_connection = { workspace = true, features = [
-  "postgres-raw",
-  "postgres-native-tls",
-] }
-switchy_schema = { workspace = true, features = ["embedded"] }
-moosicbox_json_utils = { workspace = true, features = ["database"] }
+duckdb = { workspace = true }
 
 chrono = { workspace = true }
-include_dir = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
 
 [features]
 default = []
+duckdb-bundled = ["duckdb/bundled"]
 fail-on-warnings = [
   "crime_map_crime_models/fail-on-warnings",
   "crime_map_database_models/fail-on-warnings",

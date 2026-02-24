@@ -24,7 +24,6 @@ pub async fn health(state: web::Data<AppState>) -> HttpResponse {
         healthy: true,
         version: env!("CARGO_PKG_VERSION").to_string(),
         data_ready: state.data.get().is_some(),
-        database_connected: false,
     })
 }
 

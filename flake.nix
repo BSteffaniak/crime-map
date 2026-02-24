@@ -62,8 +62,6 @@
             ++ baseBuildTools
             ++ geoTools
             ++ (with pkgs; [
-              postgresql # psql client
-              docker-compose
               nodejs
               bun
             ])
@@ -76,7 +74,7 @@
               echo "Rust: $(rustc --version)"
               echo ""
               echo "Commands:"
-              echo "  docker compose up -d     Start PostGIS (port 5440)"
+              echo "  cargo ingest sync-all    Ingest crime data into DuckDB"
               echo "  cargo build              Build all Rust packages"
               echo "  cargo run -p crime_map_server  Start API server"
               echo "  cd app && bun dev       Start frontend dev server"

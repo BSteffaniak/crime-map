@@ -13,31 +13,10 @@ inputs:
     description: Additional cache key suffix for Rust build cache (only used when install-rust is true)
     required: false
     default: ''
-  db-host:
-    description: Database hostname to pin to IPv4 via /etc/hosts (optional)
-    required: false
-    default: ''
 
 runs:
   using: composite
   steps:
-    - name: Force IPv4 for database connectivity
-      shell: bash
-      run: |
-        # Prefer IPv4 in system DNS resolution
-        echo 'precedence ::ffff:0:0/96 100' | sudo tee -a /etc/gai.conf
-        # Pin DB hostname to IPv4 in /etc/hosts if provided
-        DB_HOST="${{ inputs.db-host }}"
-        if [ -n "$DB_HOST" ]; then
-          IPV4=$(dig +short "$DB_HOST" A | tail -1)
-          if [ -n "$IPV4" ]; then
-            echo "$IPV4 $DB_HOST" | sudo tee -a /etc/hosts
-            echo "Pinned $DB_HOST -> $IPV4 in /etc/hosts"
-          else
-            echo "WARNING: Could not resolve $DB_HOST to IPv4"
-          fi
-        fi
-
     - name: Setup Rust toolchain
       if: inputs.install-rust == 'true'
       uses: dtolnay/rust-toolchain@stable

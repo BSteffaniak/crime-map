@@ -30,6 +30,9 @@ concurrency:
 
 env:
   RUST_LOG: crime_map=debug
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+  R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
 jobs:
   # ── Step 0a: Discover sources and compute partition matrix ──────────
@@ -174,17 +177,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Extract DB hostname
-        id: db
-        run: |
-          HOST=$(echo "${{ secrets.DATABASE_URL }}" | sed 's|.*@||;s|/.*||;s|:.*||')
-          echo "host=$HOST" >> "$GITHUB_OUTPUT"
-
       - name: Setup pipeline tools (no Rust)
         uses: ./.github/actions/setup-pipeline
         with:
           install-rust: 'false'
-          db-host: ${{ steps.db.outputs.host }}
 
       - name: Download pipeline binaries
         uses: actions/download-artifact@v4
@@ -195,15 +191,14 @@ jobs:
       - name: Make binaries executable
         run: chmod +x /usr/local/bin/crime_map_ingest /usr/local/bin/crime_map_generate
 
-      - name: Run migrations
-        run: crime_map_ingest migrate
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - name: Pull shared databases from R2
+        run: crime_map_ingest pull --shared-only
 
       - name: "Ingest ${{ matrix.type }}"
         run: ${{ matrix.command }}
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Push shared databases to R2
+        run: crime_map_ingest push --shared-only
 
   # ── Step 1b: Generate boundary artifacts after all ingestion ────────
   boundaries-generate:
@@ -215,17 +210,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Extract DB hostname
-        id: db
-        run: |
-          HOST=$(echo "${{ secrets.DATABASE_URL }}" | sed 's|.*@||;s|/.*||;s|:.*||')
-          echo "host=$HOST" >> "$GITHUB_OUTPUT"
-
       - name: Setup pipeline tools (no Rust)
         uses: ./.github/actions/setup-pipeline
         with:
           install-rust: 'false'
-          db-host: ${{ steps.db.outputs.host }}
 
       - name: Download pipeline binaries
         uses: actions/download-artifact@v4
@@ -236,12 +224,13 @@ jobs:
       - name: Make binaries executable
         run: chmod +x /usr/local/bin/crime_map_ingest /usr/local/bin/crime_map_generate
 
+      - name: Pull shared databases from R2
+        run: crime_map_ingest pull --shared-only
+
       - name: Generate boundary artifacts
         run: |
           mkdir -p data/boundaries
           crime_map_generate boundaries --output-dir data/boundaries --force
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
       - name: Upload boundary artifacts
         uses: actions/upload-artifact@v4
@@ -266,17 +255,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Extract DB hostname
-        id: db
-        run: |
-          HOST=$(echo "${{ secrets.DATABASE_URL }}" | sed 's|.*@||;s|/.*||;s|:.*||')
-          echo "host=$HOST" >> "$GITHUB_OUTPUT"
-
       - name: Setup pipeline tools (no Rust)
         uses: ./.github/actions/setup-pipeline
         with:
           install-rust: 'false'
-          db-host: ${{ steps.db.outputs.host }}
 
       - name: Download pipeline binaries
         uses: actions/download-artifact@v4
@@ -286,6 +268,9 @@ jobs:
 
       - name: Make binaries executable
         run: chmod +x /usr/local/bin/crime_map_ingest /usr/local/bin/crime_map_generate
+
+      - name: Pull data from R2
+        run: crime_map_ingest pull --sources ${{ matrix.sources }}
 
       - name: Ingest sources
         run: |
@@ -297,21 +282,13 @@ jobs:
             INGEST_ARGS="$INGEST_ARGS --force"
           fi
           crime_map_ingest $INGEST_ARGS
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
       - name: Geocode missing coordinates
         run: crime_map_ingest geocode --sources ${{ matrix.sources }}
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
           PELIAS_URL: ${{ secrets.PELIAS_URL }}
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
-
-      - name: Attribute boundary GEOIDs
-        run: crime_map_ingest attribute --sources ${{ matrix.sources }}
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
       - name: Generate artifacts
         run: |
@@ -320,8 +297,9 @@ jobs:
             GENERATE_ARGS="$GENERATE_ARGS --force"
           fi
           crime_map_generate $GENERATE_ARGS
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Push data to R2
+        run: crime_map_ingest push --sources ${{ matrix.sources }}
 
       - name: List generated files
         run: ls -lah data/partitions/${{ matrix.name }}/ 2>/dev/null || echo "No files generated"

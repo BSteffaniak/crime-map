@@ -23,6 +23,7 @@ members = [
   "packages/pdf",
   "packages/geocoder",
   "packages/conversations",
+  "packages/r2",
   "packages/cli",
   "packages/cli_utils",
 ]
@@ -74,6 +75,7 @@ crime_map_pdf = { default-features = false, path = "packages/pdf" }
 crime_map_geocoder = { default-features = false, path = "packages/geocoder" }
 crime_map_cli = { default-features = false, path = "packages/cli" }
 crime_map_cli_utils = { default-features = false, path = "packages/cli_utils" }
+crime_map_r2 = { default-features = false, path = "packages/r2" }
 # MoosicBox / Switchy (git references)
 moosicbox_assert = { git = "https://github.com/MoosicBox/MoosicBox.git", branch = "master", default-features = false }
 moosicbox_profiles = { git = "https://github.com/MoosicBox/MoosicBox.git", branch = "master", default-features = false }
@@ -104,7 +106,6 @@ clap = { version = "4.5.57", default-features = false, features = [
   "std",
   "usage",
 ] }
-deadpool-postgres = { version = "0.14.1", default-features = false }
 futures = { version = "0.3.31", default-features = false }
 log = { version = "0.4.29", default-features = false, features = [
   "release_max_level_trace",
@@ -129,10 +130,6 @@ toml = { version = "0.9.11", default-features = false, features = [
   "display",
   "serde",
 ] }
-tokio-postgres = { version = "0.7.16", default-features = false, features = [
-  "with-chrono-0_4",
-] }
-postgres-protocol = { version = "0.6.10", default-features = false }
 uuid = { version = "1.20.0", default-features = false, features = ["v4"] }
 include_dir = { version = "0.7.4", default-features = false }
 sha2 = { version = "0.10.9", default-features = false }
@@ -156,8 +153,9 @@ dialoguer = { version = "0.12.0", default-features = false, features = [
 ] }
 pdf-extract = { version = "0.10.0", default-features = false }
 
-# AWS SDK (optional, for Bedrock provider)
+# AWS SDK
 aws-sdk-bedrockruntime = { version = "1.124.0", default-features = false }
+aws-sdk-s3 = { version = "1.122.0", default-features = false }
 aws-config = { version = "1.8.13", default-features = false }
 aws-smithy-runtime-api = { version = "1.11.3", default-features = false }
 aws-smithy-types = { version = "1.4.3", default-features = false }

@@ -38,6 +38,16 @@ resource "cloudflare_r2_bucket_cors" "tiles" {
   }]
 }
 
+# ── R2 Bucket for Pipeline Data ──────────────────────────────────
+# Stores per-source DuckDB files, boundary data, and geocode cache
+# for the ingestion/generation pipeline. Not accessed from the browser.
+
+resource "cloudflare_r2_bucket" "data" {
+  account_id = var.cloudflare_account_id
+  name       = var.r2_data_bucket_name
+  location   = "enam"
+}
+
 # ── DNS: Root domain -> Fly.io ───────────────────────────────────
 # Proxied through Cloudflare for caching and DDoS protection.
 

@@ -8,10 +8,9 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use crime_map_cli_utils::IndicatifProgress;
-use crime_map_database::{db, queries, run_migrations};
+use crime_map_database::{geocode_cache, source_db};
 use crime_map_ingest::{
-    all_sources, enabled_sources, geocode_missing, re_geocode_source,
-    resolve_re_geocode_source_ids, sync_source,
+    all_sources, enabled_sources, geocode_missing, re_geocode_source, sync_source,
 };
 use crime_map_source::source_def::SourceDefinition;
 
@@ -54,8 +53,6 @@ enum Commands {
     },
     /// List all configured data sources
     Sources,
-    /// Run database migrations
-    Migrate,
     /// Ingest census tract boundaries from the Census Bureau `TIGERweb` API
     Tracts {
         /// Comma-separated list of state FIPS codes (e.g., "11" for DC, "06" for CA).
@@ -102,28 +99,6 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// Assign census place and tract GEOIDs to existing incidents via spatial lookup
-    Attribute {
-        /// Buffer distance in meters for place matching (handles minor
-        /// coordinate rounding in source data). Default: 5 meters.
-        /// Keep this small to avoid misattributing incidents to neighboring
-        /// places in dense areas.
-        #[arg(long, default_value = "5")]
-        buffer: f64,
-        /// Number of incidents to process per batch.
-        #[arg(long, default_value = "5000")]
-        batch_size: u32,
-        /// Only attribute places (skip tracts).
-        #[arg(long)]
-        places_only: bool,
-        /// Only attribute tracts (skip places).
-        #[arg(long)]
-        tracts_only: bool,
-        /// Comma-separated list of source IDs to attribute (e.g., "`chicago_pd,dc_mpd`").
-        /// If not specified, attributes all unattributed incidents.
-        #[arg(long)]
-        sources: Option<String>,
-    },
     /// Geocode incidents that are missing coordinates using block addresses.
     /// Also automatically re-geocodes sources marked with `re_geocode = true`
     /// in their TOML config (e.g., sources with imprecise block-centroid
@@ -144,6 +119,28 @@ enum Commands {
         /// eligible incidents.
         #[arg(long)]
         sources: Option<String>,
+    },
+    /// Pull `DuckDB` files from Cloudflare R2 to the local `data/` directory
+    Pull {
+        /// Comma-separated source IDs to pull (if not specified, pulls all
+        /// sources and shared files).
+        #[arg(long)]
+        sources: Option<String>,
+        /// Only pull shared databases (boundaries, geocode cache), skip
+        /// per-source files.
+        #[arg(long)]
+        shared_only: bool,
+    },
+    /// Push local `DuckDB` files to Cloudflare R2
+    Push {
+        /// Comma-separated source IDs to push (if not specified, pushes all
+        /// sources and shared files).
+        #[arg(long)]
+        sources: Option<String>,
+        /// Only push shared databases (boundaries, geocode cache), skip
+        /// per-source files.
+        #[arg(long)]
+        shared_only: bool,
     },
 }
 
@@ -190,32 +187,40 @@ fn resolve_source_filter(sources: Option<&str>, states: Option<&str>) -> Vec<Sou
     filtered
 }
 
-/// Resolves `--sources` CSV to database integer source IDs for use in
-/// attribution and geocoding queries.
-async fn resolve_source_db_ids(
-    db: &dyn switchy_database::Database,
-    sources: Option<&str>,
-) -> Result<Vec<i32>, Box<dyn std::error::Error>> {
+/// Resolves `--sources` CSV to a list of TOML source IDs.
+fn resolve_source_toml_ids(sources: Option<&str>) -> Vec<String> {
     let Some(sources_str) = sources else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
 
     let all = all_sources();
-    let mut db_ids = Vec::new();
+    let mut toml_ids = Vec::new();
 
     for short_id in sources_str.split(',').map(str::trim) {
         if short_id.is_empty() {
             continue;
         }
-        let Some(def) = all.iter().find(|s| s.id() == short_id) else {
+        if all.iter().any(|s| s.id() == short_id) {
+            toml_ids.push(short_id.to_string());
+        } else {
             log::warn!("Unknown source ID '{short_id}'; skipping");
-            continue;
-        };
-        let sid = queries::get_source_id_by_name(db, def.name()).await?;
-        db_ids.push(sid);
+        }
     }
 
-    Ok(db_ids)
+    toml_ids
+}
+
+/// Parses an optional comma-separated source CSV into a `Vec<String>`.
+/// Returns an empty vec when `None` (meaning "all sources").
+fn parse_source_csv(csv: Option<&str>) -> Vec<String> {
+    csv.map(|s| {
+        s.split(',')
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(String::from)
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 #[allow(clippy::too_many_lines)]
@@ -229,12 +234,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     match command {
-        Commands::Migrate => {
-            log::info!("Running database migrations...");
-            let db = db::connect_from_env().await?;
-            run_migrations(db.as_ref()).await?;
-            log::info!("Migrations complete.");
-        }
         Commands::Sources => {
             let sources = all_sources();
             println!("{:<30} {:<6} NAME", "ID", "STATE");
@@ -248,16 +247,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             limit,
             force,
         } => {
-            let db = db::connect_from_env().await?;
-            run_migrations(db.as_ref()).await?;
             let sources = all_sources();
             let src = sources
                 .iter()
                 .find(|s| s.id() == source)
                 .ok_or_else(|| format!("Unknown source: {source}"))?;
 
+            let conn = source_db::open_by_id(src.id())?;
             let fetch_bar = IndicatifProgress::records_bar(&multi, src.name());
-            let result = sync_source(db.as_ref(), src, limit, force, Some(fetch_bar.clone())).await;
+            let result = sync_source(&conn, src, limit, force, Some(fetch_bar.clone())).await;
             fetch_bar.finish_and_clear();
             result?;
         }
@@ -267,9 +265,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             states,
             force,
         } => {
-            let db = db::connect_from_env().await?;
-            run_migrations(db.as_ref()).await?;
-
             let sources = if states.is_some() || sources.is_some() {
                 resolve_source_filter(sources.as_deref(), states.as_deref())
             } else {
@@ -295,13 +290,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let fetch_bar = IndicatifProgress::records_bar(&multi, src.name());
                 source_bar.set_message(format!("Source {}/{num_sources}: {}", i + 1, src.name()));
 
-                let result =
-                    sync_source(db.as_ref(), src, limit, force, Some(fetch_bar.clone())).await;
-                fetch_bar.finish_and_clear();
+                match source_db::open_by_id(src.id()) {
+                    Ok(conn) => {
+                        let result =
+                            sync_source(&conn, src, limit, force, Some(fetch_bar.clone())).await;
+                        fetch_bar.finish_and_clear();
 
-                if let Err(e) = result {
-                    log::error!("Failed to sync {}: {e}", src.id());
-                    failed_sources.push(src.id().to_string());
+                        if let Err(e) = result {
+                            log::error!("Failed to sync {}: {e}", src.id());
+                            failed_sources.push(src.id().to_string());
+                        }
+                    }
+                    Err(e) => {
+                        fetch_bar.finish_and_clear();
+                        log::error!("Failed to open DB for {}: {e}", src.id());
+                        failed_sources.push(src.id().to_string());
+                    }
                 }
 
                 source_bar.inc(1);
@@ -319,22 +323,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Tracts { states, force } => {
-            let db = db::connect_from_env().await?;
-            run_migrations(db.as_ref()).await?;
+            let boundaries_conn = crime_map_database::boundaries_db::open_default()?;
 
             let start = Instant::now();
             let total = if let Some(states_str) = states {
                 let fips_codes: Vec<&str> = states_str.split(',').map(str::trim).collect();
                 log::info!("Ingesting census tracts for states: {states_str}");
                 crime_map_geography::ingest::ingest_tracts_for_states(
-                    db.as_ref(),
+                    &boundaries_conn,
                     &fips_codes,
                     force,
                 )
                 .await?
             } else {
                 log::info!("Ingesting census tracts for all states...");
-                crime_map_geography::ingest::ingest_all_tracts(db.as_ref(), force).await?
+                crime_map_geography::ingest::ingest_all_tracts(&boundaries_conn, force).await?
             };
 
             let elapsed = start.elapsed();
@@ -344,8 +347,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Commands::Neighborhoods { sources, force } => {
-            let db = db::connect_from_env().await?;
-            run_migrations(db.as_ref()).await?;
+            let boundaries_conn = crime_map_database::boundaries_db::open_default()?;
 
             let all_sources = crime_map_neighborhood::registry::all_sources();
             let sources_to_ingest = if let Some(filter_str) = sources {
@@ -373,18 +375,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             for source in &sources_to_ingest {
                 // Skip sources that already have neighborhoods (unless --force)
                 if !force {
-                    let rows = db
-                        .as_ref()
-                        .query_raw_params(
-                            "SELECT COUNT(*) as cnt FROM neighborhoods WHERE source_id = $1",
-                            &[switchy_database::DatabaseValue::String(
-                                source.id().to_string(),
-                            )],
-                        )
-                        .await?;
-                    let existing: i64 = rows.first().map_or(0, |r| {
-                        moosicbox_json_utils::database::ToValue::to_value(r, "cnt").unwrap_or(0)
-                    });
+                    let existing: i64 = boundaries_conn.query_row(
+                        "SELECT COUNT(*) FROM neighborhoods WHERE source_id = ?",
+                        duckdb::params![source.id()],
+                        |row| row.get(0),
+                    )?;
                     if existing > 0 {
                         log::info!(
                             "{}: {existing} neighborhoods already exist, skipping \
@@ -395,8 +390,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                match crime_map_neighborhood::ingest::ingest_source(db.as_ref(), &client, source)
-                    .await
+                match crime_map_neighborhood::ingest::ingest_source(
+                    &boundaries_conn,
+                    &client,
+                    source,
+                )
+                .await
                 {
                     Ok(count) => total += count,
                     Err(e) => {
@@ -407,7 +406,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Build the tract-to-neighborhood crosswalk only if new data was ingested
             if total > 0 {
-                if let Err(e) = crime_map_neighborhood::ingest::build_crosswalk(db.as_ref()).await {
+                if let Err(e) = crime_map_neighborhood::ingest::build_crosswalk(&boundaries_conn) {
                     log::error!("Failed to build crosswalk: {e}");
                 }
             } else {
@@ -421,22 +420,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Commands::Places { states, force } => {
-            let db = db::connect_from_env().await?;
-            run_migrations(db.as_ref()).await?;
+            let boundaries_conn = crime_map_database::boundaries_db::open_default()?;
 
             let start = Instant::now();
             let total = if let Some(states_str) = states {
                 let fips_codes: Vec<&str> = states_str.split(',').map(str::trim).collect();
                 log::info!("Ingesting Census places for states: {states_str}");
                 crime_map_geography::ingest::ingest_places_for_states(
-                    db.as_ref(),
+                    &boundaries_conn,
                     &fips_codes,
                     force,
                 )
                 .await?
             } else {
                 log::info!("Ingesting Census places for all states...");
-                crime_map_geography::ingest::ingest_all_places(db.as_ref(), force).await?
+                crime_map_geography::ingest::ingest_all_places(&boundaries_conn, force).await?
             };
 
             let elapsed = start.elapsed();
@@ -446,22 +444,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Commands::Counties { states, force } => {
-            let db = db::connect_from_env().await?;
-            run_migrations(db.as_ref()).await?;
+            let boundaries_conn = crime_map_database::boundaries_db::open_default()?;
 
             let start = Instant::now();
             let total = if let Some(states_str) = states {
                 let fips_codes: Vec<&str> = states_str.split(',').map(str::trim).collect();
                 log::info!("Ingesting county boundaries for states: {states_str}");
                 crime_map_geography::ingest::ingest_counties_for_states(
-                    db.as_ref(),
+                    &boundaries_conn,
                     &fips_codes,
                     force,
                 )
                 .await?
             } else {
                 log::info!("Ingesting county boundaries for all states...");
-                crime_map_geography::ingest::ingest_all_counties(db.as_ref(), force).await?
+                crime_map_geography::ingest::ingest_all_counties(&boundaries_conn, force).await?
             };
 
             let elapsed = start.elapsed();
@@ -471,12 +468,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Commands::States { force } => {
-            let db = db::connect_from_env().await?;
-            run_migrations(db.as_ref()).await?;
+            let boundaries_conn = crime_map_database::boundaries_db::open_default()?;
 
             let start = Instant::now();
             log::info!("Ingesting US state boundaries...");
-            let total = crime_map_geography::ingest::ingest_all_states(db.as_ref(), force).await?;
+            let total =
+                crime_map_geography::ingest::ingest_all_states(&boundaries_conn, force).await?;
 
             let elapsed = start.elapsed();
             log::info!(
@@ -484,69 +481,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 elapsed.as_secs_f64()
             );
         }
-        Commands::Attribute {
-            buffer,
-            batch_size,
-            places_only,
-            tracts_only,
-            sources,
-        } => {
-            let db = db::connect_from_env().await?;
-            run_migrations(db.as_ref()).await?;
-
-            let source_ids = resolve_source_db_ids(db.as_ref(), sources.as_deref()).await?;
-            let source_ids_ref = if source_ids.is_empty() {
-                None
-            } else {
-                log::info!("Attributing only sources: {sources:?} (db ids: {source_ids:?})");
-                Some(source_ids.as_slice())
-            };
-
-            let start = Instant::now();
-
-            if !tracts_only {
-                log::info!(
-                    "Attributing incidents to census places (buffer={buffer}m, batch={batch_size})..."
-                );
-                let places_bar = IndicatifProgress::batch_bar(&multi, "Place attribution");
-                let place_count = queries::attribute_places(
-                    db.as_ref(),
-                    buffer,
-                    batch_size,
-                    source_ids_ref,
-                    Some(places_bar),
-                )
-                .await?;
-                log::info!("Attributed {place_count} incidents to census places");
-            }
-
-            if !places_only {
-                log::info!("Attributing incidents to census tracts (batch={batch_size})...");
-                let tracts_bar = IndicatifProgress::batch_bar(&multi, "Tract attribution");
-                let tract_count = queries::attribute_tracts(
-                    db.as_ref(),
-                    batch_size,
-                    source_ids_ref,
-                    Some(tracts_bar),
-                )
-                .await?;
-                log::info!("Attributed {tract_count} incidents to census tracts");
-            }
-
-            let elapsed = start.elapsed();
-            log::info!("Attribution complete in {:.1}s", elapsed.as_secs_f64());
-        }
         Commands::Geocode {
             limit,
             batch_size,
             nominatim_only,
             sources,
         } => {
-            let db = db::connect_from_env().await?;
-            run_migrations(db.as_ref()).await?;
-
-            // Resolve --sources via TOML registry
-            let source_ids = resolve_source_db_ids(db.as_ref(), sources.as_deref()).await?;
+            let source_toml_ids = resolve_source_toml_ids(sources.as_deref());
+            let cache_conn = geocode_cache::open_default()?;
+            let rt = tokio::runtime::Handle::current();
 
             let start = Instant::now();
             let geocode_bar = IndicatifProgress::batch_bar(&multi, "Geocoding");
@@ -554,70 +497,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut total_missing = 0u64;
             let mut total_re_geocoded = 0u64;
 
-            if source_ids.is_empty() {
-                // No filter: geocode everything
-                total_missing = geocode_missing(
-                    db.as_ref(),
+            // Determine which sources to geocode
+            let all_defs = all_sources();
+            let target_sources: Vec<&SourceDefinition> = if source_toml_ids.is_empty() {
+                all_defs.iter().collect()
+            } else {
+                all_defs
+                    .iter()
+                    .filter(|s| source_toml_ids.contains(&s.id().to_string()))
+                    .collect()
+            };
+
+            // Phase 1: Geocode incidents missing coordinates
+            for src in &target_sources {
+                let source_conn = source_db::open_by_id(src.id())?;
+                let missing = geocode_missing(
+                    &source_conn,
+                    &cache_conn,
                     batch_size,
                     limit,
                     nominatim_only,
-                    None,
                     Some(geocode_bar.clone()),
-                )
-                .await?;
+                    &rt,
+                )?;
+                total_missing += missing;
 
-                let re_geocode_ids = resolve_re_geocode_source_ids(db.as_ref(), None).await?;
-                let remaining_limit = limit.map(|l| l.saturating_sub(total_missing));
-                if remaining_limit.is_none_or(|l| l > 0) && !re_geocode_ids.is_empty() {
-                    for sid in &re_geocode_ids {
-                        let count = re_geocode_source(
-                            db.as_ref(),
-                            batch_size,
-                            remaining_limit,
-                            nominatim_only,
-                            Some(*sid),
-                            Some(geocode_bar.clone()),
-                        )
-                        .await?;
-                        total_re_geocoded += count;
-                    }
+                if limit.is_some_and(|l| total_missing >= l) {
+                    break;
                 }
-            } else {
-                // Per-source geocoding
-                for sid in &source_ids {
-                    let missing = geocode_missing(
-                        db.as_ref(),
+            }
+
+            // Phase 2: Re-geocode sources with imprecise coords
+            let remaining_limit = limit.map(|l| l.saturating_sub(total_missing));
+            if remaining_limit.is_none_or(|l| l > 0) {
+                let re_geocode_sources: Vec<&&SourceDefinition> =
+                    target_sources.iter().filter(|s| s.re_geocode()).collect();
+
+                for src in re_geocode_sources {
+                    let source_conn = source_db::open_by_id(src.id())?;
+                    log::info!(
+                        "Re-geocoding source '{}' ({}) with imprecise coordinates...",
+                        src.id(),
+                        src.name()
+                    );
+                    let count = re_geocode_source(
+                        &source_conn,
+                        &cache_conn,
                         batch_size,
-                        limit,
+                        remaining_limit,
                         nominatim_only,
-                        Some(*sid),
                         Some(geocode_bar.clone()),
-                    )
-                    .await?;
-                    total_missing += missing;
-                }
-
-                // Re-geocode for filtered sources
-                let all_re_geocode = resolve_re_geocode_source_ids(db.as_ref(), None).await?;
-                let filtered_re_geocode: Vec<i32> = all_re_geocode
-                    .into_iter()
-                    .filter(|id| source_ids.contains(id))
-                    .collect();
-
-                let remaining_limit = limit.map(|l| l.saturating_sub(total_missing));
-                if remaining_limit.is_none_or(|l| l > 0) && !filtered_re_geocode.is_empty() {
-                    for sid in &filtered_re_geocode {
-                        let count = re_geocode_source(
-                            db.as_ref(),
-                            batch_size,
-                            remaining_limit,
-                            nominatim_only,
-                            Some(*sid),
-                            Some(geocode_bar.clone()),
-                        )
-                        .await?;
-                        total_re_geocoded += count;
-                    }
+                        &rt,
+                    )?;
+                    total_re_geocoded += count;
                 }
             }
 
@@ -627,6 +559,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let elapsed = start.elapsed();
             log::info!(
                 "Geocoding complete: {total} incidents geocoded ({total_missing} missing-coord + {total_re_geocoded} re-geocoded) in {:.1}s",
+                elapsed.as_secs_f64()
+            );
+        }
+        Commands::Pull {
+            sources,
+            shared_only,
+        } => {
+            let r2 = crime_map_r2::R2Client::from_env()?;
+            let start = Instant::now();
+            let mut total = 0u64;
+
+            if !shared_only {
+                let ids = parse_source_csv(sources.as_deref());
+                total += r2.pull_sources(&ids).await?;
+            }
+
+            total += r2.pull_shared().await?;
+
+            let elapsed = start.elapsed();
+            log::info!(
+                "Pull complete: {total} file(s) downloaded in {:.1}s",
+                elapsed.as_secs_f64()
+            );
+        }
+        Commands::Push {
+            sources,
+            shared_only,
+        } => {
+            let r2 = crime_map_r2::R2Client::from_env()?;
+            let start = Instant::now();
+            let mut total = 0u64;
+
+            if !shared_only {
+                let ids = parse_source_csv(sources.as_deref());
+                total += r2.push_sources(&ids).await?;
+            }
+
+            total += r2.push_shared().await?;
+
+            let elapsed = start.elapsed();
+            log::info!(
+                "Push complete: {total} file(s) uploaded in {:.1}s",
                 elapsed.as_secs_f64()
             );
         }

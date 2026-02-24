@@ -1,6 +1,6 @@
 [package]
 authors = { workspace = true }
-description = "CLI tool for generating PMTiles and sidebar SQLite from PostGIS"
+description = "CLI tool for generating PMTiles and sidebar SQLite from DuckDB source data"
 edition = { workspace = true }
 license = { workspace = true }
 name = "crime_map_generate"
@@ -19,14 +19,6 @@ path = "src/lib.rs"
 crime_map_database = { workspace = true }
 crime_map_geography_models = { workspace = true }
 crime_map_source = { workspace = true }
-moosicbox_json_utils = { workspace = true, features = ["database"] }
-switchy_database = { workspace = true, features = [
-  "postgres-raw",
-  "sqlite-rusqlite",
-] }
-switchy_database_connection = { workspace = true, features = [
-  "sqlite-rusqlite",
-] }
 
 clap = { workspace = true }
 chrono = { workspace = true }
@@ -38,13 +30,17 @@ h3o = { workspace = true }
 log = { workspace = true }
 rstar = { workspace = true }
 pretty_env_logger = { workspace = true }
+switchy_database = { workspace = true, features = ["sqlite-rusqlite"] }
+switchy_database_connection = { workspace = true, features = [
+  "sqlite-rusqlite",
+] }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["full"] }
 
 [features]
 default = []
-duckdb-bundled = ["duckdb/bundled"]
+duckdb-bundled = ["duckdb/bundled", "crime_map_database/duckdb-bundled"]
 fail-on-warnings = [
   "crime_map_database/fail-on-warnings",
   "crime_map_geography_models/fail-on-warnings",

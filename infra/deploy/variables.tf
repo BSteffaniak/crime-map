@@ -62,3 +62,9 @@ variable "pelias_tunnel_secret" {
   sensitive   = true
   description = "Base64-encoded secret for the Pelias Cloudflare Tunnel (min 32 bytes). Generate with: openssl rand -base64 32"
 }
+
+variable "r2_data_bucket_name" {
+  type        = string
+  default     = "crime-map-data"
+  description = "Cloudflare R2 bucket name for pipeline data (source DuckDB files, boundaries, geocode cache)"
+}

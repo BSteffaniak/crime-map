@@ -1,6 +1,6 @@
 # Crime Map
 
-Interactive map visualizing public crime data from US cities. Rust backend with PostGIS, React + MapLibre GL JS frontend.
+Interactive map visualizing public crime data from US cities. Rust backend with DuckDB, React + MapLibre GL JS frontend.
 
 ## Architecture
 
@@ -15,9 +15,10 @@ Actix-Web API server (port 8080)
   |-- /api/*         REST endpoints (incidents, categories, sources, sidebar, AI chat)
   |-- /tiles/*       Static PMTiles files
   |
-PostGIS (port 5440)           -- Spatial indexes, crime category taxonomy, census tracts
-SQLite (incidents.db)         -- R-tree indexed sidebar queries
-DuckDB (counts.duckdb)        -- Pre-aggregated counts for sub-10ms filtering
+Per-source DuckDB (data/sources/)   -- Incident storage per data source
+Boundaries DuckDB (data/shared/)    -- Census tracts, places, counties, states, neighborhoods
+SQLite (incidents.db)               -- R-tree indexed sidebar queries
+DuckDB (counts.duckdb)              -- Pre-aggregated counts for sub-10ms filtering
 ```
 
 ## Prerequisites
@@ -28,30 +29,25 @@ DuckDB (counts.duckdb)        -- Pre-aggregated counts for sub-10ms filtering
 
 - Rust (stable, 2024 edition)
 - [Bun](https://bun.sh/) (frontend package manager and bundler)
-- Docker or Podman (for PostGIS)
 - [tippecanoe](https://github.com/felt/tippecanoe) (PMTiles generation)
 - [DuckDB](https://duckdb.org/) shared library (for the `duckdb` Rust crate; or enable the `duckdb-bundled` Cargo feature to compile from source)
-- PostgreSQL client (`psql`, for debugging)
 
 ## Quick Start
 
-### 1. Start the database
+### 1. Ingest boundary data
 
 ```sh
-docker compose up -d
+# Ingest census tracts, places, counties, and state boundaries
+cargo ingest states
+cargo ingest counties
+cargo ingest tracts
+cargo ingest places
+cargo ingest neighborhoods
 ```
 
-This runs PostGIS 17 on port **5440** with database `crime_map`, user `postgres`, password `postgres`.
+This populates `data/shared/boundaries.duckdb` with census boundary polygons from the TIGERweb API.
 
-### 2. Run migrations
-
-```sh
-cargo ingest migrate
-```
-
-Creates tables (`crime_sources`, `crime_categories`, `crime_incidents`, `county_stats`, `census_tracts`) and seeds the category taxonomy.
-
-### 3. Ingest crime data
+### 2. Ingest crime data
 
 ```sh
 # Test with a small sample from each source
@@ -76,25 +72,25 @@ CRIME_MAP_SOURCES=chicago_pd,la_pd,sf_pd,dc_mpd
 
 The `--sources` CLI flag takes precedence over the env var. If neither is set, all sources are synced.
 
-### 4. Generate map tiles
+### 3. Generate map tiles
 
 ```sh
 cargo generate all
 ```
 
-Exports incidents from PostGIS as GeoJSONSeq, then generates:
+Exports incidents from per-source DuckDB files as GeoJSONSeq, then generates:
 
 - `data/generated/incidents.pmtiles` -- vector tiles for heatmap and point layers
 - `data/generated/incidents.db` -- SQLite with R-tree spatial index for sidebar queries
 - `data/generated/counts.duckdb` -- pre-aggregated counts for fast filtering
 
-### 5. Build the frontend
+### 4. Build the frontend
 
 ```sh
 cd app && bun install && bun run build
 ```
 
-### 6. Start the server
+### 5. Start the server
 
 ```sh
 cargo server
@@ -154,7 +150,6 @@ Cargo aliases are defined in `.cargo/config.toml`. All commands run in release m
 ### `cargo ingest`
 
 ```
-cargo ingest migrate              Run database migrations
 cargo ingest sources              List all configured data sources
 cargo ingest sync <SOURCE_ID>     Sync a single source
   --limit <N>                     Max records to fetch (for testing)
@@ -163,6 +158,14 @@ cargo ingest sync-all             Sync all sources
   --limit <N>                     Max records per source (for testing)
   --sources <IDS>                 Comma-separated source IDs to sync (overrides CRIME_MAP_SOURCES)
   --force                         Full sync for all sources, ignoring previously synced data
+cargo ingest geocode              Geocode incidents missing coordinates
+  --sources <IDS>                 Comma-separated source IDs to geocode
+  --limit <N>                     Max incidents to geocode
+cargo ingest tracts               Ingest census tract boundaries
+cargo ingest places               Ingest Census place boundaries
+cargo ingest counties             Ingest county boundaries
+cargo ingest states               Ingest US state boundaries
+cargo ingest neighborhoods        Ingest neighborhood boundaries
 ```
 
 ### `cargo generate`
@@ -221,15 +224,15 @@ packages/
   source/models/      Source types (NormalizedIncident, SourceConfig, SourceType)
   source/             CrimeSource trait, shared fetchers (Socrata, ArcGIS, Carto, CKAN, OData), 42 TOML source configs
   database/models/    Query types (BoundingBox, IncidentQuery, IncidentRow)
-  database/           PostGIS migrations and spatial queries
+  database/           DuckDB storage: per-source incidents, shared boundaries, geocode cache
   geocoder/           Geocoding clients (Census Bureau, Pelias, Nominatim) and TOML service registry
   geography/models/   Census tract and area statistics types
-  geography/          Census tract boundary ingestion (TIGERweb API), spatial queries
+  geography/          Census boundary ingestion (TIGERweb API) into DuckDB
   analytics/models/   AI tool parameter/result types, JSON Schema tool definitions
   analytics/          Analytical query engine (count, rank, compare, trend, top types, list cities)
   ai/                 LLM agent loop with provider abstraction (Anthropic, OpenAI, Bedrock)
   ingest/models/      Ingestion types (FetchConfig, ImportResult)
-  ingest/             CLI binary for data ingestion (migrate, sync, sync-all, geocode)
+  ingest/             CLI binary for data ingestion (sync, sync-all, geocode, boundaries)
   generate/           Tile and database generation via tippecanoe (PMTiles, SQLite, DuckDB)
   server/models/      API request/response types
   server/             Actix-Web HTTP server
@@ -242,7 +245,6 @@ infra/                OpenTofu configs for self-hosted Pelias on Oracle Cloud Al
 
 | Variable                 | Default                                                 | Description                                                       |
 | ------------------------ | ------------------------------------------------------- | ----------------------------------------------------------------- |
-| `DATABASE_URL`           | `postgres://postgres:postgres@localhost:5440/crime_map` | PostgreSQL connection string                                      |
 | `CRIME_MAP_SOURCES`      | (all sources)                                           | Comma-separated source IDs to sync (e.g., `chicago_pd,dc_mpd`)   |
 | `BIND_ADDR`              | `127.0.0.1`                                             | Server bind address                                               |
 | `PORT`                   | `8080`                                                  | Server port                                                       |

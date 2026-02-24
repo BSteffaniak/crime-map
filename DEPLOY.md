@@ -30,9 +30,9 @@ Browser
   suspended.
 - The Fly.io machine uses `auto_stop = "suspend"` to minimize costs. It
   suspends after idle and resumes in ~200-500ms on the next request.
-- PostGIS is **not** required at runtime. The server boots from pre-generated
-  SQLite/DuckDB files. PostGIS is only needed during data ingestion and
-  generation (locally or in CI).
+- No external database is required at runtime. The server boots from
+  pre-generated SQLite/DuckDB files. DuckDB source files are only needed
+  during data ingestion and generation (locally or in CI).
 - The server starts immediately even if data files are missing. A background
   task polls for files and initializes connections once they appear.
 
@@ -159,7 +159,7 @@ files, upload PMTiles to R2, and upload data files to the Fly volume.
 **Locally:**
 
 ```bash
-# 1. Ingest data into local PostGIS (requires docker compose up -d)
+# 1. Ingest crime data (DuckDB files in data/sources/)
 cargo ingest sync-all
 
 # 2. Generate all outputs
@@ -182,8 +182,8 @@ Go to Actions > "Deploy Data" > Run workflow. Inputs:
 | `limit` | (none) | Max records per source |
 | `force` | `false` | Force full re-sync and regeneration |
 
-The CI workflow spins up a PostGIS container, runs ingestion and generation,
-then uploads everything.
+The CI workflow ingests data into per-source DuckDB files (pulled from /
+pushed to R2), runs generation, then uploads the outputs.
 
 **Examples:**
 
@@ -246,7 +246,6 @@ Set via `fly.toml` `[env]` section or `fly secrets set`:
 | `BIND_ADDR` | `127.0.0.1` | Server bind address |
 | `PORT` | `8080` | Server port |
 | `RUST_LOG` | `info` | Log level |
-| `DATABASE_URL` | (none) | PostGIS connection string (optional at runtime) |
 | `AI_PROVIDER` | (none) | AI provider: `anthropic`, `openai`, or `bedrock` |
 | `ANTHROPIC_API_KEY` | (none) | Anthropic API key (if using Anthropic) |
 
@@ -344,10 +343,8 @@ Returns:
 {
     "healthy": true,
     "version": "0.1.0",
-    "dataReady": true,
-    "databaseConnected": false
+    "dataReady": true
 }
 ```
 
 - `dataReady`: Pre-generated data files loaded (SQLite + DuckDB)
-- `databaseConnected`: PostGIS connected (only when `DATABASE_URL` is set)

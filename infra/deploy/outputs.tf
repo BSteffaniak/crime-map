@@ -37,6 +37,11 @@ output "r2_bucket_name" {
   description = "R2 bucket name for PMTiles"
 }
 
+output "r2_data_bucket_name" {
+  value       = cloudflare_r2_bucket.data.name
+  description = "R2 bucket name for pipeline data"
+}
+
 output "app_domain" {
   value       = "https://${var.domain}"
   description = "Application URL via custom domain"

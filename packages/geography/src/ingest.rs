@@ -1,10 +1,9 @@
 //! Census tract ingestion from the Census Bureau `TIGERweb` REST API.
 //!
 //! Downloads tract boundaries as `GeoJSON` from the ACS 2023 vintage
-//! `TIGERweb` service and loads them into `PostGIS`.
+//! `TIGERweb` service and loads them into `DuckDB`.
 
-use moosicbox_json_utils::database::ToValue as _;
-use switchy_database::{Database, DatabaseValue};
+use duckdb::Connection;
 
 use crate::GeoError;
 
@@ -215,14 +214,14 @@ async fn fetch_tigerweb_page_with_retry(
 
 /// Downloads and inserts census tracts for a single state.
 ///
-/// Uses the `TIGERweb` REST API to query tract boundaries as `EsriJSON`,
-/// converts them to `GeoJSON`, and inserts into `PostGIS`.
+/// Uses the `TIGERweb` REST API to query tract boundaries as `GeoJSON`,
+/// and inserts into `DuckDB`.
 ///
 /// # Errors
 ///
 /// Returns [`GeoError`] if the HTTP request or database operation fails.
 async fn ingest_state(
-    db: &dyn Database,
+    conn: &Connection,
     client: &reqwest::Client,
     state_fips: &str,
     force: bool,
@@ -231,14 +230,12 @@ async fn ingest_state(
 
     // Skip if tracts already exist for this state (unless --force)
     if !force {
-        let rows = db
-            .query_raw_params(
-                "SELECT COUNT(*) as count FROM census_tracts \
-                 WHERE state_fips = $1 AND boundary IS NOT NULL",
-                &[DatabaseValue::String(state_fips.to_string())],
-            )
-            .await?;
-        let count: i64 = rows.first().map_or(0, |r| r.to_value("count").unwrap_or(0));
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM census_tracts \
+             WHERE state_fips = ? AND boundary_geojson IS NOT NULL",
+            duckdb::params![state_fips],
+            |row| row.get(0),
+        )?;
         if count > 0 {
             log::info!(
                 "State {state_fips} ({abbr}): {count} tracts already exist, skipping \
@@ -263,6 +260,17 @@ async fn ingest_state(
     let features = fetch_tigerweb_paginated(client, &url, &label).await?;
 
     let mut inserted = 0u64;
+
+    let mut stmt = conn.prepare(
+        "INSERT INTO census_tracts (geoid, name, state_fips, county_fips, state_abbr, boundary_geojson, land_area_sq_mi, centroid_lon, centroid_lat)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (geoid) DO UPDATE SET
+             name = EXCLUDED.name,
+             boundary_geojson = EXCLUDED.boundary_geojson,
+             land_area_sq_mi = EXCLUDED.land_area_sq_mi,
+             centroid_lon = EXCLUDED.centroid_lon,
+             centroid_lat = EXCLUDED.centroid_lat",
+    )?;
 
     for feature in &features {
         let props = &feature["properties"];
@@ -293,7 +301,7 @@ async fn ingest_state(
             .and_then(|s| s.trim().parse::<f64>().ok())
             .or_else(|| props["CENTLON"].as_f64());
 
-        // Extract geometry as GeoJSON string for ST_GeomFromGeoJSON
+        // Extract geometry as GeoJSON string
         let geometry = &feature["geometry"];
         let geom_str = serde_json::to_string(geometry).unwrap_or_default();
 
@@ -301,31 +309,19 @@ async fn ingest_state(
             continue;
         }
 
-        let result = db
-            .exec_raw_params(
-                "INSERT INTO census_tracts (geoid, name, state_fips, county_fips, state_abbr, boundary, land_area_sq_mi, centroid_lon, centroid_lat)
-                 VALUES ($1, $2, $3, $4, $5, ST_Multi(ST_GeomFromGeoJSON($6))::geography, $7, $8, $9)
-                 ON CONFLICT (geoid) DO UPDATE SET
-                     name = EXCLUDED.name,
-                     boundary = EXCLUDED.boundary,
-                     land_area_sq_mi = EXCLUDED.land_area_sq_mi,
-                     centroid_lon = EXCLUDED.centroid_lon,
-                     centroid_lat = EXCLUDED.centroid_lat",
-                &[
-                    DatabaseValue::String(geoid),
-                    DatabaseValue::String(name),
-                    DatabaseValue::String(state_fips.to_string()),
-                    DatabaseValue::String(county_fips),
-                    DatabaseValue::String(abbr.to_string()),
-                    DatabaseValue::String(geom_str),
-                    land_area_sq_mi.map_or(DatabaseValue::Null, DatabaseValue::Real64),
-                    centlon.map_or(DatabaseValue::Null, DatabaseValue::Real64),
-                    centlat.map_or(DatabaseValue::Null, DatabaseValue::Real64),
-                ],
-            )
-            .await?;
+        let rows = stmt.execute(duckdb::params![
+            geoid,
+            name,
+            state_fips,
+            county_fips,
+            abbr,
+            geom_str,
+            land_area_sq_mi,
+            centlon,
+            centlat,
+        ])?;
 
-        inserted += result;
+        inserted += u64::try_from(rows).unwrap_or(0);
     }
 
     log::info!(
@@ -337,7 +333,7 @@ async fn ingest_state(
 
 /// Ingests census tract boundaries for all US states.
 ///
-/// Downloads from the `TIGERweb` REST API and loads into `PostGIS`.
+/// Downloads from the `TIGERweb` REST API and loads into `DuckDB`.
 /// After loading boundaries, also fetches population data from the ACS
 /// and county names from `TIGERweb`.
 /// Processes states sequentially to avoid overwhelming the API.
@@ -345,7 +341,7 @@ async fn ingest_state(
 /// # Errors
 ///
 /// Returns [`GeoError`] if any state fails to ingest.
-pub async fn ingest_all_tracts(db: &dyn Database, force: bool) -> Result<u64, GeoError> {
+pub async fn ingest_all_tracts(conn: &Connection, force: bool) -> Result<u64, GeoError> {
     let client = build_tigerweb_client()?;
 
     let mut total = 0u64;
@@ -356,17 +352,17 @@ pub async fn ingest_all_tracts(db: &dyn Database, force: bool) -> Result<u64, Ge
             tokio::time::sleep(INTER_STATE_DELAY).await;
         }
         prev_fetched = false;
-        match ingest_state(db, &client, fips, force).await {
+        match ingest_state(conn, &client, fips, force).await {
             Ok(count) => {
                 total += count;
                 if count > 0 {
                     prev_fetched = true;
                 }
                 // Populate supplemental data for this state
-                if let Err(e) = populate_population(db, &client, fips, force).await {
+                if let Err(e) = populate_population(conn, &client, fips, force).await {
                     log::error!("Failed to populate population for state {fips}: {e}");
                 }
-                if let Err(e) = populate_county_names(db, &client, fips, force).await {
+                if let Err(e) = populate_county_names(conn, &client, fips, force).await {
                     log::error!("Failed to populate county names for state {fips}: {e}");
                 }
             }
@@ -389,7 +385,7 @@ pub async fn ingest_all_tracts(db: &dyn Database, force: bool) -> Result<u64, Ge
 ///
 /// Returns [`GeoError`] if any state fails to ingest.
 pub async fn ingest_tracts_for_states(
-    db: &dyn Database,
+    conn: &Connection,
     state_fips_codes: &[&str],
     force: bool,
 ) -> Result<u64, GeoError> {
@@ -403,16 +399,16 @@ pub async fn ingest_tracts_for_states(
             tokio::time::sleep(INTER_STATE_DELAY).await;
         }
         prev_fetched = false;
-        match ingest_state(db, &client, fips, force).await {
+        match ingest_state(conn, &client, fips, force).await {
             Ok(count) => {
                 total += count;
                 if count > 0 {
                     prev_fetched = true;
                 }
-                if let Err(e) = populate_population(db, &client, fips, force).await {
+                if let Err(e) = populate_population(conn, &client, fips, force).await {
                     log::error!("Failed to populate population for state {fips}: {e}");
                 }
-                if let Err(e) = populate_county_names(db, &client, fips, force).await {
+                if let Err(e) = populate_county_names(conn, &client, fips, force).await {
                     log::error!("Failed to populate county names for state {fips}: {e}");
                 }
             }
@@ -435,21 +431,19 @@ pub async fn ingest_tracts_for_states(
 ///
 /// Returns [`GeoError`] if the HTTP request or database update fails.
 async fn populate_population(
-    db: &dyn Database,
+    conn: &Connection,
     client: &reqwest::Client,
     state_fips: &str,
     force: bool,
 ) -> Result<(), GeoError> {
     // Skip if all tracts in this state already have population data
     if !force {
-        let rows = db
-            .query_raw_params(
-                "SELECT COUNT(*) as cnt FROM census_tracts \
-                 WHERE state_fips = $1 AND population IS NULL AND boundary IS NOT NULL",
-                &[DatabaseValue::String(state_fips.to_string())],
-            )
-            .await?;
-        let unpopulated: i64 = rows.first().map_or(0, |r| r.to_value("cnt").unwrap_or(0));
+        let unpopulated: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM census_tracts \
+             WHERE state_fips = ? AND population IS NULL AND boundary_geojson IS NOT NULL",
+            duckdb::params![state_fips],
+            |row| row.get(0),
+        )?;
         if unpopulated == 0 {
             let abbr = state_abbr(state_fips);
             log::info!("State {state_fips} ({abbr}): tract population already populated, skipping");
@@ -478,6 +472,8 @@ async fn populate_population(
 
     let mut updated = 0u64;
 
+    let mut stmt = conn.prepare("UPDATE census_tracts SET population = ? WHERE geoid = ?")?;
+
     // Skip the header row
     for row in rows.iter().skip(1) {
         if row.len() < 4 {
@@ -493,13 +489,8 @@ async fn populate_population(
         let geoid = format!("{state}{county}{tract}");
 
         if let Some(pop) = population {
-            let result = db
-                .exec_raw_params(
-                    "UPDATE census_tracts SET population = $1 WHERE geoid = $2",
-                    &[DatabaseValue::Int32(pop), DatabaseValue::String(geoid)],
-                )
-                .await?;
-            updated += result;
+            let result = stmt.execute(duckdb::params![pop, geoid])?;
+            updated += u64::try_from(result).unwrap_or(0);
         }
     }
 
@@ -516,21 +507,19 @@ async fn populate_population(
 ///
 /// Returns [`GeoError`] if the HTTP request or database update fails.
 async fn populate_county_names(
-    db: &dyn Database,
+    conn: &Connection,
     client: &reqwest::Client,
     state_fips: &str,
     force: bool,
 ) -> Result<(), GeoError> {
     // Skip if all tracts in this state already have county names
     if !force {
-        let rows = db
-            .query_raw_params(
-                "SELECT COUNT(*) as cnt FROM census_tracts \
-                 WHERE state_fips = $1 AND county_name IS NULL AND boundary IS NOT NULL",
-                &[DatabaseValue::String(state_fips.to_string())],
-            )
-            .await?;
-        let unpopulated: i64 = rows.first().map_or(0, |r| r.to_value("cnt").unwrap_or(0));
+        let unpopulated: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM census_tracts \
+             WHERE state_fips = ? AND county_name IS NULL AND boundary_geojson IS NOT NULL",
+            duckdb::params![state_fips],
+            |row| row.get(0),
+        )?;
         if unpopulated == 0 {
             let abbr = state_abbr(state_fips);
             log::info!(
@@ -556,6 +545,11 @@ async fn populate_county_names(
 
     let mut updated = 0u64;
 
+    let mut stmt = conn.prepare(
+        "UPDATE census_tracts SET county_name = ? \
+         WHERE state_fips = ? AND county_fips = ?",
+    )?;
+
     for feature in &features {
         let attrs = &feature["attributes"];
         let county_fips = attrs["COUNTY"].as_str().unwrap_or_default();
@@ -565,18 +559,8 @@ async fn populate_county_names(
             continue;
         }
 
-        let result = db
-            .exec_raw_params(
-                "UPDATE census_tracts SET county_name = $1 \
-                 WHERE state_fips = $2 AND county_fips = $3",
-                &[
-                    DatabaseValue::String(county_name.to_string()),
-                    DatabaseValue::String(state_fips.to_string()),
-                    DatabaseValue::String(county_fips.to_string()),
-                ],
-            )
-            .await?;
-        updated += result;
+        let result = stmt.execute(duckdb::params![county_name, state_fips, county_fips,])?;
+        updated += u64::try_from(result).unwrap_or(0);
     }
 
     log::info!(
@@ -592,7 +576,7 @@ async fn populate_county_names(
 ///
 /// Layer 28 = Incorporated Places, Layer 30 = Census Designated Places.
 async fn ingest_places_layer(
-    db: &dyn Database,
+    conn: &Connection,
     client: &reqwest::Client,
     state_fips: &str,
     layer: u32,
@@ -603,17 +587,12 @@ async fn ingest_places_layer(
 
     // Skip if places of this type already exist for this state (unless --force)
     if !force {
-        let rows = db
-            .query_raw_params(
-                "SELECT COUNT(*) as count FROM census_places \
-                 WHERE state_fips = $1 AND place_type = $2 AND boundary IS NOT NULL",
-                &[
-                    DatabaseValue::String(state_fips.to_string()),
-                    DatabaseValue::String(place_type.to_string()),
-                ],
-            )
-            .await?;
-        let count: i64 = rows.first().map_or(0, |r| r.to_value("count").unwrap_or(0));
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM census_places \
+             WHERE state_fips = ? AND place_type = ? AND boundary_geojson IS NOT NULL",
+            duckdb::params![state_fips, place_type],
+            |row| row.get(0),
+        )?;
         if count > 0 {
             log::info!(
                 "State {state_fips} ({abbr}): {count} {place_type} places already exist, \
@@ -637,6 +616,18 @@ async fn ingest_places_layer(
     let features = fetch_tigerweb_paginated(client, &url, &label).await?;
 
     let mut inserted = 0u64;
+
+    let mut stmt = conn.prepare(
+        "INSERT INTO census_places (geoid, name, full_name, state_fips, state_abbr, place_type, boundary_geojson, land_area_sq_mi, centroid_lon, centroid_lat)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (geoid) DO UPDATE SET
+             name = EXCLUDED.name,
+             full_name = EXCLUDED.full_name,
+             boundary_geojson = EXCLUDED.boundary_geojson,
+             land_area_sq_mi = EXCLUDED.land_area_sq_mi,
+             centroid_lon = EXCLUDED.centroid_lon,
+             centroid_lat = EXCLUDED.centroid_lat",
+    )?;
 
     for feature in &features {
         let props = &feature["properties"];
@@ -673,33 +664,20 @@ async fn ingest_places_layer(
             continue;
         }
 
-        let result = db
-            .exec_raw_params(
-                "INSERT INTO census_places (geoid, name, full_name, state_fips, state_abbr, place_type, boundary, land_area_sq_mi, centroid_lon, centroid_lat)
-                 VALUES ($1, $2, $3, $4, $5, $6, ST_Multi(ST_GeomFromGeoJSON($7))::geography, $8, $9, $10)
-                 ON CONFLICT (geoid) DO UPDATE SET
-                     name = EXCLUDED.name,
-                     full_name = EXCLUDED.full_name,
-                     boundary = EXCLUDED.boundary,
-                     land_area_sq_mi = EXCLUDED.land_area_sq_mi,
-                     centroid_lon = EXCLUDED.centroid_lon,
-                     centroid_lat = EXCLUDED.centroid_lat",
-                &[
-                    DatabaseValue::String(geoid),
-                    DatabaseValue::String(basename),
-                    DatabaseValue::String(full_name),
-                    DatabaseValue::String(state_fips.to_string()),
-                    DatabaseValue::String(abbr.to_string()),
-                    DatabaseValue::String(place_type.to_string()),
-                    DatabaseValue::String(geom_str),
-                    land_area_sq_mi.map_or(DatabaseValue::Null, DatabaseValue::Real64),
-                    centlon.map_or(DatabaseValue::Null, DatabaseValue::Real64),
-                    centlat.map_or(DatabaseValue::Null, DatabaseValue::Real64),
-                ],
-            )
-            .await?;
+        let rows = stmt.execute(duckdb::params![
+            geoid,
+            basename,
+            full_name,
+            state_fips,
+            abbr,
+            place_type,
+            geom_str,
+            land_area_sq_mi,
+            centlon,
+            centlat,
+        ])?;
 
-        inserted += result;
+        inserted += u64::try_from(rows).unwrap_or(0);
     }
 
     log::info!(
@@ -714,7 +692,7 @@ async fn ingest_places_layer(
 /// Fetches both Incorporated Places (layer 28) and Census Designated
 /// Places (layer 30), then populates population data from the ACS.
 async fn ingest_state_places(
-    db: &dyn Database,
+    conn: &Connection,
     client: &reqwest::Client,
     state_fips: &str,
     force: bool,
@@ -722,19 +700,19 @@ async fn ingest_state_places(
     let mut total = 0u64;
 
     // Layer 28: Incorporated Places
-    match ingest_places_layer(db, client, state_fips, 28, "incorporated", force).await {
+    match ingest_places_layer(conn, client, state_fips, 28, "incorporated", force).await {
         Ok(count) => total += count,
         Err(e) => log::error!("Failed to ingest incorporated places for state {state_fips}: {e}"),
     }
 
     // Layer 30: Census Designated Places
-    match ingest_places_layer(db, client, state_fips, 30, "cdp", force).await {
+    match ingest_places_layer(conn, client, state_fips, 30, "cdp", force).await {
         Ok(count) => total += count,
         Err(e) => log::error!("Failed to ingest CDPs for state {state_fips}: {e}"),
     }
 
     // Populate population data
-    if let Err(e) = populate_place_population(db, client, state_fips, force).await {
+    if let Err(e) = populate_place_population(conn, client, state_fips, force).await {
         log::error!("Failed to populate place population for state {state_fips}: {e}");
     }
 
@@ -748,21 +726,19 @@ async fn ingest_state_places(
 ///
 /// Returns [`GeoError`] if the HTTP request or database update fails.
 async fn populate_place_population(
-    db: &dyn Database,
+    conn: &Connection,
     client: &reqwest::Client,
     state_fips: &str,
     force: bool,
 ) -> Result<(), GeoError> {
     // Skip if all places in this state already have population data
     if !force {
-        let rows = db
-            .query_raw_params(
-                "SELECT COUNT(*) as cnt FROM census_places \
-                 WHERE state_fips = $1 AND population IS NULL AND boundary IS NOT NULL",
-                &[DatabaseValue::String(state_fips.to_string())],
-            )
-            .await?;
-        let unpopulated: i64 = rows.first().map_or(0, |r| r.to_value("cnt").unwrap_or(0));
+        let unpopulated: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM census_places \
+             WHERE state_fips = ? AND population IS NULL AND boundary_geojson IS NOT NULL",
+            duckdb::params![state_fips],
+            |row| row.get(0),
+        )?;
         if unpopulated == 0 {
             let abbr = state_abbr(state_fips);
             log::info!("State {state_fips} ({abbr}): place population already populated, skipping");
@@ -789,6 +765,8 @@ async fn populate_place_population(
 
     let mut updated = 0u64;
 
+    let mut stmt = conn.prepare("UPDATE census_places SET population = ? WHERE geoid = ?")?;
+
     for row in rows.iter().skip(1) {
         if row.len() < 3 {
             continue;
@@ -800,13 +778,8 @@ async fn populate_place_population(
         let geoid = format!("{state}{place}");
 
         if let Some(pop) = population {
-            let result = db
-                .exec_raw_params(
-                    "UPDATE census_places SET population = $1 WHERE geoid = $2",
-                    &[DatabaseValue::Int32(pop), DatabaseValue::String(geoid)],
-                )
-                .await?;
-            updated += result;
+            let result = stmt.execute(duckdb::params![pop, geoid])?;
+            updated += u64::try_from(result).unwrap_or(0);
         }
     }
 
@@ -819,12 +792,12 @@ async fn populate_place_population(
 /// Ingests Census place boundaries for all US states.
 ///
 /// Downloads Incorporated Places and CDPs from `TIGERweb`, loads into
-/// `PostGIS`, then fetches ACS population data.
+/// `DuckDB`, then fetches ACS population data.
 ///
 /// # Errors
 ///
 /// Returns [`GeoError`] if any state fails to ingest.
-pub async fn ingest_all_places(db: &dyn Database, force: bool) -> Result<u64, GeoError> {
+pub async fn ingest_all_places(conn: &Connection, force: bool) -> Result<u64, GeoError> {
     let client = build_tigerweb_client()?;
 
     let mut total = 0u64;
@@ -835,7 +808,7 @@ pub async fn ingest_all_places(db: &dyn Database, force: bool) -> Result<u64, Ge
             tokio::time::sleep(INTER_STATE_DELAY).await;
         }
         prev_fetched = false;
-        match ingest_state_places(db, &client, fips, force).await {
+        match ingest_state_places(conn, &client, fips, force).await {
             Ok(count) => {
                 total += count;
                 if count > 0 {
@@ -856,7 +829,7 @@ pub async fn ingest_all_places(db: &dyn Database, force: bool) -> Result<u64, Ge
 ///
 /// Returns [`GeoError`] if any state fails to ingest.
 pub async fn ingest_places_for_states(
-    db: &dyn Database,
+    conn: &Connection,
     state_fips_codes: &[&str],
     force: bool,
 ) -> Result<u64, GeoError> {
@@ -870,7 +843,7 @@ pub async fn ingest_places_for_states(
             tokio::time::sleep(INTER_STATE_DELAY).await;
         }
         prev_fetched = false;
-        match ingest_state_places(db, &client, fips, force).await {
+        match ingest_state_places(conn, &client, fips, force).await {
             Ok(count) => {
                 total += count;
                 if count > 0 {
@@ -891,7 +864,7 @@ pub async fn ingest_places_for_states(
 /// Downloads and inserts county boundaries for a single state from
 /// `TIGERweb` Layer 82 (Counties).
 async fn ingest_state_counties(
-    db: &dyn Database,
+    conn: &Connection,
     client: &reqwest::Client,
     state_fips: &str,
     force: bool,
@@ -900,14 +873,12 @@ async fn ingest_state_counties(
 
     // Skip if counties already exist for this state (unless --force)
     if !force {
-        let rows = db
-            .query_raw_params(
-                "SELECT COUNT(*) as count FROM census_counties \
-                 WHERE state_fips = $1 AND boundary IS NOT NULL",
-                &[DatabaseValue::String(state_fips.to_string())],
-            )
-            .await?;
-        let count: i64 = rows.first().map_or(0, |r| r.to_value("count").unwrap_or(0));
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM census_counties \
+             WHERE state_fips = ? AND boundary_geojson IS NOT NULL",
+            duckdb::params![state_fips],
+            |row| row.get(0),
+        )?;
         if count > 0 {
             log::info!(
                 "State {state_fips} ({abbr}): {count} counties already exist, skipping \
@@ -932,6 +903,18 @@ async fn ingest_state_counties(
     let features = fetch_tigerweb_paginated(client, &url, &label).await?;
 
     let mut inserted = 0u64;
+
+    let mut stmt = conn.prepare(
+        "INSERT INTO census_counties (geoid, name, full_name, state_fips, county_fips, state_abbr, boundary_geojson, land_area_sq_mi, centroid_lon, centroid_lat)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (geoid) DO UPDATE SET
+             name = EXCLUDED.name,
+             full_name = EXCLUDED.full_name,
+             boundary_geojson = EXCLUDED.boundary_geojson,
+             land_area_sq_mi = EXCLUDED.land_area_sq_mi,
+             centroid_lon = EXCLUDED.centroid_lon,
+             centroid_lat = EXCLUDED.centroid_lat",
+    )?;
 
     for feature in &features {
         let props = &feature["properties"];
@@ -968,33 +951,20 @@ async fn ingest_state_counties(
             continue;
         }
 
-        let result = db
-            .exec_raw_params(
-                "INSERT INTO census_counties (geoid, name, full_name, state_fips, county_fips, state_abbr, boundary, land_area_sq_mi, centroid_lon, centroid_lat)
-                 VALUES ($1, $2, $3, $4, $5, $6, ST_Multi(ST_GeomFromGeoJSON($7))::geography, $8, $9, $10)
-                 ON CONFLICT (geoid) DO UPDATE SET
-                     name = EXCLUDED.name,
-                     full_name = EXCLUDED.full_name,
-                     boundary = EXCLUDED.boundary,
-                     land_area_sq_mi = EXCLUDED.land_area_sq_mi,
-                     centroid_lon = EXCLUDED.centroid_lon,
-                     centroid_lat = EXCLUDED.centroid_lat",
-                &[
-                    DatabaseValue::String(geoid),
-                    DatabaseValue::String(basename),
-                    DatabaseValue::String(full_name),
-                    DatabaseValue::String(state_fips.to_string()),
-                    DatabaseValue::String(county_fips),
-                    DatabaseValue::String(abbr.to_string()),
-                    DatabaseValue::String(geom_str),
-                    land_area_sq_mi.map_or(DatabaseValue::Null, DatabaseValue::Real64),
-                    centlon.map_or(DatabaseValue::Null, DatabaseValue::Real64),
-                    centlat.map_or(DatabaseValue::Null, DatabaseValue::Real64),
-                ],
-            )
-            .await?;
+        let rows = stmt.execute(duckdb::params![
+            geoid,
+            basename,
+            full_name,
+            state_fips,
+            county_fips,
+            abbr,
+            geom_str,
+            land_area_sq_mi,
+            centlon,
+            centlat,
+        ])?;
 
-        inserted += result;
+        inserted += u64::try_from(rows).unwrap_or(0);
     }
 
     log::info!(
@@ -1003,7 +973,7 @@ async fn ingest_state_counties(
     );
 
     // Populate county population
-    if let Err(e) = populate_county_population(db, client, state_fips, force).await {
+    if let Err(e) = populate_county_population(conn, client, state_fips, force).await {
         log::error!("Failed to populate county population for state {state_fips}: {e}");
     }
 
@@ -1013,21 +983,19 @@ async fn ingest_state_counties(
 /// Fetches ACS 5-year population estimates for counties and updates
 /// the `census_counties` table.
 async fn populate_county_population(
-    db: &dyn Database,
+    conn: &Connection,
     client: &reqwest::Client,
     state_fips: &str,
     force: bool,
 ) -> Result<(), GeoError> {
     // Skip if all counties in this state already have population data
     if !force {
-        let rows = db
-            .query_raw_params(
-                "SELECT COUNT(*) as cnt FROM census_counties \
-                 WHERE state_fips = $1 AND population IS NULL AND boundary IS NOT NULL",
-                &[DatabaseValue::String(state_fips.to_string())],
-            )
-            .await?;
-        let unpopulated: i64 = rows.first().map_or(0, |r| r.to_value("cnt").unwrap_or(0));
+        let unpopulated: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM census_counties \
+             WHERE state_fips = ? AND population IS NULL AND boundary_geojson IS NOT NULL",
+            duckdb::params![state_fips],
+            |row| row.get(0),
+        )?;
         if unpopulated == 0 {
             let abbr = state_abbr(state_fips);
             log::info!(
@@ -1055,6 +1023,8 @@ async fn populate_county_population(
 
     let mut updated = 0u64;
 
+    let mut stmt = conn.prepare("UPDATE census_counties SET population = ? WHERE geoid = ?")?;
+
     for row in rows.iter().skip(1) {
         if row.len() < 3 {
             continue;
@@ -1066,13 +1036,8 @@ async fn populate_county_population(
         let geoid = format!("{state}{county}");
 
         if let Some(pop) = population {
-            let result = db
-                .exec_raw_params(
-                    "UPDATE census_counties SET population = $1 WHERE geoid = $2",
-                    &[DatabaseValue::Int32(pop), DatabaseValue::String(geoid)],
-                )
-                .await?;
-            updated += result;
+            let result = stmt.execute(duckdb::params![pop, geoid])?;
+            updated += u64::try_from(result).unwrap_or(0);
         }
     }
 
@@ -1084,12 +1049,12 @@ async fn populate_county_population(
 
 /// Ingests county boundaries for all US states.
 ///
-/// Downloads from the `TIGERweb` REST API and loads into `PostGIS`.
+/// Downloads from the `TIGERweb` REST API and loads into `DuckDB`.
 ///
 /// # Errors
 ///
 /// Returns [`GeoError`] if any state fails to ingest.
-pub async fn ingest_all_counties(db: &dyn Database, force: bool) -> Result<u64, GeoError> {
+pub async fn ingest_all_counties(conn: &Connection, force: bool) -> Result<u64, GeoError> {
     let client = build_tigerweb_client()?;
 
     let mut total = 0u64;
@@ -1100,7 +1065,7 @@ pub async fn ingest_all_counties(db: &dyn Database, force: bool) -> Result<u64, 
             tokio::time::sleep(INTER_STATE_DELAY).await;
         }
         prev_fetched = false;
-        match ingest_state_counties(db, &client, fips, force).await {
+        match ingest_state_counties(conn, &client, fips, force).await {
             Ok(count) => {
                 total += count;
                 if count > 0 {
@@ -1121,7 +1086,7 @@ pub async fn ingest_all_counties(db: &dyn Database, force: bool) -> Result<u64, 
 ///
 /// Returns [`GeoError`] if any state fails to ingest.
 pub async fn ingest_counties_for_states(
-    db: &dyn Database,
+    conn: &Connection,
     state_fips_codes: &[&str],
     force: bool,
 ) -> Result<u64, GeoError> {
@@ -1135,7 +1100,7 @@ pub async fn ingest_counties_for_states(
             tokio::time::sleep(INTER_STATE_DELAY).await;
         }
         prev_fetched = false;
-        match ingest_state_counties(db, &client, fips, force).await {
+        match ingest_state_counties(conn, &client, fips, force).await {
             Ok(count) => {
                 total += count;
                 if count > 0 {
@@ -1162,7 +1127,7 @@ use crime_map_geography_models::fips::state_name;
 ///
 /// Returns [`GeoError`] if the HTTP request or database operation fails.
 #[allow(clippy::too_many_lines)]
-pub async fn ingest_all_states(db: &dyn Database, force: bool) -> Result<u64, GeoError> {
+pub async fn ingest_all_states(conn: &Connection, force: bool) -> Result<u64, GeoError> {
     let client = build_tigerweb_client()?;
 
     // Skip if all states already exist (unless --force)
@@ -1171,13 +1136,11 @@ pub async fn ingest_all_states(db: &dyn Database, force: bool) -> Result<u64, Ge
     #[allow(clippy::cast_possible_wrap)]
     let expected_states = STATE_FIPS.len() as i64;
     if !force {
-        let rows = db
-            .query_raw_params(
-                "SELECT COUNT(*) as count FROM census_states WHERE boundary IS NOT NULL",
-                &[],
-            )
-            .await?;
-        let count: i64 = rows.first().map_or(0, |r| r.to_value("count").unwrap_or(0));
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM census_states WHERE boundary_geojson IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )?;
         if count >= expected_states {
             log::info!(
                 "{count} state boundaries already exist (all {expected_states} present), \
@@ -1226,6 +1189,18 @@ pub async fn ingest_all_states(db: &dyn Database, force: bool) -> Result<u64, Ge
 
     let mut inserted = 0u64;
 
+    let mut stmt = conn.prepare(
+        "INSERT INTO census_states (fips, name, abbr, boundary_geojson, land_area_sq_mi, centroid_lon, centroid_lat)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (fips) DO UPDATE SET
+             name = EXCLUDED.name,
+             abbr = EXCLUDED.abbr,
+             boundary_geojson = EXCLUDED.boundary_geojson,
+             land_area_sq_mi = EXCLUDED.land_area_sq_mi,
+             centroid_lon = EXCLUDED.centroid_lon,
+             centroid_lat = EXCLUDED.centroid_lat",
+    )?;
+
     for feature in features {
         let props = &feature["properties"];
         let fips = props["STATE"].as_str().unwrap_or_default().to_string();
@@ -1262,34 +1237,21 @@ pub async fn ingest_all_states(db: &dyn Database, force: bool) -> Result<u64, Ge
             continue;
         }
 
-        let result = db
-            .exec_raw_params(
-                "INSERT INTO census_states (fips, name, abbr, boundary, land_area_sq_mi, centroid_lon, centroid_lat)
-                 VALUES ($1, $2, $3, ST_Multi(ST_GeomFromGeoJSON($4))::geography, $5, $6, $7)
-                 ON CONFLICT (fips) DO UPDATE SET
-                     name = EXCLUDED.name,
-                     abbr = EXCLUDED.abbr,
-                     boundary = EXCLUDED.boundary,
-                     land_area_sq_mi = EXCLUDED.land_area_sq_mi,
-                     centroid_lon = EXCLUDED.centroid_lon,
-                     centroid_lat = EXCLUDED.centroid_lat",
-                &[
-                    DatabaseValue::String(fips.clone()),
-                    DatabaseValue::String(name.to_string()),
-                    DatabaseValue::String(abbr.to_string()),
-                    DatabaseValue::String(geom_str),
-                    land_area_sq_mi.map_or(DatabaseValue::Null, DatabaseValue::Real64),
-                    centlon.map_or(DatabaseValue::Null, DatabaseValue::Real64),
-                    centlat.map_or(DatabaseValue::Null, DatabaseValue::Real64),
-                ],
-            )
-            .await?;
+        let rows = stmt.execute(duckdb::params![
+            fips,
+            name,
+            abbr,
+            geom_str,
+            land_area_sq_mi,
+            centlon,
+            centlat,
+        ])?;
 
-        inserted += result;
+        inserted += u64::try_from(rows).unwrap_or(0);
     }
 
     // Populate state populations
-    if let Err(e) = populate_state_population(db, &client).await {
+    if let Err(e) = populate_state_population(conn, &client).await {
         log::error!("Failed to populate state populations: {e}");
     }
 
@@ -1300,7 +1262,7 @@ pub async fn ingest_all_states(db: &dyn Database, force: bool) -> Result<u64, Ge
 /// Fetches ACS 5-year population estimates for all states and updates
 /// the `census_states` table.
 async fn populate_state_population(
-    db: &dyn Database,
+    conn: &Connection,
     client: &reqwest::Client,
 ) -> Result<(), GeoError> {
     let url = "https://api.census.gov/data/2023/acs/acs5\
@@ -1318,6 +1280,8 @@ async fn populate_state_population(
 
     let mut updated = 0u64;
 
+    let mut stmt = conn.prepare("UPDATE census_states SET population = ? WHERE fips = ?")?;
+
     for row in rows.iter().skip(1) {
         if row.len() < 2 {
             continue;
@@ -1327,16 +1291,8 @@ async fn populate_state_population(
         let state_fips = &row[1];
 
         if let Some(pop) = population {
-            let result = db
-                .exec_raw_params(
-                    "UPDATE census_states SET population = $1 WHERE fips = $2",
-                    &[
-                        DatabaseValue::Int64(pop),
-                        DatabaseValue::String(state_fips.clone()),
-                    ],
-                )
-                .await?;
-            updated += result;
+            let result = stmt.execute(duckdb::params![pop, state_fips])?;
+            updated += u64::try_from(result).unwrap_or(0);
         }
     }
 

@@ -2,18 +2,19 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
 #![allow(clippy::multiple_crate_versions, clippy::cargo_common_metadata)]
 
-//! Library for ingesting crime data from public sources into the `PostGIS`
-//! database.
+//! Library for ingesting crime data from public sources into per-source
+//! `DuckDB` files.
 
 pub mod interactive;
 
 use std::sync::Arc;
 use std::time::Instant;
 
-use crime_map_database::queries;
+use crime_map_database::{geocode_cache, source_db};
 use crime_map_source::FetchOptions;
 use crime_map_source::progress::ProgressCallback;
 use crime_map_source::source_def::SourceDefinition;
+use duckdb::Connection;
 
 /// Safety buffer (in days) for incremental syncs.
 ///
@@ -24,14 +25,11 @@ use crime_map_source::source_def::SourceDefinition;
 pub const INCREMENTAL_BUFFER_DAYS: i64 = 7;
 
 /// A cached geocoding result: `(address_key, provider, lat, lng, matched_address)`.
-pub type CacheEntry = (String, String, Option<f64>, Option<f64>, Option<String>);
+pub type CacheEntry = geocode_cache::CacheEntry;
 
 /// An address group key and its associated incident IDs, paired with the
 /// normalized cache key string.
-pub type AddressGroup<'a> = (String, &'a (String, String, String), &'a Vec<i64>);
-
-/// Maximum number of parameters `PostgreSQL` allows per statement.
-pub const PG_MAX_PARAMS: usize = 65_535;
+pub type AddressGroup<'a> = (String, &'a (String, String, String), &'a Vec<String>);
 
 /// Returns all configured data sources from the TOML registry.
 #[must_use]
@@ -76,6 +74,9 @@ pub fn enabled_sources(cli_filter: Option<String>) -> Vec<SourceDefinition> {
 /// one page at a time to minimize memory usage and provide incremental
 /// progress.
 ///
+/// The `conn` parameter is the per-source `DuckDB` connection (already
+/// opened via `source_db::open_by_id`).
+///
 /// By default performs an incremental sync, fetching only records newer than
 /// `MAX(occurred_at) - 7 days` for the source. Pass `force = true` to
 /// ignore the previous sync point and fetch everything.
@@ -84,9 +85,9 @@ pub fn enabled_sources(cli_filter: Option<String>) -> Vec<SourceDefinition> {
 ///
 /// Returns an error if database queries, source fetching, or page
 /// normalization/insertion fails.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::future_not_send)]
 pub async fn sync_source(
-    db: &dyn switchy_database::Database,
+    conn: &Connection,
     source: &SourceDefinition,
     limit: Option<u64>,
     force: bool,
@@ -94,18 +95,6 @@ pub async fn sync_source(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     log::info!("Syncing source: {} ({})", source.name(), source.id());
-
-    // Register/upsert the source in the database
-    let portal_url = source.portal_url();
-    let source_id = queries::upsert_source(
-        db,
-        source.name(),
-        "CITY_API",
-        Option::None,
-        &format!("{} data", source.name()),
-        portal_url.as_deref(),
-    )
-    .await?;
 
     // Determine the `since` timestamp for incremental syncing.
     //
@@ -121,8 +110,8 @@ pub async fn sync_source(
         log::info!("{}: full sync (--force)", source.name());
         (None, 0)
     } else {
-        let fully_synced = queries::get_source_fully_synced(db, source_id).await?;
-        let max_occurred = queries::get_source_max_occurred_at(db, source_id).await?;
+        let fully_synced = source_db::get_fully_synced(conn)?;
+        let max_occurred = source_db::get_max_occurred_at(conn)?;
 
         if fully_synced {
             let since = max_occurred.map_or_else(
@@ -144,7 +133,7 @@ pub async fn sync_source(
             );
             (since, 0)
         } else if max_occurred.is_some() {
-            let record_count = queries::get_source_record_count(db, source_id).await?;
+            let record_count = source_db::get_record_count(conn)?;
             if record_count > 0 {
                 log::info!(
                     "{}: resuming full sync from offset {record_count} ({record_count} records already in DB)",
@@ -159,9 +148,6 @@ pub async fn sync_source(
             (None, 0)
         }
     };
-
-    // Get category ID mapping (needed for insertion)
-    let category_ids = queries::get_all_category_ids(db).await?;
 
     // Start streaming pages from the fetcher
     let options = FetchOptions {
@@ -194,8 +180,8 @@ pub async fn sync_source(
         let norm_count = incidents.len() as u64;
         total_normalized += norm_count;
 
-        // Insert this page into the database
-        let inserted = queries::insert_incidents(db, source_id, &incidents, &category_ids).await?;
+        // Insert this page into the per-source DuckDB
+        let inserted = source_db::insert_incidents(conn, &incidents)?;
         total_inserted += inserted;
 
         log::info!(
@@ -210,13 +196,13 @@ pub async fn sync_source(
         return Err(format!("Fetch error for {}: {e}", source.name()).into());
     }
 
-    // Update source stats
-    queries::update_source_stats(db, source_id).await?;
+    // Update source metadata
+    source_db::update_sync_metadata(conn, source.name())?;
 
     // Mark the source as fully synced only if we didn't cap with --limit.
     // A limited sync is intentionally partial (for testing), so we don't
     // want incremental mode to kick in on the next run.
-    queries::set_source_fully_synced(db, source_id, limit.is_none()).await?;
+    source_db::set_fully_synced(conn, limit.is_none())?;
 
     let elapsed = start.elapsed();
     log::info!(
@@ -231,325 +217,6 @@ pub async fn sync_source(
     Ok(())
 }
 
-/// Builds a SQL source filter clause and corresponding parameter list.
-///
-/// When a `source_id` is provided, returns `" AND source_id = $2"` with
-/// the limit and source ID as parameters. Otherwise returns an empty clause
-/// with just the limit parameter.
-#[must_use]
-pub fn source_filter_params(
-    limit_val: u64,
-    source_id: Option<i32>,
-) -> (&'static str, Vec<switchy_database::DatabaseValue>) {
-    use switchy_database::DatabaseValue;
-
-    source_id.map_or_else(
-        || {
-            (
-                "",
-                vec![DatabaseValue::Int64(
-                    i64::try_from(limit_val).unwrap_or(i64::MAX),
-                )],
-            )
-        },
-        |sid| {
-            (
-                " AND source_id = $2",
-                vec![
-                    DatabaseValue::Int64(i64::try_from(limit_val).unwrap_or(i64::MAX)),
-                    DatabaseValue::Int32(sid),
-                ],
-            )
-        },
-    )
-}
-
-/// Resolves database source IDs for all TOML sources that have
-/// `re_geocode = true`.
-///
-/// If `filter_toml_id` is provided, only returns the matching source
-/// (if it also has `re_geocode = true`).
-///
-/// # Errors
-///
-/// Returns an error if a database lookup for a source name fails.
-pub async fn resolve_re_geocode_source_ids(
-    db: &dyn switchy_database::Database,
-    filter_toml_id: Option<&str>,
-) -> Result<Vec<i32>, Box<dyn std::error::Error>> {
-    let sources = all_sources();
-    let re_geocode_sources: Vec<&SourceDefinition> = sources
-        .iter()
-        .filter(|s| s.re_geocode())
-        .filter(|s| filter_toml_id.is_none_or(|id| s.id() == id))
-        .collect();
-
-    let mut db_ids = Vec::new();
-    for src in &re_geocode_sources {
-        match queries::get_source_id_by_name(db, src.name()).await {
-            Ok(sid) => {
-                log::info!(
-                    "Source '{}' ({}) is marked for re-geocoding (db id={sid})",
-                    src.id(),
-                    src.name()
-                );
-                db_ids.push(sid);
-            }
-            Err(e) => {
-                log::warn!(
-                    "Source '{}' has re_geocode=true but not found in DB: {e}",
-                    src.id()
-                );
-            }
-        }
-    }
-
-    Ok(db_ids)
-}
-
-/// Applies geocoded coordinates to incidents using batch `UPDATE … FROM
-/// (VALUES …)` statements instead of individual row updates.
-///
-/// When `clear_attribution` is `true` (used by re-geocode), the census
-/// place and tract GEOIDs are also cleared so the next `attribute` run
-/// reassigns them based on the new coordinates.
-///
-/// Returns the number of rows updated.
-///
-/// # Errors
-///
-/// Returns an error if the batch UPDATE statement fails.
-pub async fn batch_update_geocoded(
-    db: &dyn switchy_database::Database,
-    updates: &[(i64, f64, f64)],
-    clear_attribution: bool,
-) -> Result<u64, Box<dyn std::error::Error>> {
-    use std::fmt::Write as _;
-    use switchy_database::DatabaseValue;
-
-    if updates.is_empty() {
-        return Ok(0);
-    }
-
-    let mut total_updated = 0u64;
-
-    // Each row in the VALUES clause uses 3 parameters: (id, lng, lat).
-    // If columns are added to the VALUES clause, update this constant so
-    // the chunk size adjusts automatically.
-    let params_per_row: usize = 3;
-    let chunk_size = PG_MAX_PARAMS / params_per_row;
-
-    for chunk in updates.chunks(chunk_size) {
-        let set_clause = if clear_attribution {
-            "SET location = ST_SetSRID(ST_MakePoint(d.lng, d.lat), 4326)::geography,
-                 geocoded = TRUE,
-                 census_place_geoid = NULL,
-                 census_tract_geoid = NULL"
-        } else {
-            "SET location = ST_SetSRID(ST_MakePoint(d.lng, d.lat), 4326)::geography,
-                 has_coordinates = TRUE,
-                 geocoded = TRUE"
-        };
-
-        let mut sql = format!("UPDATE crime_incidents i {set_clause}\nFROM (VALUES ");
-        let mut params: Vec<DatabaseValue> = Vec::with_capacity(chunk.len() * 3);
-        let mut idx = 1u32;
-
-        for (i, &(id, lng, lat)) in chunk.iter().enumerate() {
-            if i > 0 {
-                sql.push_str(", ");
-            }
-            write!(
-                sql,
-                "(${idx}::bigint, ${e1}::float8, ${e2}::float8)",
-                e1 = idx + 1,
-                e2 = idx + 2,
-            )
-            .unwrap();
-            params.push(DatabaseValue::Int64(id));
-            params.push(DatabaseValue::Real64(lng));
-            params.push(DatabaseValue::Real64(lat));
-            idx += 3;
-        }
-
-        sql.push_str(") AS d(id, lng, lat) WHERE i.id = d.id");
-
-        let rows_affected = db.exec_raw_params(&sql, &params).await?;
-        total_updated += rows_affected;
-    }
-
-    Ok(total_updated)
-}
-
-/// Marks incidents as `geocoded = TRUE` without changing their location.
-///
-/// Used after all geocoding providers have been exhausted for an incident
-/// so it won't be re-fetched in the next batch iteration.
-///
-/// # Errors
-///
-/// Returns an error if the batch UPDATE statement fails.
-pub async fn batch_mark_geocoded(
-    db: &dyn switchy_database::Database,
-    ids: &[i64],
-) -> Result<u64, Box<dyn std::error::Error>> {
-    use std::fmt::Write as _;
-    use switchy_database::DatabaseValue;
-
-    if ids.is_empty() {
-        return Ok(0);
-    }
-
-    let mut total = 0u64;
-    let params_per_row: usize = 1;
-    let chunk_size = PG_MAX_PARAMS / params_per_row;
-
-    for chunk in ids.chunks(chunk_size) {
-        let mut sql = String::from("UPDATE crime_incidents SET geocoded = TRUE WHERE id IN (");
-        let mut params: Vec<DatabaseValue> = Vec::with_capacity(chunk.len());
-
-        for (i, &id) in chunk.iter().enumerate() {
-            if i > 0 {
-                sql.push_str(", ");
-            }
-            write!(sql, "${}", i + 1).unwrap();
-            params.push(DatabaseValue::Int64(id));
-        }
-
-        sql.push(')');
-        total += db.exec_raw_params(&sql, &params).await?;
-    }
-
-    Ok(total)
-}
-
-/// Looks up cached geocoding results for the given address keys.
-///
-/// Returns a map from `address_key` to `(lat, lng)` for cache hits
-/// (only entries where coordinates are not null — i.e., successful
-/// geocodes). Entries where coordinates are null (failed lookups)
-/// are *not* returned as hits but their existence means we should
-/// skip re-querying that provider.
-///
-/// # Errors
-///
-/// Returns an error if the cache query fails.
-pub async fn cache_lookup(
-    db: &dyn switchy_database::Database,
-    address_keys: &[String],
-) -> Result<
-    (
-        std::collections::BTreeMap<String, (f64, f64)>,
-        std::collections::BTreeSet<String>,
-    ),
-    Box<dyn std::error::Error>,
-> {
-    use moosicbox_json_utils::database::ToValue as _;
-    use std::collections::{BTreeMap, BTreeSet};
-    use std::fmt::Write as _;
-    use switchy_database::DatabaseValue;
-
-    let mut hits: BTreeMap<String, (f64, f64)> = BTreeMap::new();
-    let mut tried: BTreeSet<String> = BTreeSet::new();
-
-    if address_keys.is_empty() {
-        return Ok((hits, tried));
-    }
-
-    let params_per_row: usize = 1;
-    let chunk_size = PG_MAX_PARAMS / params_per_row;
-
-    for chunk in address_keys.chunks(chunk_size) {
-        let mut sql =
-            String::from("SELECT address_key, lat, lng FROM geocode_cache WHERE address_key IN (");
-        let mut params: Vec<DatabaseValue> = Vec::with_capacity(chunk.len());
-
-        for (i, key) in chunk.iter().enumerate() {
-            if i > 0 {
-                sql.push_str(", ");
-            }
-            write!(sql, "${}", i + 1).unwrap();
-            params.push(DatabaseValue::String(key.clone()));
-        }
-        sql.push(')');
-
-        let rows = db.query_raw_params(&sql, &params).await?;
-
-        for row in &rows {
-            let key: String = row.to_value("address_key").unwrap_or_default();
-            tried.insert(key.clone());
-
-            let lat: Option<f64> = row.to_value("lat").ok();
-            let lng: Option<f64> = row.to_value("lng").ok();
-
-            if let (Some(lat_v), Some(lng_v)) = (lat, lng) {
-                hits.insert(key, (lat_v, lng_v));
-            }
-        }
-    }
-
-    Ok((hits, tried))
-}
-
-/// Inserts geocoding results (both hits and misses) into the cache.
-///
-/// # Errors
-///
-/// Returns an error if the INSERT statement fails.
-pub async fn cache_insert(
-    db: &dyn switchy_database::Database,
-    entries: &[CacheEntry],
-) -> Result<(), Box<dyn std::error::Error>> {
-    use std::fmt::Write as _;
-    use switchy_database::DatabaseValue;
-
-    if entries.is_empty() {
-        return Ok(());
-    }
-
-    // 5 params per row: address_key, provider, lat, lng, matched_address
-    let params_per_row: usize = 5;
-    let chunk_size = PG_MAX_PARAMS / params_per_row;
-
-    for chunk in entries.chunks(chunk_size) {
-        let mut sql = String::from(
-            "INSERT INTO geocode_cache (address_key, provider, lat, lng, matched_address) VALUES ",
-        );
-        let mut params: Vec<DatabaseValue> = Vec::with_capacity(chunk.len() * params_per_row);
-        let mut idx = 1u32;
-
-        for (i, (key, provider, lat, lng, matched)) in chunk.iter().enumerate() {
-            if i > 0 {
-                sql.push_str(", ");
-            }
-            write!(
-                sql,
-                "(${idx}, ${p}, ${la}, ${lo}, ${m})",
-                p = idx + 1,
-                la = idx + 2,
-                lo = idx + 3,
-                m = idx + 4,
-            )
-            .unwrap();
-            params.push(DatabaseValue::String(key.clone()));
-            params.push(DatabaseValue::String(provider.clone()));
-            params.push(lat.map_or(DatabaseValue::Null, DatabaseValue::Real64));
-            params.push(lng.map_or(DatabaseValue::Null, DatabaseValue::Real64));
-            params.push(
-                matched
-                    .as_ref()
-                    .map_or(DatabaseValue::Null, |s| DatabaseValue::String(s.clone())),
-            );
-            idx += 5;
-        }
-
-        sql.push_str(" ON CONFLICT (address_key, provider) DO NOTHING");
-        db.exec_raw_params(&sql, &params).await?;
-    }
-
-    Ok(())
-}
-
 /// Resolves addresses through the geocoding pipeline: cache → Census → Nominatim.
 ///
 /// For each unique address in `addr_groups`:
@@ -558,26 +225,28 @@ pub async fn cache_insert(
 ///    priority order, sending unresolved addresses to each provider
 /// 3. Write all results (hits and misses) to cache
 ///
-/// Returns `(updates, all_incident_ids)` where `updates` are `(id, lng, lat)`
-/// tuples for successfully geocoded incidents, and `all_incident_ids` is every
-/// incident ID that was processed (for marking as attempted).
+/// Returns `(updates, all_incident_ids)` where `updates` are
+/// `(source_incident_id, lng, lat)` tuples for successfully geocoded
+/// incidents, and `all_incident_ids` is every incident ID that was
+/// processed (for marking as attempted).
 ///
 /// # Errors
 ///
 /// Returns an error if cache lookups, geocoder requests, or cache writes fail.
-#[allow(clippy::too_many_lines)]
-pub async fn resolve_addresses(
-    db: &dyn switchy_database::Database,
+#[allow(clippy::too_many_lines, clippy::type_complexity)]
+pub fn resolve_addresses(
+    cache_conn: &Connection,
     client: &reqwest::Client,
-    addr_groups: &std::collections::BTreeMap<(String, String, String), Vec<i64>>,
+    addr_groups: &std::collections::BTreeMap<(String, String, String), Vec<String>>,
     nominatim_only: bool,
     progress: &Option<Arc<dyn ProgressCallback>>,
-) -> Result<(Vec<(i64, f64, f64)>, Vec<i64>), Box<dyn std::error::Error>> {
+    rt: &tokio::runtime::Handle,
+) -> Result<(Vec<(String, f64, f64)>, Vec<String>), Box<dyn std::error::Error>> {
     use crime_map_geocoder::address::build_one_line_address;
     use crime_map_geocoder::service_registry::{ProviderConfig, enabled_services};
 
-    let mut pending_updates: Vec<(i64, f64, f64)> = Vec::new();
-    let mut all_ids: Vec<i64> = Vec::new();
+    let mut pending_updates: Vec<(String, f64, f64)> = Vec::new();
+    let mut all_ids: Vec<String> = Vec::new();
     let cache_writes: Vec<CacheEntry> = Vec::new();
 
     // Collect all incident IDs
@@ -597,7 +266,7 @@ pub async fn resolve_addresses(
     let all_keys: Vec<String> = keys_and_groups.iter().map(|(k, _, _)| k.clone()).collect();
 
     // --- Phase 0: Cache lookup ---
-    let (cache_hits, cache_tried) = cache_lookup(db, &all_keys).await?;
+    let (cache_hits, cache_tried) = geocode_cache::cache_lookup(cache_conn, &all_keys)?;
 
     let mut resolved_keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
@@ -605,8 +274,8 @@ pub async fn resolve_addresses(
     let mut cache_resolved_incidents = 0u64;
     for (address_key, _, ids) in &keys_and_groups {
         if let Some(&(lat, lng)) = cache_hits.get(address_key) {
-            for &id in *ids {
-                pending_updates.push((id, lng, lat));
+            for id in *ids {
+                pending_updates.push((id.clone(), lng, lat));
             }
             cache_resolved_incidents += ids.len() as u64;
             resolved_keys.insert(address_key.clone());
@@ -669,7 +338,7 @@ pub async fn resolve_addresses(
                 benchmark,
                 max_batch_size,
             } => {
-                resolve_via_census(
+                rt.block_on(resolve_via_census(
                     client,
                     base_url,
                     benchmark,
@@ -677,8 +346,7 @@ pub async fn resolve_addresses(
                     &unresolved,
                     &mut state,
                     progress.as_ref(),
-                )
-                .await?;
+                ))?;
             }
             ProviderConfig::Pelias {
                 base_url,
@@ -694,13 +362,15 @@ pub async fn resolve_addresses(
                 let cf_access = crime_map_geocoder::pelias::cf_access_credentials_from_env();
 
                 // Health check — skip if the instance is unreachable
-                if !crime_map_geocoder::pelias::is_available(client, &base_url, cf_access.as_ref())
-                    .await
-                {
+                if !rt.block_on(crime_map_geocoder::pelias::is_available(
+                    client,
+                    &base_url,
+                    cf_access.as_ref(),
+                )) {
                     log::info!("Pelias at {base_url} is not reachable, skipping");
                     continue;
                 }
-                resolve_via_pelias(
+                rt.block_on(resolve_via_pelias(
                     client,
                     &base_url,
                     country_code,
@@ -709,22 +379,20 @@ pub async fn resolve_addresses(
                     &mut state,
                     progress.as_ref(),
                     cf_access.as_ref(),
-                )
-                .await?;
+                ))?;
             }
             ProviderConfig::Nominatim {
                 base_url,
                 rate_limit_ms,
             } => {
-                resolve_via_nominatim(
+                rt.block_on(resolve_via_nominatim(
                     client,
                     base_url,
                     *rate_limit_ms,
                     &unresolved,
                     &mut state,
                     progress.as_ref(),
-                )
-                .await?;
+                ))?;
             }
         }
     }
@@ -735,7 +403,7 @@ pub async fn resolve_addresses(
             "Writing {} entries to geocode cache...",
             state.cache_writes.len()
         );
-        cache_insert(db, &state.cache_writes).await?;
+        geocode_cache::cache_insert(cache_conn, &state.cache_writes)?;
     }
 
     Ok((state.pending_updates, all_ids))
@@ -744,7 +412,7 @@ pub async fn resolve_addresses(
 /// Shared mutable state threaded through provider-specific resolve functions.
 struct ResolveState {
     resolved_keys: std::collections::BTreeSet<String>,
-    pending_updates: Vec<(i64, f64, f64)>,
+    pending_updates: Vec<(String, f64, f64)>,
     cache_writes: Vec<CacheEntry>,
 }
 
@@ -762,7 +430,7 @@ async fn resolve_via_census(
     use crime_map_geocoder::AddressInput;
     use std::collections::BTreeSet;
 
-    let inputs: Vec<(AddressInput, &str, &Vec<i64>)> = unresolved
+    let inputs: Vec<(AddressInput, &str, &Vec<String>)> = unresolved
         .iter()
         .enumerate()
         .map(|(i, (address_key, (street, city, addr_state), ids))| {
@@ -815,10 +483,12 @@ async fn resolve_via_census(
                             geocoded.matched_address.clone(),
                         ));
 
-                        for &id in ids {
-                            state
-                                .pending_updates
-                                .push((id, geocoded.longitude, geocoded.latitude));
+                        for id in ids {
+                            state.pending_updates.push((
+                                id.clone(),
+                                geocoded.longitude,
+                                geocoded.latitude,
+                            ));
                         }
 
                         if let Some(p) = progress {
@@ -902,10 +572,10 @@ async fn resolve_via_pelias(
                     Some(geocoded.longitude),
                     geocoded.matched_address.clone(),
                 ));
-                for &id in &ids {
+                for id in &ids {
                     state
                         .pending_updates
-                        .push((id, geocoded.longitude, geocoded.latitude));
+                        .push((id.clone(), geocoded.longitude, geocoded.latitude));
                 }
             }
             Ok(None) => {
@@ -955,10 +625,10 @@ async fn resolve_via_nominatim(
                     geocoded.matched_address.clone(),
                 ));
 
-                for &id in *ids {
+                for id in *ids {
                     state
                         .pending_updates
-                        .push((id, geocoded.longitude, geocoded.latitude));
+                        .push((id.clone(), geocoded.longitude, geocoded.latitude));
                 }
             }
             Ok(None) => {
@@ -992,53 +662,40 @@ async fn resolve_via_nominatim(
 
 /// Geocodes incidents that have block addresses but no coordinates.
 ///
-/// Fetches un-geocoded incidents from the database in batches, deduplicates
-/// by address, resolves through the geocoding pipeline (cache → Census →
-/// Nominatim), then updates the incidents with the resolved coordinates.
-/// Loops until all eligible incidents have been processed.
+/// Fetches un-geocoded incidents from the per-source `DuckDB` in batches,
+/// deduplicates by address, resolves through the geocoding pipeline
+/// (cache → Census → Nominatim), then updates the incidents with the
+/// resolved coordinates. Loops until all eligible incidents have been
+/// processed.
 ///
 /// # Errors
 ///
 /// Returns an error if database queries, geocoding, or batch updates fail.
-#[allow(clippy::too_many_lines)]
-pub async fn geocode_missing(
-    db: &dyn switchy_database::Database,
+#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
+pub fn geocode_missing(
+    source_conn: &Connection,
+    cache_conn: &Connection,
     batch_size: u64,
     limit: Option<u64>,
     nominatim_only: bool,
-    source_id: Option<i32>,
     progress: Option<Arc<dyn ProgressCallback>>,
+    rt: &tokio::runtime::Handle,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     use crime_map_geocoder::address::{CleanedAddress, clean_block_address};
-    use moosicbox_json_utils::database::ToValue as _;
     use std::collections::BTreeMap;
-
-    let (source_clause, _) = source_filter_params(batch_size, source_id);
 
     // Query total un-geocoded count for progress reporting
     if let Some(ref p) = progress {
-        let (count_clause, count_params) = source_id.map_or_else(
-            || ("", vec![]),
-            |sid| {
-                (
-                    " AND source_id = $1",
-                    vec![switchy_database::DatabaseValue::Int32(sid)],
-                )
-            },
-        );
-        let count_query = format!(
-            "SELECT COUNT(*) as cnt FROM crime_incidents
+        let mut stmt = source_conn.prepare(
+            "SELECT COUNT(*) FROM incidents
              WHERE has_coordinates = FALSE
                AND block_address IS NOT NULL
                AND block_address != ''
-               AND geocoded = FALSE{count_clause}"
-        );
-        let rows = db.query_raw_params(&count_query, &count_params).await?;
-        if let Some(row) = rows.first() {
-            let count: i64 = row.to_value("cnt").unwrap_or(0);
-            #[allow(clippy::cast_sign_loss)]
-            p.set_total(count as u64);
-        }
+               AND geocoded = FALSE",
+        )?;
+        let count: i64 = stmt.query_row([], |row| row.get(0))?;
+        #[allow(clippy::cast_sign_loss)]
+        p.set_total(count as u64);
     }
 
     let client = reqwest::Client::builder()
@@ -1056,17 +713,30 @@ pub async fn geocode_missing(
             break;
         }
 
-        let (_, base_params) = source_filter_params(effective_size, source_id);
-        let query = format!(
-            "SELECT id, block_address, city, state
-             FROM crime_incidents
+        let mut stmt = source_conn.prepare(
+            "SELECT source_incident_id, block_address, city, state
+             FROM incidents
              WHERE has_coordinates = FALSE
                AND block_address IS NOT NULL
                AND block_address != ''
-               AND geocoded = FALSE{source_clause}
-             LIMIT $1"
-        );
-        let rows = db.query_raw_params(&query, &base_params).await?;
+               AND geocoded = FALSE
+             LIMIT ?",
+        )?;
+
+        let rows: Vec<(String, String, String, String)> = {
+            let effective_i64 = i64::try_from(effective_size).unwrap_or(i64::MAX);
+            let mut raw_rows = stmt.query([effective_i64])?;
+            let mut collected = Vec::new();
+            while let Some(row) = raw_rows.next()? {
+                collected.push((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ));
+            }
+            collected
+        };
 
         if rows.is_empty() {
             if batch_num == 1 {
@@ -1080,16 +750,11 @@ pub async fn geocode_missing(
             rows.len()
         );
 
-        let mut addr_groups: BTreeMap<(String, String, String), Vec<i64>> = BTreeMap::new();
+        let mut addr_groups: BTreeMap<(String, String, String), Vec<String>> = BTreeMap::new();
         let mut skipped_count = 0u64;
 
-        for row in &rows {
-            let id: i64 = row.to_value("id").unwrap_or(0);
-            let block: String = row.to_value("block_address").unwrap_or_default();
-            let city: String = row.to_value("city").unwrap_or_default();
-            let state: String = row.to_value("state").unwrap_or_default();
-
-            let cleaned = clean_block_address(&block);
+        for (incident_id, block, city, state) in &rows {
+            let cleaned = clean_block_address(block);
             let street = match cleaned {
                 CleanedAddress::Street(s) => s,
                 CleanedAddress::Intersection { street1, street2 } => {
@@ -1102,9 +767,9 @@ pub async fn geocode_missing(
             };
 
             addr_groups
-                .entry((street, city, state))
+                .entry((street, city.clone(), state.clone()))
                 .or_default()
-                .push(id);
+                .push(incident_id.clone());
         }
 
         // Progress: count incidents with un-geocodable addresses
@@ -1120,8 +785,14 @@ pub async fn geocode_missing(
             rows.len()
         );
 
-        let (pending_updates, all_ids) =
-            resolve_addresses(db, &client, &addr_groups, nominatim_only, &progress).await?;
+        let (pending_updates, all_ids) = resolve_addresses(
+            cache_conn,
+            &client,
+            &addr_groups,
+            nominatim_only,
+            &progress,
+            rt,
+        )?;
 
         let mut batch_geocoded = 0u64;
 
@@ -1130,15 +801,16 @@ pub async fn geocode_missing(
                 "Writing {} geocoded incidents to database...",
                 pending_updates.len()
             );
-            batch_geocoded += batch_update_geocoded(db, &pending_updates, false).await?;
+            batch_geocoded +=
+                source_db::batch_update_geocoded(source_conn, &pending_updates, false)?;
         }
 
         // Mark all processed incidents as geocoded = TRUE so they're not
         // re-fetched in the next iteration (even if geocoding failed)
-        let failed_ids: Vec<i64> = all_ids
+        let failed_ids: Vec<String> = all_ids
             .iter()
-            .copied()
-            .filter(|id| !pending_updates.iter().any(|(uid, _, _)| uid == id))
+            .filter(|id| !pending_updates.iter().any(|(uid, _, _)| uid == *id))
+            .cloned()
             .collect();
 
         if !failed_ids.is_empty() {
@@ -1146,7 +818,7 @@ pub async fn geocode_missing(
                 "Marking {} incidents as attempted (no match found)",
                 failed_ids.len()
             );
-            batch_mark_geocoded(db, &failed_ids).await?;
+            source_db::batch_mark_geocoded(source_conn, &failed_ids)?;
         }
 
         grand_total += batch_geocoded;
@@ -1176,45 +848,31 @@ pub async fn geocode_missing(
 /// # Errors
 ///
 /// Returns an error if database queries, geocoding, or batch updates fail.
-#[allow(clippy::too_many_lines)]
-pub async fn re_geocode_source(
-    db: &dyn switchy_database::Database,
+#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
+pub fn re_geocode_source(
+    source_conn: &Connection,
+    cache_conn: &Connection,
     batch_size: u64,
     limit: Option<u64>,
     nominatim_only: bool,
-    source_id: Option<i32>,
     progress: Option<Arc<dyn ProgressCallback>>,
+    rt: &tokio::runtime::Handle,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     use crime_map_geocoder::address::{CleanedAddress, clean_block_address};
-    use moosicbox_json_utils::database::ToValue as _;
     use std::collections::BTreeMap;
-
-    let (source_clause, _) = source_filter_params(batch_size, source_id);
 
     // Query total eligible count for progress reporting
     if let Some(ref p) = progress {
-        let (count_clause, count_params) = source_id.map_or_else(
-            || ("", vec![]),
-            |sid| {
-                (
-                    " AND source_id = $1",
-                    vec![switchy_database::DatabaseValue::Int32(sid)],
-                )
-            },
-        );
-        let count_query = format!(
-            "SELECT COUNT(*) as cnt FROM crime_incidents
+        let mut stmt = source_conn.prepare(
+            "SELECT COUNT(*) FROM incidents
              WHERE has_coordinates = TRUE
                AND geocoded = FALSE
                AND block_address IS NOT NULL
-               AND block_address != ''{count_clause}"
-        );
-        let rows = db.query_raw_params(&count_query, &count_params).await?;
-        if let Some(row) = rows.first() {
-            let count: i64 = row.to_value("cnt").unwrap_or(0);
-            #[allow(clippy::cast_sign_loss)]
-            p.set_total(count as u64);
-        }
+               AND block_address != ''",
+        )?;
+        let count: i64 = stmt.query_row([], |row| row.get(0))?;
+        #[allow(clippy::cast_sign_loss)]
+        p.set_total(count as u64);
     }
 
     let client = reqwest::Client::builder()
@@ -1232,18 +890,30 @@ pub async fn re_geocode_source(
             break;
         }
 
-        let (_, params) = source_filter_params(effective_size, source_id);
-        let query = format!(
-            "SELECT id, block_address, city, state
-             FROM crime_incidents
+        let mut stmt = source_conn.prepare(
+            "SELECT source_incident_id, block_address, city, state
+             FROM incidents
              WHERE has_coordinates = TRUE
                AND geocoded = FALSE
                AND block_address IS NOT NULL
-               AND block_address != ''{source_clause}
-             LIMIT $1"
-        );
+               AND block_address != ''
+             LIMIT ?",
+        )?;
 
-        let rows = db.query_raw_params(&query, &params).await?;
+        let rows: Vec<(String, String, String, String)> = {
+            let effective_i64 = i64::try_from(effective_size).unwrap_or(i64::MAX);
+            let mut raw_rows = stmt.query([effective_i64])?;
+            let mut collected = Vec::new();
+            while let Some(row) = raw_rows.next()? {
+                collected.push((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ));
+            }
+            collected
+        };
 
         if rows.is_empty() {
             if batch_num == 1 {
@@ -1257,16 +927,11 @@ pub async fn re_geocode_source(
             rows.len()
         );
 
-        let mut addr_groups: BTreeMap<(String, String, String), Vec<i64>> = BTreeMap::new();
+        let mut addr_groups: BTreeMap<(String, String, String), Vec<String>> = BTreeMap::new();
         let mut skipped_count = 0u64;
 
-        for row in &rows {
-            let id: i64 = row.to_value("id").unwrap_or(0);
-            let block: String = row.to_value("block_address").unwrap_or_default();
-            let city: String = row.to_value("city").unwrap_or_default();
-            let state: String = row.to_value("state").unwrap_or_default();
-
-            let cleaned = clean_block_address(&block);
+        for (incident_id, block, city, state) in &rows {
+            let cleaned = clean_block_address(block);
             let street = match cleaned {
                 CleanedAddress::Street(s) => s,
                 CleanedAddress::Intersection { street1, street2 } => {
@@ -1279,9 +944,9 @@ pub async fn re_geocode_source(
             };
 
             addr_groups
-                .entry((street, city, state))
+                .entry((street, city.clone(), state.clone()))
                 .or_default()
-                .push(id);
+                .push(incident_id.clone());
         }
 
         // Progress: count incidents with un-geocodable addresses
@@ -1297,8 +962,14 @@ pub async fn re_geocode_source(
             rows.len()
         );
 
-        let (pending_updates, all_ids) =
-            resolve_addresses(db, &client, &addr_groups, nominatim_only, &progress).await?;
+        let (pending_updates, all_ids) = resolve_addresses(
+            cache_conn,
+            &client,
+            &addr_groups,
+            nominatim_only,
+            &progress,
+            rt,
+        )?;
 
         let mut batch_geocoded = 0u64;
 
@@ -1307,14 +978,15 @@ pub async fn re_geocode_source(
                 "Writing {} re-geocoded incidents to database...",
                 pending_updates.len()
             );
-            batch_geocoded += batch_update_geocoded(db, &pending_updates, true).await?;
+            batch_geocoded +=
+                source_db::batch_update_geocoded(source_conn, &pending_updates, true)?;
         }
 
         // Mark all processed incidents as geocoded = TRUE
-        let failed_ids: Vec<i64> = all_ids
+        let failed_ids: Vec<String> = all_ids
             .iter()
-            .copied()
-            .filter(|id| !pending_updates.iter().any(|(uid, _, _)| uid == id))
+            .filter(|id| !pending_updates.iter().any(|(uid, _, _)| uid == *id))
+            .cloned()
             .collect();
 
         if !failed_ids.is_empty() {
@@ -1322,7 +994,7 @@ pub async fn re_geocode_source(
                 "Marking {} incidents as attempted (no match found)",
                 failed_ids.len()
             );
-            batch_mark_geocoded(db, &failed_ids).await?;
+            source_db::batch_mark_geocoded(source_conn, &failed_ids)?;
         }
 
         grand_total += batch_geocoded;

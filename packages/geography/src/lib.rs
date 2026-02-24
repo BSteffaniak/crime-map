@@ -1,15 +1,18 @@
 #![cfg_attr(feature = "fail-on-warnings", deny(warnings))]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery, clippy::cargo)]
-#![allow(clippy::multiple_crate_versions, clippy::cargo_common_metadata)]
+#![allow(
+    clippy::multiple_crate_versions,
+    clippy::cargo_common_metadata,
+    clippy::future_not_send
+)]
 
 //! Census tract boundary data management and ingestion.
 //!
 //! Downloads Census Bureau TIGER/Line boundary data via the `TIGERweb`
-//! REST API and loads census tract polygons into `PostGIS`. These boundaries
+//! REST API and loads boundary polygons into `DuckDB`. These boundaries
 //! enable geographic aggregation for AI-powered analytics queries.
 
 pub mod ingest;
-pub mod queries;
 
 use thiserror::Error;
 
@@ -18,7 +21,11 @@ use thiserror::Error;
 pub enum GeoError {
     /// Database operation failed.
     #[error("Database error: {0}")]
-    Database(#[from] switchy_database::DatabaseError),
+    Database(#[from] crime_map_database::DbError),
+
+    /// `DuckDB` operation failed.
+    #[error("DuckDB error: {0}")]
+    DuckDb(#[from] duckdb::Error),
 
     /// HTTP request failed.
     #[error("HTTP error: {0}")]

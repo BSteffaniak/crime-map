@@ -1,0 +1,33 @@
+[package]
+authors = { workspace = true }
+description = "Cloudflare R2 sync for DuckDB data files"
+edition = { workspace = true }
+license = { workspace = true }
+name = "crime_map_r2"
+repository = { workspace = true }
+version = "0.1.0"
+
+[dependencies]
+crime_map_database = { workspace = true }
+crime_map_source = { workspace = true }
+
+aws-sdk-s3 = { workspace = true, features = [
+  "behavior-version-latest",
+  "rustls",
+] }
+aws-config = { workspace = true, features = [
+  "behavior-version-latest",
+  "rustls",
+] }
+
+log = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs"] }
+
+[features]
+default = []
+duckdb-bundled = ["crime_map_database/duckdb-bundled"]
+fail-on-warnings = [
+  "crime_map_database/fail-on-warnings",
+  "crime_map_source/fail-on-warnings",
+]

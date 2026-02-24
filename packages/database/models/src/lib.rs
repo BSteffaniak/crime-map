@@ -5,7 +5,7 @@
 //! Database row types and query parameter definitions.
 //!
 //! These types represent the shapes of data as stored in and retrieved from
-//! the `PostGIS` database. They are distinct from the API response types in
+//! the database. They are distinct from the API response types in
 //! `crime_map_server_models` and the normalized ingestion types in
 //! `crime_map_source_models`.
 

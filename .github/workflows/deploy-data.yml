@@ -24,6 +24,9 @@ concurrency:
 
 env:
   RUST_LOG: crime_map=debug
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+  R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
 jobs:
   build:
@@ -62,24 +65,6 @@ jobs:
     needs: build
     timeout-minutes: 120
 
-    env:
-      DATABASE_URL: postgres://postgres:postgres@localhost:5432/crime_map
-
-    services:
-      postgres:
-        image: postgis/postgis:16-3.4
-        env:
-          POSTGRES_DB: crime_map
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -109,10 +94,10 @@ jobs:
           sudo ln -sf "$(which flyctl)" /usr/local/bin/fly
           fly version
 
-      - name: Run database migrations
+      - name: Pull data from R2
         run: |
-          crime_map_ingest list-sources > /dev/null 2>&1 || true
-          echo "Database ready"
+          SOURCES="${{ inputs.sources || 'dc_mpd' }}"
+          crime_map_ingest pull --sources "${SOURCES}"
 
       - name: Ingest data
         run: |
@@ -141,11 +126,15 @@ jobs:
       - name: List generated files
         run: ls -lah data/generated/
 
+      - name: Push data to R2
+        run: |
+          SOURCES="${{ inputs.sources || 'dc_mpd' }}"
+          crime_map_ingest push --sources "${SOURCES}"
+
       - name: Upload tiles to R2
         run: ./scripts/deploy.sh tiles
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
       - name: Upload data files and restart
         run: ./scripts/deploy.sh data

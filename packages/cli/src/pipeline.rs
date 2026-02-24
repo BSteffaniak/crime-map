@@ -1,58 +1,34 @@
 //! Full pipeline orchestrator for the crime map toolchain.
 //!
-//! Chains sync -> geocode -> attribute -> generate in a single interactive
-//! flow, prompting for sources, outputs, and optional advanced parameters.
+//! Chains sync -> geocode -> generate in a single interactive flow,
+//! prompting for sources, outputs, and optional advanced parameters.
 //! Uses `indicatif` progress bars for real-time visual feedback.
 
 use std::time::Instant;
 
 use crime_map_cli_utils::{IndicatifProgress, MultiProgress};
-use dialoguer::{Confirm, Input, MultiSelect, Select};
+use crime_map_database::{geocode_cache, source_db};
+use dialoguer::{Confirm, Input, MultiSelect};
 
 /// Steps available in the pipeline.
 enum PipelineStep {
     Sync,
     Geocode,
-    Attribute,
-    Generate,
 }
 
 impl PipelineStep {
-    const ALL: &[Self] = &[Self::Sync, Self::Geocode, Self::Attribute, Self::Generate];
+    const ALL: &[Self] = &[Self::Sync, Self::Geocode];
 
     #[must_use]
     const fn label(&self) -> &'static str {
         match self {
             Self::Sync => "Sync sources",
             Self::Geocode => "Geocode",
-            Self::Attribute => "Attribute census data",
-            Self::Generate => "Generate tiles & databases",
-        }
-    }
-}
-
-/// Attribution mode for the attribute step.
-enum AttributeMode {
-    Both,
-    PlacesOnly,
-    TractsOnly,
-}
-
-impl AttributeMode {
-    const ALL: &[Self] = &[Self::Both, Self::PlacesOnly, Self::TractsOnly];
-
-    #[must_use]
-    const fn label(&self) -> &'static str {
-        match self {
-            Self::Both => "Both places and tracts",
-            Self::PlacesOnly => "Places only",
-            Self::TractsOnly => "Tracts only",
         }
     }
 }
 
 /// Advanced configuration for each pipeline step.
-#[allow(clippy::struct_excessive_bools)]
 struct PipelineConfig {
     // Sync
     sync_force: bool,
@@ -61,17 +37,6 @@ struct PipelineConfig {
     // Geocode
     geocode_batch_size: u64,
     geocode_nominatim_only: bool,
-
-    // Attribute
-    attribute_buffer: f64,
-    attribute_batch_size: u32,
-    attribute_mode: usize, // index into AttributeMode::ALL
-
-    // Generate
-    generate_limit: Option<u64>,
-    generate_keep_intermediate: bool,
-    generate_force: bool,
-    generate_sources_filter: Option<String>,
 }
 
 impl Default for PipelineConfig {
@@ -81,22 +46,14 @@ impl Default for PipelineConfig {
             sync_limit: None,
             geocode_batch_size: 50_000,
             geocode_nominatim_only: false,
-            attribute_buffer: 5.0,
-            attribute_batch_size: 5000,
-            attribute_mode: 0, // Both
-            generate_limit: None,
-            generate_keep_intermediate: false,
-            generate_force: false,
-            generate_sources_filter: None,
         }
     }
 }
 
 /// Runs the full pipeline orchestrator.
 ///
-/// Prompts the user for pipeline steps, source selection, output selection,
-/// and optional advanced configuration, then executes each step
-/// sequentially.
+/// Prompts the user for pipeline steps, source selection, and optional
+/// advanced configuration, then executes each step sequentially.
 ///
 /// The `multi` parameter is the shared [`MultiProgress`] that is also
 /// registered with the log bridge, so all `log::info!` output is
@@ -131,12 +88,6 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
     let has_geocode = selected_steps
         .iter()
         .any(|&i| matches!(PipelineStep::ALL[i], PipelineStep::Geocode));
-    let has_attribute = selected_steps
-        .iter()
-        .any(|&i| matches!(PipelineStep::ALL[i], PipelineStep::Attribute));
-    let has_generate = selected_steps
-        .iter()
-        .any(|&i| matches!(PipelineStep::ALL[i], PipelineStep::Generate));
 
     // --- 2. Source selection (for sync and geocode filtering) ---
     let all_sources = crime_map_source::registry::all_sources();
@@ -158,68 +109,12 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
         }
         sel
     } else {
-        // If not syncing, all sources are implicitly in scope for geocode/attribute
+        // If not syncing, all sources are implicitly in scope for geocode
         (0..all_sources.len()).collect()
     };
 
-    // --- 3. Generate output selection ---
-    let generate_outputs = if has_generate {
-        let output_choices: &[(&str, &str)] = &[
-            (
-                "PMTiles (heatmap + points)",
-                crime_map_generate::OUTPUT_INCIDENTS_PMTILES,
-            ),
-            ("Sidebar SQLite", crime_map_generate::OUTPUT_INCIDENTS_DB),
-            ("Count DuckDB", crime_map_generate::OUTPUT_COUNT_DB),
-            ("H3 Hexbin DuckDB", crime_map_generate::OUTPUT_H3_DB),
-            ("Server Metadata", crime_map_generate::OUTPUT_METADATA),
-        ];
-
-        let output_labels: Vec<&str> = output_choices.iter().map(|(l, _)| *l).collect();
-        let output_defaults = vec![true; output_choices.len()];
-
-        let selected = MultiSelect::new()
-            .with_prompt("Outputs to generate (space=toggle, a=all, enter=confirm)")
-            .items(&output_labels)
-            .defaults(&output_defaults)
-            .interact()?;
-
-        if selected.is_empty() {
-            println!("No outputs selected.");
-            return Ok(());
-        }
-
-        selected
-            .iter()
-            .map(|&i| output_choices[i].1.to_string())
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-
-    // --- 3b. Optionally scope generate to the selected sources ---
-    let selected_all_sources = selected_source_indices.len() == all_sources.len();
-
+    // --- 3. Sync-specific prompts (always asked if syncing) ---
     let mut config = PipelineConfig::default();
-
-    if has_generate && !selected_all_sources {
-        let scope_to_selected = Confirm::new()
-            .with_prompt("Only generate for the selected sources?")
-            .default(false)
-            .interact()?;
-
-        if scope_to_selected {
-            config.generate_sources_filter = Some(
-                selected_source_indices
-                    .iter()
-                    .map(|&i| all_sources[i].id().to_string())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
-        }
-    }
-
-    // --- 4. Sync-specific prompts (always asked if syncing) ---
 
     if has_sync {
         config.sync_force = Confirm::new()
@@ -230,72 +125,28 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
         config.sync_limit = prompt_optional_u64("Record limit per source (empty for no limit)")?;
     }
 
-    // --- 5. Advanced options gate ---
+    // --- 4. Advanced options gate ---
     let advanced = Confirm::new()
         .with_prompt("Configure advanced options?")
         .default(false)
         .interact()?;
 
-    if advanced {
-        if has_geocode {
-            let batch_str: String = Input::new()
-                .with_prompt("Geocode batch size")
-                .default("50000".to_string())
-                .interact_text()?;
-            config.geocode_batch_size = batch_str.parse().unwrap_or(50_000);
+    if advanced && has_geocode {
+        let batch_str: String = Input::new()
+            .with_prompt("Geocode batch size")
+            .default("50000".to_string())
+            .interact_text()?;
+        config.geocode_batch_size = batch_str.parse().unwrap_or(50_000);
 
-            config.geocode_nominatim_only = Confirm::new()
-                .with_prompt("Nominatim only (skip Census geocoder)?")
-                .default(false)
-                .interact()?;
-        }
-
-        if has_attribute {
-            let buffer_str: String = Input::new()
-                .with_prompt("Attribute buffer distance (meters)")
-                .default("5".to_string())
-                .interact_text()?;
-            config.attribute_buffer = buffer_str.parse().unwrap_or(5.0);
-
-            let batch_str: String = Input::new()
-                .with_prompt("Attribute batch size")
-                .default("5000".to_string())
-                .interact_text()?;
-            config.attribute_batch_size = batch_str.parse().unwrap_or(5000);
-
-            let mode_labels: Vec<&str> = AttributeMode::ALL
-                .iter()
-                .map(AttributeMode::label)
-                .collect();
-            config.attribute_mode = Select::new()
-                .with_prompt("What to attribute")
-                .items(&mode_labels)
-                .default(0)
-                .interact()?;
-        }
-
-        if has_generate {
-            config.generate_limit =
-                prompt_optional_u64("Generate record limit (empty for unlimited)")?;
-
-            config.generate_keep_intermediate = Confirm::new()
-                .with_prompt("Keep intermediate files?")
-                .default(false)
-                .interact()?;
-
-            config.generate_force = Confirm::new()
-                .with_prompt("Force regeneration?")
-                .default(false)
-                .interact()?;
-        }
+        config.geocode_nominatim_only = Confirm::new()
+            .with_prompt("Nominatim only (skip Census geocoder)?")
+            .default(false)
+            .interact()?;
     }
 
-    // --- 6. Execute pipeline ---
+    // --- 5. Execute pipeline ---
     println!();
     log::info!("Starting pipeline ({} steps)...", selected_steps.len());
-
-    let db = crime_map_database::db::connect_from_env().await?;
-    crime_map_database::run_migrations(db.as_ref()).await?;
 
     let total_steps = selected_steps.len();
     let mut current_step = 0usize;
@@ -314,8 +165,6 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
         for (i, &idx) in selected_source_indices.iter().enumerate() {
             let src = &all_sources[idx];
 
-            // Create a per-source fetch bar -- this will be cleared when
-            // the source finishes so completed bars don't accumulate.
             let fetch_bar = IndicatifProgress::records_bar(multi, src.name());
 
             source_bar.set_message(format!(
@@ -324,22 +173,32 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
                 src.name()
             ));
 
-            let result = crime_map_ingest::sync_source(
-                db.as_ref(),
-                src,
-                config.sync_limit,
-                config.sync_force,
-                Some(fetch_bar.clone()),
-            )
-            .await;
+            match source_db::open_by_id(src.id()) {
+                Ok(conn) => {
+                    let result = crime_map_ingest::sync_source(
+                        &conn,
+                        src,
+                        config.sync_limit,
+                        config.sync_force,
+                        Some(fetch_bar.clone()),
+                    )
+                    .await;
 
-            // Always clear the per-source bar so it doesn't linger
-            fetch_bar.finish_and_clear();
+                    fetch_bar.finish_and_clear();
 
-            if let Err(e) = result {
-                log::error!("Failed to sync {}: {e}", src.id());
-                if !ask_continue()? {
-                    return Ok(());
+                    if let Err(e) = result {
+                        log::error!("Failed to sync {}: {e}", src.id());
+                        if !ask_continue()? {
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(e) => {
+                    fetch_bar.finish_and_clear();
+                    log::error!("Failed to open DB for {}: {e}", src.id());
+                    if !ask_continue()? {
+                        return Ok(());
+                    }
                 }
             }
 
@@ -361,153 +220,61 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
             &format!("[{current_step}/{total_steps}] Geocoding"),
         );
 
+        let cache_conn = geocode_cache::open_default()?;
+        let rt = tokio::runtime::Handle::current();
+
+        let target_sources: Vec<_> = selected_source_indices
+            .iter()
+            .map(|&i| &all_sources[i])
+            .collect();
+
         // Phase 1: Geocode missing coordinates
-        if let Err(e) = crime_map_ingest::geocode_missing(
-            db.as_ref(),
-            config.geocode_batch_size,
-            None,
-            config.geocode_nominatim_only,
-            None,
-            Some(geocode_bar.clone()),
-        )
-        .await
-        {
-            log::error!("Geocoding (missing coords) failed: {e}");
-            if !ask_continue()? {
-                return Ok(());
+        for src in &target_sources {
+            let source_conn = source_db::open_by_id(src.id())?;
+            if let Err(e) = crime_map_ingest::geocode_missing(
+                &source_conn,
+                &cache_conn,
+                config.geocode_batch_size,
+                None,
+                config.geocode_nominatim_only,
+                Some(geocode_bar.clone()),
+                &rt,
+            ) {
+                log::error!("Geocoding (missing coords) for {} failed: {e}", src.id());
+                if !ask_continue()? {
+                    return Ok(());
+                }
             }
         }
 
         // Phase 2: Re-geocode imprecise sources
-        match crime_map_ingest::resolve_re_geocode_source_ids(db.as_ref(), None).await {
-            Ok(re_geocode_ids) => {
-                if !re_geocode_ids.is_empty() {
-                    log::info!(
-                        "Re-geocoding {} source(s) with imprecise coordinates...",
-                        re_geocode_ids.len()
-                    );
-                    for sid in &re_geocode_ids {
-                        if let Err(e) = crime_map_ingest::re_geocode_source(
-                            db.as_ref(),
-                            config.geocode_batch_size,
-                            None,
-                            config.geocode_nominatim_only,
-                            Some(*sid),
-                            Some(geocode_bar.clone()),
-                        )
-                        .await
-                        {
-                            log::error!("Re-geocoding source {sid} failed: {e}");
-                            if !ask_continue()? {
-                                return Ok(());
-                            }
-                        }
+        let re_geocode_sources: Vec<_> = target_sources.iter().filter(|s| s.re_geocode()).collect();
+
+        if !re_geocode_sources.is_empty() {
+            log::info!(
+                "Re-geocoding {} source(s) with imprecise coordinates...",
+                re_geocode_sources.len()
+            );
+            for src in re_geocode_sources {
+                let source_conn = source_db::open_by_id(src.id())?;
+                if let Err(e) = crime_map_ingest::re_geocode_source(
+                    &source_conn,
+                    &cache_conn,
+                    config.geocode_batch_size,
+                    None,
+                    config.geocode_nominatim_only,
+                    Some(geocode_bar.clone()),
+                    &rt,
+                ) {
+                    log::error!("Re-geocoding source {} failed: {e}", src.id());
+                    if !ask_continue()? {
+                        return Ok(());
                     }
-                }
-            }
-            Err(e) => {
-                log::error!("Failed to resolve re-geocode sources: {e}");
-                if !ask_continue()? {
-                    return Ok(());
                 }
             }
         }
 
         geocode_bar.finish(format!("[{current_step}/{total_steps}] Geocoding complete"));
-    }
-
-    // --- Attribute ---
-    if has_attribute {
-        current_step += 1;
-        log::info!("[{current_step}/{total_steps}] Attributing census data...");
-
-        let (places_only, tracts_only) = match AttributeMode::ALL[config.attribute_mode] {
-            AttributeMode::Both => (false, false),
-            AttributeMode::PlacesOnly => (true, false),
-            AttributeMode::TractsOnly => (false, true),
-        };
-
-        if !tracts_only {
-            let places_bar = IndicatifProgress::batch_bar(
-                multi,
-                &format!("[{current_step}/{total_steps}] Place attribution"),
-            );
-            if let Err(e) = crime_map_database::queries::attribute_places(
-                db.as_ref(),
-                config.attribute_buffer,
-                config.attribute_batch_size,
-                None,
-                Some(places_bar),
-            )
-            .await
-            {
-                log::error!("Place attribution failed: {e}");
-                if !ask_continue()? {
-                    return Ok(());
-                }
-            }
-        }
-
-        if !places_only {
-            let tracts_bar = IndicatifProgress::batch_bar(
-                multi,
-                &format!("[{current_step}/{total_steps}] Tract attribution"),
-            );
-            if let Err(e) = crime_map_database::queries::attribute_tracts(
-                db.as_ref(),
-                config.attribute_batch_size,
-                None,
-                Some(tracts_bar),
-            )
-            .await
-            {
-                log::error!("Tract attribution failed: {e}");
-                if !ask_continue()? {
-                    return Ok(());
-                }
-            }
-        }
-    }
-
-    // --- Generate ---
-    if has_generate {
-        current_step += 1;
-        log::info!("[{current_step}/{total_steps}] Generating outputs...");
-
-        let dir = crime_map_generate::output_dir();
-        std::fs::create_dir_all(&dir)?;
-
-        let args = crime_map_generate::GenerateArgs {
-            limit: config.generate_limit,
-            sources: config.generate_sources_filter.clone(),
-            states: None,
-            keep_intermediate: config.generate_keep_intermediate,
-            force: config.generate_force,
-        };
-
-        let generate_bar = IndicatifProgress::batch_bar(
-            multi,
-            &format!("[{current_step}/{total_steps}] Generating"),
-        );
-
-        let source_ids = crime_map_generate::resolve_source_ids(db.as_ref(), &args).await?;
-        let output_refs: Vec<&str> = generate_outputs.iter().map(String::as_str).collect();
-
-        if let Err(e) = crime_map_generate::run_with_cache(
-            db.as_ref(),
-            &args,
-            &source_ids,
-            &dir,
-            &output_refs,
-            Some(generate_bar),
-        )
-        .await
-        {
-            log::error!("Generation failed: {e}");
-            if !ask_continue()? {
-                return Ok(());
-            }
-        }
     }
 
     let elapsed = pipeline_start.elapsed();

@@ -30,6 +30,7 @@ tokio = { workspace = true, features = ["full"] }
 default = ["bedrock"]
 bedrock = ["crime_map_server/bedrock"]
 duckdb-bundled = [
+  "crime_map_database/duckdb-bundled",
   "crime_map_generate/duckdb-bundled",
   "crime_map_server/duckdb-bundled",
 ]

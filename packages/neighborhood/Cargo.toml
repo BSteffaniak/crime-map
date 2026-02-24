@@ -9,8 +9,12 @@ version = "0.1.0"
 
 [dependencies]
 crime_map_neighborhood_models = { workspace = true }
+crime_map_database = { workspace = true }
 
-switchy_database = { workspace = true, features = ["postgres-raw"] }
+duckdb = { workspace = true }
+geo = { workspace = true }
+geojson = { workspace = true }
+rstar = { workspace = true }
 
 log = { workspace = true }
 reqwest = { workspace = true }
@@ -21,4 +25,5 @@ toml = { workspace = true }
 
 [features]
 default = []
+duckdb-bundled = ["duckdb/bundled", "crime_map_database/duckdb-bundled"]
 fail-on-warnings = ["crime_map_neighborhood_models/fail-on-warnings"]

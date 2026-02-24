@@ -1,1 +1,0 @@
-ALTER TABLE crime_sources ADD COLUMN fully_synced BOOLEAN NOT NULL DEFAULT FALSE;

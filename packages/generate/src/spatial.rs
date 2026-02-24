@@ -1,17 +1,13 @@
 //! In-memory spatial index for boundary attribution during generation.
 //!
-//! Loads census tract and place polygons from `PostGIS` at startup, builds
+//! Loads census tract and place polygons from `DuckDB` at startup, builds
 //! R-tree spatial indexes, and provides fast point-in-polygon lookups.
-//! This replaces the slow `PostGIS` `ST_Covers` spatial joins that previously
-//! ran during `cargo ingest attribute`.
 
 use std::collections::BTreeMap;
 
 use geo::{Contains, MultiPolygon};
 use geojson::GeoJson;
-use moosicbox_json_utils::database::ToValue as _;
 use rstar::{AABB, RTree, RTreeObject};
-use switchy_database::Database;
 
 /// A boundary polygon stored in the R-tree with its metadata.
 struct BoundaryEntry {
@@ -41,31 +37,27 @@ pub struct SpatialIndex {
 }
 
 impl SpatialIndex {
-    /// Loads polygons from `PostGIS` and builds R-tree indexes.
+    /// Loads polygons from the boundaries `DuckDB` and builds R-tree indexes.
     ///
     /// # Errors
     ///
     /// Returns an error if the database queries or `GeoJSON` parsing fail.
-    pub async fn load(db: &dyn Database) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn load(conn: &duckdb::Connection) -> Result<Self, Box<dyn std::error::Error>> {
         let tracts = Self::load_boundaries(
-            db,
-            "SELECT geoid, land_area_sq_mi, \
-                    ST_AsGeoJSON(boundary::geometry) as geojson \
-             FROM census_tracts WHERE boundary IS NOT NULL",
-        )
-        .await?;
+            conn,
+            "SELECT geoid, land_area_sq_mi, boundary_geojson as geojson \
+             FROM census_tracts WHERE boundary_geojson IS NOT NULL",
+        )?;
         log::info!("Loaded {} census tracts into spatial index", tracts.size());
 
         let places = Self::load_boundaries(
-            db,
-            "SELECT geoid, land_area_sq_mi, \
-                    ST_AsGeoJSON(boundary::geometry) as geojson \
-             FROM census_places WHERE boundary IS NOT NULL",
-        )
-        .await?;
+            conn,
+            "SELECT geoid, land_area_sq_mi, boundary_geojson as geojson \
+             FROM census_places WHERE boundary_geojson IS NOT NULL",
+        )?;
         log::info!("Loaded {} census places into spatial index", places.size());
 
-        let neighborhood_crosswalk = Self::load_neighborhood_crosswalk(db).await?;
+        let neighborhood_crosswalk = Self::load_neighborhood_crosswalk(conn)?;
         log::info!(
             "Loaded {} tract->neighborhood mappings",
             neighborhood_crosswalk.len()
@@ -78,17 +70,18 @@ impl SpatialIndex {
         })
     }
 
-    async fn load_boundaries(
-        db: &dyn Database,
+    fn load_boundaries(
+        conn: &duckdb::Connection,
         query: &str,
     ) -> Result<RTree<BoundaryEntry>, Box<dyn std::error::Error>> {
-        let rows = db.query_raw_params(query, &[]).await?;
-        let mut entries = Vec::with_capacity(rows.len());
+        let mut stmt = conn.prepare(query)?;
+        let mut rows = stmt.query([])?;
+        let mut entries = Vec::new();
 
-        for row in &rows {
-            let geoid: String = row.to_value("geoid").unwrap_or_default();
-            let area_sq_mi: f64 = row.to_value("land_area_sq_mi").unwrap_or(f64::MAX);
-            let geojson_str: String = row.to_value("geojson").unwrap_or_default();
+        while let Some(row) = rows.next()? {
+            let geoid: String = row.get(0)?;
+            let area_sq_mi: f64 = row.get::<_, Option<f64>>(1)?.unwrap_or(f64::MAX);
+            let geojson_str: String = row.get(2)?;
 
             if geoid.is_empty() || geojson_str.is_empty() {
                 continue;
@@ -112,20 +105,16 @@ impl SpatialIndex {
         Ok(RTree::bulk_load(entries))
     }
 
-    async fn load_neighborhood_crosswalk(
-        db: &dyn Database,
+    fn load_neighborhood_crosswalk(
+        conn: &duckdb::Connection,
     ) -> Result<BTreeMap<String, String>, Box<dyn std::error::Error>> {
-        let rows = db
-            .query_raw_params(
-                "SELECT geoid, neighborhood_id FROM tract_neighborhoods",
-                &[],
-            )
-            .await?;
+        let mut stmt = conn.prepare("SELECT geoid, neighborhood_id FROM tract_neighborhoods")?;
+        let mut rows = stmt.query([])?;
 
         let mut map = BTreeMap::new();
-        for row in &rows {
-            let geoid: String = row.to_value("geoid").unwrap_or_default();
-            let nbhd_id: i32 = row.to_value("neighborhood_id").unwrap_or(0);
+        while let Some(row) = rows.next()? {
+            let geoid: String = row.get(0)?;
+            let nbhd_id: i32 = row.get(1)?;
             if !geoid.is_empty() && nbhd_id > 0 {
                 map.insert(geoid, format!("nbhd-{nbhd_id}"));
             }

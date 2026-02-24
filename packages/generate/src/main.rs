@@ -11,7 +11,6 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
-use crime_map_database::db;
 use crime_map_generate::{
     GenerateArgs, OUTPUT_ANALYTICS_DB, OUTPUT_BOUNDARIES_DB, OUTPUT_BOUNDARIES_PMTILES,
     OUTPUT_COUNT_DB, OUTPUT_H3_DB, OUTPUT_INCIDENTS_DB, OUTPUT_INCIDENTS_PMTILES, OUTPUT_METADATA,
@@ -72,7 +71,7 @@ impl From<&CliGenerateArgs> for GenerateArgs {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Generate `PMTiles` from `PostGIS` data (heatmap + individual points)
+    /// Generate `PMTiles` from `DuckDB` source data (heatmap + individual points)
     Pmtiles {
         #[command(flatten)]
         args: CliGenerateArgs,
@@ -145,18 +144,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             crime_map_generate::merge::run(&dirs, boundaries_dir.as_deref(), &out).await?;
         }
         cmd => {
-            let db = db::connect_from_env().await?;
-            run_generate_command(cmd, db.as_ref()).await?;
+            run_generate_command(cmd).await?;
         }
     }
 
     Ok(())
 }
 
-async fn run_generate_command(
-    command: Commands,
-    db: &dyn switchy_database::Database,
-) -> Result<(), Box<dyn std::error::Error>> {
+#[allow(clippy::future_not_send)]
+async fn run_generate_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
     let (cli_args, outputs): (&CliGenerateArgs, &[&str]) = match &command {
         Commands::Pmtiles { args } => (args, &[OUTPUT_INCIDENTS_PMTILES]),
         Commands::Sidebar { args } => (args, &[OUTPUT_INCIDENTS_DB]),
@@ -183,8 +179,8 @@ async fn run_generate_command(
     std::fs::create_dir_all(&dir)?;
 
     let args = GenerateArgs::from(cli_args);
-    let source_ids = resolve_source_ids(db, &args).await?;
-    run_with_cache(db, &args, &source_ids, &dir, outputs, None).await?;
+    let source_ids = resolve_source_ids(&args)?;
+    run_with_cache(&args, &source_ids, &dir, outputs, None).await?;
 
     Ok(())
 }

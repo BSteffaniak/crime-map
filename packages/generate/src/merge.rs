@@ -21,8 +21,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use switchy_database_connection::init_sqlite_rusqlite;
-
 /// Runs the full merge pipeline.
 ///
 /// # Errors
@@ -151,14 +149,15 @@ async fn merge_sidebar_db(
     }
 
     log::info!("Merging {} incidents.db files...", inputs.len());
-    let sqlite = init_sqlite_rusqlite(Some(&output_path))?;
+    let sqlite = switchy_database_connection::init_sqlite_rusqlite(Some(&output_path))
+        .map_err(|e| format!("Failed to open merged SQLite: {e}"))?;
 
     // Create the schema (matches generate_sidebar_db in lib.rs)
     sqlite
         .exec_raw(
             "CREATE TABLE incidents (
                 id INTEGER PRIMARY KEY,
-                source_id INTEGER NOT NULL,
+                source_id TEXT NOT NULL,
                 source_name TEXT NOT NULL,
                 source_incident_id TEXT,
                 subcategory TEXT NOT NULL,
@@ -180,7 +179,8 @@ async fn merge_sidebar_db(
                 neighborhood_id TEXT
             )",
         )
-        .await?;
+        .await
+        .map_err(|e| format!("Failed to create incidents table: {e}"))?;
 
     // Import from each partition
     for (i, input) in inputs.iter().enumerate() {
@@ -189,7 +189,8 @@ async fn merge_sidebar_db(
 
         sqlite
             .exec_raw(&format!("ATTACH DATABASE '{path_str}' AS {alias}"))
-            .await?;
+            .await
+            .map_err(|e| format!("Failed to attach partition: {e}"))?;
 
         sqlite
             .exec_raw(&format!(
@@ -212,11 +213,15 @@ async fn merge_sidebar_db(
                     tract_geoid, neighborhood_id
                 FROM {alias}.incidents"
             ))
-            .await?;
+            .await
+            .map_err(|e| format!("Failed to insert from partition: {e}"))?;
 
         log::info!("  Partition {}: merged from {}", i + 1, input.display());
 
-        sqlite.exec_raw(&format!("DETACH {alias}")).await?;
+        sqlite
+            .exec_raw(&format!("DETACH {alias}"))
+            .await
+            .map_err(|e| format!("Failed to detach partition: {e}"))?;
     }
 
     // Build R-tree spatial index
@@ -227,40 +232,50 @@ async fn merge_sidebar_db(
                 id, min_lng, max_lng, min_lat, max_lat
             )",
         )
-        .await?;
-
+        .await
+        .map_err(|e| format!("Failed to create R-tree: {e}"))?;
     sqlite
         .exec_raw(
             "INSERT INTO incidents_rtree (id, min_lng, max_lng, min_lat, max_lat)
              SELECT id, longitude, longitude, latitude, latitude FROM incidents",
         )
-        .await?;
+        .await
+        .map_err(|e| format!("Failed to populate R-tree: {e}"))?;
 
     // Build secondary indexes
     log::info!("Building secondary indexes...");
     sqlite
         .exec_raw("CREATE INDEX idx_incidents_occurred_at ON incidents(occurred_at DESC)")
-        .await?;
+        .await
+        .map_err(|e| format!("Failed to create index: {e}"))?;
     sqlite
         .exec_raw("CREATE INDEX idx_incidents_source_id ON incidents(source_id)")
-        .await?;
+        .await
+        .map_err(|e| format!("Failed to create index: {e}"))?;
     sqlite
         .exec_raw("CREATE INDEX idx_incidents_state_fips ON incidents(state_fips)")
-        .await?;
+        .await
+        .map_err(|e| format!("Failed to create index: {e}"))?;
     sqlite
         .exec_raw("CREATE INDEX idx_incidents_county_geoid ON incidents(county_geoid)")
-        .await?;
+        .await
+        .map_err(|e| format!("Failed to create index: {e}"))?;
     sqlite
         .exec_raw("CREATE INDEX idx_incidents_place_geoid ON incidents(place_geoid)")
-        .await?;
+        .await
+        .map_err(|e| format!("Failed to create index: {e}"))?;
     sqlite
         .exec_raw("CREATE INDEX idx_incidents_tract_geoid ON incidents(tract_geoid)")
-        .await?;
+        .await
+        .map_err(|e| format!("Failed to create index: {e}"))?;
     sqlite
         .exec_raw("CREATE INDEX idx_incidents_neighborhood_id ON incidents(neighborhood_id)")
-        .await?;
-
-    sqlite.exec_raw("ANALYZE").await?;
+        .await
+        .map_err(|e| format!("Failed to create index: {e}"))?;
+    sqlite
+        .exec_raw("ANALYZE")
+        .await
+        .map_err(|e| format!("Failed to run ANALYZE: {e}"))?;
 
     log::info!("Sidebar merge complete: {}", output_path.display());
     Ok(())
@@ -410,8 +425,8 @@ fn merge_h3_db(
 
 /// Reference tables in `analytics.duckdb` that are identical across partitions.
 ///
-/// These are populated from the shared `PostGIS` census/boundary data, so
-/// every partition produces the same rows. We copy them from the first
+/// These are populated from the shared boundaries `DuckDB`, so every
+/// partition produces the same rows. We copy them from the first
 /// partition that has the table.
 const ANALYTICS_REFERENCE_TABLES: &[&str] = &[
     "census_tracts",
@@ -527,7 +542,7 @@ fn merge_metadata(
     log::info!("Merging {} metadata.json files...", inputs.len());
 
     let mut all_cities: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut all_sources: std::collections::BTreeMap<i64, serde_json::Value> =
+    let mut all_sources: std::collections::BTreeMap<String, serde_json::Value> =
         std::collections::BTreeMap::new();
     let mut min_date: Option<String> = None;
     let mut max_date: Option<String> = None;
@@ -546,8 +561,10 @@ fn merge_metadata(
         // Collect sources (deduplicate by id)
         if let Some(sources) = meta.get("sources").and_then(|s| s.as_array()) {
             for source in sources {
-                if let Some(id) = source.get("id").and_then(serde_json::Value::as_i64) {
-                    all_sources.entry(id).or_insert_with(|| source.clone());
+                if let Some(id) = source.get("id").and_then(serde_json::Value::as_str) {
+                    all_sources
+                        .entry(id.to_string())
+                        .or_insert_with(|| source.clone());
                 }
             }
         }

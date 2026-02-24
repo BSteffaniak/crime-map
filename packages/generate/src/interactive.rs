@@ -11,7 +11,6 @@ use crate::{
     OUTPUT_COUNT_DB, OUTPUT_H3_DB, OUTPUT_INCIDENTS_DB, OUTPUT_INCIDENTS_PMTILES, OUTPUT_METADATA,
     output_dir, resolve_source_ids, run_with_cache,
 };
-use crime_map_database::db;
 
 /// All available output types, paired with their internal constant name.
 const OUTPUT_CHOICES: &[(&str, &str)] = &[
@@ -27,16 +26,14 @@ const OUTPUT_CHOICES: &[(&str, &str)] = &[
 
 /// Runs the interactive generation menu.
 ///
-/// Connects to the database, presents a multi-select for output types and
-/// source filtering, prompts for generation parameters, and executes the
-/// chosen pipeline.
+/// Presents a multi-select for output types and source filtering, prompts
+/// for generation parameters, and executes the chosen pipeline.
 ///
 /// # Errors
 ///
-/// Returns an error if the database connection, user input, or generation
-/// pipeline fails.
+/// Returns an error if user input or the generation pipeline fails.
+#[allow(clippy::future_not_send)]
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let db = db::connect_from_env().await?;
     let dir = output_dir();
     std::fs::create_dir_all(&dir)?;
 
@@ -121,16 +118,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         force,
     };
 
-    let source_ids = resolve_source_ids(db.as_ref(), &args).await?;
-    run_with_cache(
-        db.as_ref(),
-        &args,
-        &source_ids,
-        &dir,
-        &requested_outputs,
-        None,
-    )
-    .await?;
+    let source_ids = resolve_source_ids(&args)?;
+    run_with_cache(&args, &source_ids, &dir, &requested_outputs, None).await?;
 
     Ok(())
 }
