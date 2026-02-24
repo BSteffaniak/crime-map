@@ -90,11 +90,25 @@ jobs:
           echo "matrix={\"include\":$(echo "$FULL_MATRIX" | jq -c .)}" >> "$GITHUB_OUTPUT"
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
 
-  # ── Step 2: Ingest census boundaries (shared data) ─────────────────
-  boundaries:
-    name: Ingest Boundaries
+  # ── Step 2a: Ingest census boundaries in parallel ───────────────────
+  boundaries-ingest:
+    name: "Boundaries (${{ matrix.type }})"
     runs-on: ubuntu-latest
     needs: setup
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - type: states
+            command: cargo ingest states
+          - type: counties
+            command: cargo ingest counties
+          - type: places
+            command: cargo ingest places
+          - type: tracts
+            command: cargo ingest tracts
+          - type: neighborhoods
+            command: cargo ingest neighborhoods
 
     steps:
       - name: Checkout
@@ -111,44 +125,36 @@ jobs:
         with:
           db-host: ${{ steps.db.outputs.host }}
 
-      - name: Keepalive for Neon
-        run: |
-          # Periodic query to prevent Neon scale-to-zero during pipeline
-          (while true; do
-            psql "${{ secrets.DATABASE_URL }}" -c "SELECT 1" > /dev/null 2>&1 || true
-            sleep 120
-          done) &
-          echo "KEEPALIVE_PID=$!" >> "$GITHUB_ENV"
-
       - name: Run migrations
         run: cargo ingest migrate
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
-      - name: Ingest state boundaries
-        run: cargo ingest states
+      - name: "Ingest ${{ matrix.type }}"
+        run: ${{ matrix.command }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
-      - name: Ingest county boundaries
-        run: cargo ingest counties
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+  # ── Step 2b: Generate boundary artifacts after all ingestion ────────
+  boundaries-generate:
+    name: Generate Boundaries
+    runs-on: ubuntu-latest
+    needs: boundaries-ingest
 
-      - name: Ingest place boundaries
-        run: cargo ingest places
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Ingest tract boundaries
-        run: cargo ingest tracts
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - name: Extract DB hostname
+        id: db
+        run: |
+          HOST=$(echo "${{ secrets.DATABASE_URL }}" | sed 's|.*@||;s|/.*||;s|:.*||')
+          echo "host=$HOST" >> "$GITHUB_OUTPUT"
 
-      - name: Ingest neighborhoods
-        run: cargo ingest neighborhoods
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - name: Setup pipeline tools
+        uses: ./.github/actions/setup-pipeline
+        with:
+          db-host: ${{ steps.db.outputs.host }}
 
       - name: Generate boundary artifacts
         run: |
@@ -166,15 +172,11 @@ jobs:
             data/boundaries/boundaries.db
           retention-days: 7
 
-      - name: Stop keepalive
-        if: always()
-        run: kill $KEEPALIVE_PID 2>/dev/null || true
-
   # ── Step 3: Per-partition ingest + generate ─────────────────────────
   partition:
     name: "${{ matrix.name }}"
     runs-on: ubuntu-latest
-    needs: [setup, boundaries]
+    needs: [setup, boundaries-generate]
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJSON(inputs.max_parallel || '20') }}
