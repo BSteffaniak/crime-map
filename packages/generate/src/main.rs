@@ -195,7 +195,20 @@ async fn run_generate_command(command: Commands) -> Result<(), Box<dyn std::erro
     std::fs::create_dir_all(&dir)?;
 
     let args = GenerateArgs::from(cli_args);
-    let source_ids = resolve_source_ids(&args)?;
+
+    // Boundary-only outputs don't need per-source DuckDB files — they read
+    // exclusively from boundaries.duckdb. Skip source resolution so the
+    // `boundaries` subcommand works without any files in data/sources/.
+    let needs_sources = outputs
+        .iter()
+        .any(|&o| o != OUTPUT_BOUNDARIES_PMTILES && o != OUTPUT_BOUNDARIES_DB);
+
+    let source_ids = if needs_sources {
+        resolve_source_ids(&args)?
+    } else {
+        Vec::new()
+    };
+
     run_with_cache(&args, &source_ids, &dir, &outputs, None).await?;
 
     Ok(())
