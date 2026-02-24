@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useMap } from "@/components/ui/map";
 import { BOUNDARIES_PMTILES_URL, LABEL_BEFORE_ID } from "@/lib/map-config";
 import type { AllBoundaryCounts, BoundaryMetric, BoundaryType } from "@/hooks/useBoundaryCounts";
@@ -300,9 +300,12 @@ export default function BoundaryLayers({
     }
   }, [isLoaded, map, visibleBoundaryTypes, layers, uiTheme, boundaryMetric]);
 
-  // Apply feature states from boundary counts for choropleth rendering (all visible layers)
-  // Normalizes raw counts based on the selected metric using feature properties.
-  useEffect(() => {
+  // ── Choropleth feature-state application ──
+  // Extracted into a callback so it can be called both from the useEffect
+  // (when counts/metric change) and from a `sourcedata` listener (when
+  // tiles finish loading after the counts already arrived).
+
+  const applyFeatureStates = useCallback(() => {
     if (!isLoaded || !map || !map.getSource("boundaries")) return;
 
     // Clear previous feature states for all layers
@@ -326,7 +329,7 @@ export default function BoundaryLayers({
     }
 
     // Build a lookup of feature properties (population, area) per source layer
-    // by querying rendered/source features.
+    // by querying source features from loaded tiles.
     const getFeatureProps = (sourceLayer: string, idProp: string) => {
       const propMap = new Map<string, { population: number; area: number }>();
       try {
@@ -399,6 +402,29 @@ export default function BoundaryLayers({
 
     prevFeatureStatesRef.current = newStates;
   }, [isLoaded, map, allBoundaryCounts, visibleBoundaryTypes, boundaryMetric]);
+
+  // Apply feature states when counts, metric, or visible layers change
+  useEffect(() => {
+    applyFeatureStates();
+  }, [applyFeatureStates]);
+
+  // Re-apply feature states when boundary tiles finish loading.
+  // This handles the race condition where counts arrive before tiles are loaded,
+  // so querySourceFeatures returns 0 features on the first pass.
+  useEffect(() => {
+    if (!isLoaded || !map) return;
+
+    const onSourceData = (e: { sourceId: string; isSourceLoaded: boolean }) => {
+      if (e.sourceId === "boundaries" && e.isSourceLoaded) {
+        applyFeatureStates();
+      }
+    };
+
+    map.on("sourcedata", onSourceData);
+    return () => {
+      map.off("sourcedata", onSourceData);
+    };
+  }, [isLoaded, map, applyFeatureStates]);
 
   // Apply "selected" feature state for filtered boundaries (highlight effect)
   useEffect(() => {
