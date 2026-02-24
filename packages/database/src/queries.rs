@@ -152,10 +152,14 @@ pub async fn insert_incidents(
     /// `parent_category_id` is derived via subquery from the same
     /// `category_id` bind param, so it does not add an extra placeholder.
     const PARAMS_PER_ROW: u32 = 16;
-    /// Maximum number of bind parameters per statement.
-    const PG_MAX_PARAMS: u32 = 65_535;
     /// Maximum rows per INSERT chunk.
-    const CHUNK_SIZE: usize = (PG_MAX_PARAMS / PARAMS_PER_ROW) as usize;
+    ///
+    /// Kept deliberately small (500 instead of filling `PostgreSQL`'s 65K
+    /// parameter limit at ~4095) so each statement stays under ~300KB of
+    /// wire data.  This avoids overwhelming remote databases (e.g. Neon)
+    /// with multi-MB parameterized statements that are expensive to parse,
+    /// plan, and execute.
+    const CHUNK_SIZE: usize = 500;
 
     // Pre-filter incidents that have a valid category, logging warnings for
     // those that don't.
@@ -179,9 +183,13 @@ pub async fn insert_incidents(
         return Ok(0);
     }
 
+    let total_rows = valid.len();
+    let total_chunks = total_rows.div_ceil(CHUNK_SIZE);
     let mut total_inserted = 0u64;
+    let mut chunk_num = 0usize;
 
     for chunk in valid.chunks(CHUNK_SIZE) {
+        chunk_num += 1;
         // Deduplicate within chunk: if the same source_incident_id appears
         // multiple times (e.g., multi-offense records from ArcGIS), keep only
         // the last occurrence.  PostgreSQL's ON CONFLICT DO UPDATE cannot
@@ -327,7 +335,15 @@ pub async fn insert_incidents(
              geocoded = EXCLUDED.geocoded",
         );
 
-        total_inserted += db.exec_raw_params(&sql, &params).await?;
+        let chunk_start = std::time::Instant::now();
+        let rows_affected = db.exec_raw_params(&sql, &params).await?;
+        total_inserted += rows_affected;
+
+        log::debug!(
+            "INSERT chunk {chunk_num}/{total_chunks}: {} rows in {:.1}s ({total_inserted}/{total_rows} total)",
+            deduped.len(),
+            chunk_start.elapsed().as_secs_f64(),
+        );
     }
 
     Ok(total_inserted)

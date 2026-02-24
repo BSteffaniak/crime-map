@@ -174,6 +174,8 @@ pub async fn fetch_city_protect(
 ) -> Result<u64, SourceError> {
     let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .timeout(std::time::Duration::from_secs(120))
+        .connect_timeout(std::time::Duration::from_secs(30))
         .build()?;
 
     let fetch_limit = options.limit.unwrap_or(u64::MAX);

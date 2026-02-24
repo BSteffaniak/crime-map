@@ -70,7 +70,7 @@ pub async fn fetch_carto(
     tx: &mpsc::Sender<Vec<serde_json::Value>>,
     progress: &Arc<dyn ProgressCallback>,
 ) -> Result<u64, SourceError> {
-    let client = reqwest::Client::new();
+    let client = crate::build_http_client()?;
     let mut offset: u64 = options.resume_offset;
     let fetch_limit = options.limit.unwrap_or(u64::MAX);
 

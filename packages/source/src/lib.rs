@@ -71,3 +71,21 @@ pub struct FetchOptions {
     /// `ON CONFLICT DO NOTHING` handles any small overlap at the boundary.
     pub resume_offset: u64,
 }
+
+/// Builds a [`reqwest::Client`] with sensible timeouts for data fetching.
+///
+/// - **connect timeout**: 30 seconds
+/// - **overall request timeout**: 120 seconds
+///
+/// All fetchers should use this instead of `reqwest::Client::new()` so that
+/// stalled HTTP connections are detected rather than hanging indefinitely.
+///
+/// # Errors
+///
+/// Returns [`SourceError::Http`] if the client cannot be built.
+pub fn build_http_client() -> Result<reqwest::Client, SourceError> {
+    Ok(reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()?)
+}

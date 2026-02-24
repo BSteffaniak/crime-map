@@ -73,7 +73,7 @@ async fn fetch_ckan_standard(
     tx: &mpsc::Sender<Vec<serde_json::Value>>,
     progress: &Arc<dyn ProgressCallback>,
 ) -> Result<u64, SourceError> {
-    let client = reqwest::Client::new();
+    let client = crate::build_http_client()?;
     let fetch_limit = options.limit.unwrap_or(u64::MAX);
     let num_resources = config.resource_ids.len();
 
@@ -235,7 +235,7 @@ async fn fetch_ckan_sql(
     tx: &mpsc::Sender<Vec<serde_json::Value>>,
     progress: &Arc<dyn ProgressCallback>,
 ) -> Result<u64, SourceError> {
-    let client = reqwest::Client::new();
+    let client = crate::build_http_client()?;
     let fetch_limit = options.limit.unwrap_or(u64::MAX);
     let num_resources = config.resource_ids.len();
     let sql_url = sql_api_url(config.api_url);

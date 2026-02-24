@@ -100,7 +100,7 @@ pub async fn fetch_arcgis(
     tx: &mpsc::Sender<Vec<serde_json::Value>>,
     progress: &Arc<dyn ProgressCallback>,
 ) -> Result<u64, SourceError> {
-    let client = reqwest::Client::new();
+    let client = crate::build_http_client()?;
     let fetch_limit = options.limit.unwrap_or(u64::MAX);
     let base_where = config.where_clause.unwrap_or("1=1");
     let where_clause = build_where_clause(base_where, config.date_column, options.since.as_ref());
