@@ -264,6 +264,18 @@ fn parse_timestamp(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         return Some(dt.with_timezone(&Utc));
     }
 
+    // DuckDB can produce short timezone offsets like "-05" (2 digits, no
+    // minutes). chrono's %z requires ±HHMM, so pad if needed.
+    let normalized = normalize_tz_offset(s);
+    if normalized != s {
+        if let Ok(dt) = DateTime::parse_from_str(&normalized, "%Y-%m-%d %H:%M:%S%z") {
+            return Some(dt.with_timezone(&Utc));
+        }
+        if let Ok(dt) = DateTime::parse_from_str(&normalized, "%Y-%m-%d %H:%M:%S%.f%z") {
+            return Some(dt.with_timezone(&Utc));
+        }
+    }
+
     // Fall back to naive (no timezone) — assume UTC
     if let Ok(naive) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
         return Some(DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc));
@@ -274,6 +286,25 @@ fn parse_timestamp(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 
     log::warn!("Failed to parse timestamp: {s:?}");
     None
+}
+
+/// Normalizes short timezone offsets (e.g., `-05` → `-0500`) so that
+/// chrono's `%z` format can parse them.
+fn normalize_tz_offset(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    // Match patterns like "...HH:MM:SS-05" or "...HH:MM:SS+05" (exactly
+    // 2 digits after the sign at the very end).
+    if len >= 3 {
+        let sign_pos = len - 3;
+        if (bytes[sign_pos] == b'+' || bytes[sign_pos] == b'-')
+            && bytes[sign_pos + 1].is_ascii_digit()
+            && bytes[sign_pos + 2].is_ascii_digit()
+        {
+            return format!("{s}00");
+        }
+    }
+    s.to_string()
 }
 
 /// Gets a metadata value from the `_meta` table.
