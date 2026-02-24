@@ -144,6 +144,11 @@ pub fn merge_from(target: &Connection, source_path: &Path) -> Result<u64, DbErro
 
     target.execute_batch(&format!("ATTACH '{path_str}' AS {alias} (READ_ONLY);"))?;
 
+    // The merge must handle large partition files (600MB+ for counties/tracts).
+    // Raise the memory limit above the default 512MB and disable insertion-order
+    // preservation to reduce peak memory during bulk INSERT ... SELECT.
+    target.execute_batch("SET memory_limit = '4GB'; SET preserve_insertion_order = false;")?;
+
     let mut total = 0u64;
 
     for table in MERGE_TABLES {
