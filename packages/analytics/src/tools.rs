@@ -1,8 +1,8 @@
 //! Tool execution functions for the AI agent.
 //!
 //! Each function implements one of the analytical tools that the agent
-//! can invoke. They run optimized SQL against `PostGIS` and return typed
-//! results.
+//! can invoke. They run optimized SQL against the pre-generated
+//! `analytics.duckdb` database and return typed results.
 
 use crime_map_analytics_models::{
     CityInfo, ComparePeriodParams, ComparePeriodResult, CountIncidentsParams, CountIncidentsResult,
@@ -11,37 +11,50 @@ use crime_map_analytics_models::{
     TopCrimeTypesResult, TrendParams, TrendResult,
 };
 use crime_map_geography_models::{AreaStats, CategoryCount, PeriodComparison, TimeSeriesPoint};
-use moosicbox_json_utils::database::ToValue as _;
-use switchy_database::{Database, DatabaseValue};
 
 use crate::AnalyticsError;
 
-/// Parses a date string like `"2024-01-01"` into a `NaiveDateTime` at midnight.
+/// A bind value for `DuckDB` queries.
 ///
-/// `switchy_database` sends parameters in binary format, so date strings
-/// must be converted to `DatabaseValue::DateTime` rather than passed as
-/// `DatabaseValue::String` — Postgres cannot decode raw UTF-8 bytes as
-/// a binary `timestamptz`.
-fn parse_date(s: &str) -> Result<chrono::NaiveDateTime, AnalyticsError> {
-    // Try full datetime first, then date-only
-    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
-        return Ok(dt);
-    }
-    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
-        .map(|d| d.and_hms_opt(0, 0, 0).unwrap_or_default())
-        .map_err(|e| AnalyticsError::Query {
-            message: format!("Invalid date '{s}': {e}. Expected format: YYYY-MM-DD"),
-        })
+/// `duckdb::Connection` uses `?` positional placeholders and requires
+/// `dyn duckdb::ToSql` references.
+enum DuckValue {
+    Str(String),
+    Int(i32),
+    Timestamp(String),
 }
 
-/// Builds a WHERE clause fragment and parameter list for the common
-/// city/state/geoid/date/category/severity filters.
+fn duck_value_to_boxed(v: DuckValue) -> Box<dyn duckdb::ToSql> {
+    match v {
+        DuckValue::Str(s) | DuckValue::Timestamp(s) => Box::new(s),
+        DuckValue::Int(i) => Box::new(i),
+    }
+}
+
+/// Parses a date string like `"2024-01-01"` into a timestamp string
+/// suitable for `DuckDB` comparison.
+fn parse_date(s: &str) -> Result<String, AnalyticsError> {
+    // Validate format, then return as-is for DuckDB CAST
+    if chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").is_ok()
+        || chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok()
+    {
+        Ok(s.to_string())
+    } else {
+        Err(AnalyticsError::Query {
+            message: format!("Invalid date '{s}': Expected format: YYYY-MM-DD"),
+        })
+    }
+}
+
+/// Builds a WHERE clause fragment and parameter list for common filters.
 ///
-/// Returns `(where_fragments, params, next_param_index)`.
+/// Returns `(where_fragments, params)`.
 ///
-/// # Errors
-///
-/// Returns [`AnalyticsError`] if a date string cannot be parsed.
+/// In the analytics `DuckDB`, incidents have pre-resolved text columns:
+/// - `city`, `state` (text, for ILIKE / = filtering)
+/// - `category`, `subcategory` (text names)
+/// - `census_tract_geoid`, `census_place_geoid` (GEOIDs)
+/// - `occurred_at` (TIMESTAMP)
 #[allow(clippy::too_many_arguments)]
 fn build_common_filters(
     city: Option<&str>,
@@ -53,82 +66,60 @@ fn build_common_filters(
     category: Option<&str>,
     subcategory: Option<&str>,
     severity_min: Option<u8>,
-    start_idx: u32,
-) -> Result<(Vec<String>, Vec<DatabaseValue>, u32), AnalyticsError> {
+) -> Result<(Vec<String>, Vec<DuckValue>), AnalyticsError> {
     let mut frags = Vec::new();
-    let mut params: Vec<DatabaseValue> = Vec::new();
-    let mut idx = start_idx;
+    let mut params: Vec<DuckValue> = Vec::new();
 
     if let Some(city) = city {
-        frags.push(format!("i.city ILIKE ${idx}"));
-        params.push(DatabaseValue::String(city.to_string()));
-        idx += 1;
+        frags.push("i.city ILIKE ?".to_string());
+        params.push(DuckValue::Str(city.to_string()));
     }
 
     if let Some(state) = state {
-        frags.push(format!("i.state = ${idx}"));
-        params.push(DatabaseValue::String(state.to_uppercase()));
-        idx += 1;
+        frags.push("i.state = ?".to_string());
+        params.push(DuckValue::Str(state.to_uppercase()));
     }
 
     if let Some(geoid) = geoid {
-        frags.push(format!("i.census_tract_geoid = ${idx}"));
-        params.push(DatabaseValue::String(geoid.to_string()));
-        idx += 1;
+        frags.push("i.census_tract_geoid = ?".to_string());
+        params.push(DuckValue::Str(geoid.to_string()));
     }
 
     if let Some(place_geoid) = place_geoid {
-        frags.push(format!("i.census_place_geoid = ${idx}"));
-        params.push(DatabaseValue::String(place_geoid.to_string()));
-        idx += 1;
+        frags.push("i.census_place_geoid = ?".to_string());
+        params.push(DuckValue::Str(place_geoid.to_string()));
     }
 
     if let Some(from) = date_from {
-        let dt = parse_date(from)?;
-        frags.push(format!("i.occurred_at >= ${idx}"));
-        params.push(DatabaseValue::DateTime(dt));
-        idx += 1;
+        let ts = parse_date(from)?;
+        frags.push("i.occurred_at >= CAST(? AS TIMESTAMP)".to_string());
+        params.push(DuckValue::Timestamp(ts));
     }
 
     if let Some(to) = date_to {
-        let dt = parse_date(to)?;
-        frags.push(format!("i.occurred_at <= ${idx}"));
-        params.push(DatabaseValue::DateTime(dt));
-        idx += 1;
+        let ts = parse_date(to)?;
+        frags.push("i.occurred_at <= CAST(? AS TIMESTAMP)".to_string());
+        params.push(DuckValue::Timestamp(ts));
     }
 
     if let Some(cat) = category {
-        frags.push(format!(
-            "i.parent_category_id = (SELECT id FROM crime_categories WHERE name = ${idx} AND parent_id IS NULL)"
-        ));
-        params.push(DatabaseValue::String(cat.to_uppercase()));
-        idx += 1;
+        frags.push("i.category = ?".to_string());
+        params.push(DuckValue::Str(cat.to_uppercase()));
     }
 
     if let Some(sub) = subcategory {
-        frags.push(format!("c.name = ${idx}"));
-        params.push(DatabaseValue::String(sub.to_uppercase()));
-        idx += 1;
+        frags.push("i.subcategory = ?".to_string());
+        params.push(DuckValue::Str(sub.to_uppercase()));
     }
 
     if let Some(sev) = severity_min
         && sev > 1
     {
-        frags.push(format!("c.severity >= ${idx}"));
-        params.push(DatabaseValue::Int32(i32::from(sev)));
-        idx += 1;
+        frags.push("i.severity >= ?".to_string());
+        params.push(DuckValue::Int(i32::from(sev)));
     }
 
-    Ok((frags, params, idx))
-}
-
-/// Returns `true` if any filter is active that requires a JOIN to
-/// `crime_categories`. Since `parent_category_id` is denormalized onto
-/// `crime_incidents`, the top-level category filter no longer needs
-/// the join — only subcategory and severity filters still reference
-/// columns on the `crime_categories` table.
-fn needs_category_join(subcategory: Option<&str>, severity_min: Option<u8>) -> bool {
-    subcategory.is_some() || severity_min.is_some_and(|s| s > 1)
+    Ok((frags, params))
 }
 
 fn where_clause(frags: &[String]) -> String {
@@ -172,16 +163,21 @@ fn describe_date_range(from: Option<&str>, to: Option<&str>) -> String {
     }
 }
 
+/// Helper: convert `Vec<DuckValue>` into the ref-slice `DuckDB` expects.
+fn prepare_params(params: &[Box<dyn duckdb::ToSql>]) -> Vec<&dyn duckdb::ToSql> {
+    params.iter().map(AsRef::as_ref).collect()
+}
+
 /// Counts incidents matching the given filters.
 ///
 /// # Errors
 ///
 /// Returns [`AnalyticsError`] if the database query fails.
-pub async fn count_incidents(
-    db: &dyn Database,
+pub fn count_incidents(
+    db: &duckdb::Connection,
     params: &CountIncidentsParams,
 ) -> Result<CountIncidentsResult, AnalyticsError> {
-    let (frags, db_params, _) = build_common_filters(
+    let (frags, db_params) = build_common_filters(
         params.city.as_deref(),
         params.state.as_deref(),
         params.geoid.as_deref(),
@@ -191,53 +187,39 @@ pub async fn count_incidents(
         params.category.as_deref(),
         params.subcategory.as_deref(),
         params.severity_min,
-        1,
     )?;
 
     let wc = where_clause(&frags);
-    let has_cat_filter = needs_category_join(params.subcategory.as_deref(), params.severity_min);
+    let boxed: Vec<Box<dyn duckdb::ToSql>> =
+        db_params.into_iter().map(duck_value_to_boxed).collect();
+    let refs = prepare_params(&boxed);
 
-    // Total count — skip the category join when no category filters are
-    // active, which lets Postgres use a much faster index-only scan.
-    let count_sql = if has_cat_filter {
-        format!(
-            "SELECT COUNT(*) as total
-             FROM crime_incidents i
-             JOIN crime_categories c ON i.category_id = c.id
-             {wc}"
-        )
-    } else {
-        format!(
-            "SELECT COUNT(*) as total
-             FROM crime_incidents i
-             {wc}"
-        )
-    };
+    // Total count
+    let count_sql = format!("SELECT COUNT(*) as total FROM incidents i{wc}");
+    let total: i64 = db
+        .prepare(&count_sql)?
+        .query_row(refs.as_slice(), |row| row.get(0))?;
 
-    let rows = db.query_raw_params(&count_sql, &db_params).await?;
-    let total: i64 = rows.first().map_or(0, |r| r.to_value("total").unwrap_or(0));
-
-    // Category breakdown — join only to resolve parent category name
+    // Category breakdown
     let cat_sql = format!(
-        "SELECT pc.name as category, COUNT(*) as cnt
-         FROM crime_incidents i
-         JOIN crime_categories pc ON i.parent_category_id = pc.id
-         {wc}
-         GROUP BY pc.name
+        "SELECT i.category, COUNT(*) as cnt
+         FROM incidents i{wc}
+         GROUP BY i.category
          ORDER BY cnt DESC"
     );
+    let mut cat_stmt = db.prepare(&cat_sql)?;
+    let cat_rows = cat_stmt.query_map(refs.as_slice(), |row| {
+        let cat: String = row.get(0)?;
+        let cnt: i64 = row.get(1)?;
+        Ok((cat, cnt))
+    })?;
 
-    let cat_rows = db.query_raw_params(&cat_sql, &db_params).await?;
     let by_category: Vec<CategoryCount> = cat_rows
-        .iter()
-        .map(|row| {
-            let cat: String = row.to_value("category").unwrap_or_default();
-            let cnt: i64 = row.to_value("cnt").unwrap_or(0);
-            CategoryCount {
-                category: cat,
-                #[allow(clippy::cast_sign_loss)]
-                count: cnt as u64,
-            }
+        .filter_map(Result::ok)
+        .map(|(category, cnt)| CategoryCount {
+            category,
+            #[allow(clippy::cast_sign_loss)]
+            count: cnt as u64,
         })
         .collect();
 
@@ -261,26 +243,23 @@ pub async fn count_incidents(
 ///
 /// Returns [`AnalyticsError`] if the database query fails.
 #[allow(clippy::too_many_lines)]
-pub async fn rank_areas(
-    db: &dyn Database,
+pub fn rank_areas(
+    db: &duckdb::Connection,
     params: &RankAreaParams,
 ) -> Result<RankAreaResult, AnalyticsError> {
     let limit = params.limit.unwrap_or(10);
     let safest_first = params.safest_first.unwrap_or(true);
 
     let mut frags = Vec::new();
-    let mut db_params: Vec<DatabaseValue> = Vec::new();
-    let mut idx = 1u32;
+    let mut db_params: Vec<DuckValue> = Vec::new();
 
     // Either city or placeGeoid is required to scope the ranking
     if let Some(ref place_geoid) = params.place_geoid {
-        frags.push(format!("i.census_place_geoid = ${idx}"));
-        db_params.push(DatabaseValue::String(place_geoid.clone()));
-        idx += 1;
+        frags.push("i.census_place_geoid = ?".to_string());
+        db_params.push(DuckValue::Str(place_geoid.clone()));
     } else if let Some(ref city) = params.city {
-        frags.push(format!("i.city ILIKE ${idx}"));
-        db_params.push(DatabaseValue::String(city.clone()));
-        idx += 1;
+        frags.push("i.city ILIKE ?".to_string());
+        db_params.push(DuckValue::Str(city.clone()));
     } else {
         return Err(AnalyticsError::Query {
             message: "Either 'city' or 'placeGeoid' is required for rank_areas".to_string(),
@@ -288,48 +267,46 @@ pub async fn rank_areas(
     }
 
     if let Some(ref state) = params.state {
-        frags.push(format!("i.state = ${idx}"));
-        db_params.push(DatabaseValue::String(state.to_uppercase()));
-        idx += 1;
+        frags.push("i.state = ?".to_string());
+        db_params.push(DuckValue::Str(state.to_uppercase()));
     }
 
     if let Some(ref from) = params.date_from {
-        let dt = parse_date(from)?;
-        frags.push(format!("i.occurred_at >= ${idx}"));
-        db_params.push(DatabaseValue::DateTime(dt));
-        idx += 1;
+        let ts = parse_date(from)?;
+        frags.push("i.occurred_at >= CAST(? AS TIMESTAMP)".to_string());
+        db_params.push(DuckValue::Timestamp(ts));
     }
 
     if let Some(ref to) = params.date_to {
-        let dt = parse_date(to)?;
-        frags.push(format!("i.occurred_at <= ${idx}"));
-        db_params.push(DatabaseValue::DateTime(dt));
-        idx += 1;
+        let ts = parse_date(to)?;
+        frags.push("i.occurred_at <= CAST(? AS TIMESTAMP)".to_string());
+        db_params.push(DuckValue::Timestamp(ts));
     }
 
     if let Some(ref cat) = params.category {
-        frags.push(format!(
-            "i.parent_category_id = (SELECT id FROM crime_categories WHERE name = ${idx} AND parent_id IS NULL)"
-        ));
-        db_params.push(DatabaseValue::String(cat.to_uppercase()));
-        idx += 1;
+        frags.push("i.category = ?".to_string());
+        db_params.push(DuckValue::Str(cat.to_uppercase()));
     }
 
-    let _ = idx; // suppress unused-after-increment; kept for safety if filters are added
     let wc = where_clause(&frags);
+    let boxed: Vec<Box<dyn duckdb::ToSql>> =
+        db_params.into_iter().map(duck_value_to_boxed).collect();
+    let refs = prepare_params(&boxed);
 
-    // Fast pre-check: bail out immediately if no matching incidents have
-    // census tract attribution.  Without this, the main query scans
-    // millions of rows (e.g. 8.4 M for Chicago) only to join against
-    // census_tracts and return zero results.
+    // Pre-check: bail out if no matching incidents have tract data
     let check_sql = format!(
-        "SELECT EXISTS(SELECT 1 FROM crime_incidents i {wc} AND i.census_tract_geoid IS NOT NULL LIMIT 1)"
+        "SELECT COUNT(*) > 0 FROM incidents i{wc} AND i.census_tract_geoid IS NOT NULL LIMIT 1"
     );
-    let check_rows = db.query_raw_params(&check_sql, &db_params).await?;
-    let has_tract_data: bool = check_rows
-        .first()
-        .and_then(|r| r.to_value("exists").ok())
-        .unwrap_or(false);
+    // If wc is empty, we need WHERE instead of AND
+    let check_sql = if wc.is_empty() {
+        "SELECT COUNT(*) > 0 FROM incidents i WHERE i.census_tract_geoid IS NOT NULL LIMIT 1"
+            .to_string()
+    } else {
+        check_sql
+    };
+    let has_tract_data: bool = db
+        .prepare(&check_sql)?
+        .query_row(refs.as_slice(), |row| row.get(0))?;
 
     if !has_tract_data {
         let area_name = params
@@ -347,27 +324,43 @@ pub async fn rank_areas(
         });
     }
 
+    // Main query: join incidents with census_tracts and neighborhoods
+    let tract_not_null = if wc.is_empty() {
+        " WHERE i.census_tract_geoid IS NOT NULL"
+    } else {
+        " AND i.census_tract_geoid IS NOT NULL"
+    };
+
     let sql = format!(
         "SELECT ct.geoid,
                 COALESCE(n.name, ct.geoid) as area_id,
                 COALESCE(n.name, ct.name) as area_name,
                 ct.population, ct.land_area_sq_mi,
-                pc.name as category, COUNT(*) as cat_cnt
-         FROM crime_incidents i
-         JOIN crime_categories pc ON i.parent_category_id = pc.id
+                i.category, COUNT(*) as cat_cnt
+         FROM incidents i
          JOIN census_tracts ct ON ct.geoid = i.census_tract_geoid
          LEFT JOIN tract_neighborhoods tn ON ct.geoid = tn.geoid
          LEFT JOIN neighborhoods n ON tn.neighborhood_id = n.id
-         {wc}
-         AND i.census_tract_geoid IS NOT NULL
+         {wc}{tract_not_null}
          GROUP BY ct.geoid, COALESCE(n.name, ct.geoid), COALESCE(n.name, ct.name),
-                  ct.population, ct.land_area_sq_mi, pc.name"
+                  ct.population, ct.land_area_sq_mi, i.category"
     );
 
-    let rows = db.query_raw_params(&sql, &db_params).await?;
+    let mut stmt = db.prepare(&sql)?;
+    let rows = stmt.query_map(refs.as_slice(), |row| {
+        let geoid: String = row.get(0)?;
+        let area_id: String = row.get(1)?;
+        let area_name: String = row.get(2)?;
+        let population: Option<i32> = row.get(3)?;
+        let land_area: Option<f64> = row.get(4)?;
+        let cat: String = row.get(5)?;
+        let cat_cnt: i64 = row.get(6)?;
+        Ok((
+            geoid, area_id, area_name, population, land_area, cat, cat_cnt,
+        ))
+    })?;
 
-    // Intermediate struct for aggregation: tracks per-area totals while
-    // accumulating results from multiple tracts and category rows.
+    // Aggregate rows by area
     #[allow(clippy::items_after_statements)]
     struct AreaAccum {
         area_name: String,
@@ -378,20 +371,11 @@ pub async fn rank_areas(
         seen_geoids: std::collections::BTreeSet<String>,
     }
 
-    // Aggregate rows by area (neighborhood name or geoid). Multiple rows
-    // exist per area due to category grouping AND because one neighborhood
-    // may span multiple census tracts.
     let mut area_map: std::collections::BTreeMap<String, AreaAccum> =
         std::collections::BTreeMap::new();
 
-    for row in &rows {
-        let geoid: String = row.to_value("geoid").unwrap_or_default();
-        let area_id: String = row.to_value("area_id").unwrap_or_default();
-        let area_name: String = row.to_value("area_name").unwrap_or_default();
-        let population: Option<i32> = row.to_value("population").unwrap_or(None);
-        let land_area: Option<f64> = row.to_value("land_area_sq_mi").unwrap_or(None);
-        let cat: String = row.to_value("category").unwrap_or_default();
-        let cat_cnt: i64 = row.to_value("cat_cnt").unwrap_or(0);
+    for row_result in rows {
+        let (geoid, area_id, area_name, population, land_area, cat, cat_cnt) = row_result?;
 
         let entry = area_map
             .entry(area_id.clone())
@@ -414,8 +398,6 @@ pub async fn rank_areas(
             *entry.by_category.entry(cat).or_insert(0) += cat_cnt as u64;
         }
 
-        // Only count population and land area once per tract, even if
-        // the tract appears in multiple category rows.
         if entry.seen_geoids.insert(geoid) {
             if let Some(pop) = population {
                 entry.total_population += i64::from(pop);
@@ -426,7 +408,6 @@ pub async fn rank_areas(
         }
     }
 
-    // Convert accumulated data into AreaStats with computed rates
     let mut areas: Vec<AreaStats> = area_map
         .into_iter()
         .map(|(area_id, acc)| {
@@ -466,13 +447,11 @@ pub async fn rank_areas(
         })
         .collect();
 
-    // Sort by per-capita rate when available, falling back to absolute count
     areas.sort_by(|a, b| {
         let cmp = match (a.incidents_per_1k, b.incidents_per_1k) {
             (Some(a_rate), Some(b_rate)) => a_rate
                 .partial_cmp(&b_rate)
                 .unwrap_or(std::cmp::Ordering::Equal),
-            // Tracts with known rate sort before those without
             (Some(_), None) => std::cmp::Ordering::Less,
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => a.total_incidents.cmp(&b.total_incidents),
@@ -501,112 +480,113 @@ pub async fn rank_areas(
 
 /// Compares crime between two time periods.
 ///
-/// Uses conditional aggregation (`COUNT FILTER`) to compare both periods
-/// in a single table scan instead of running separate queries per period.
+/// Uses conditional aggregation (`COUNT(*) FILTER`) to compare both
+/// periods in a single table scan.
 ///
 /// # Errors
 ///
 /// Returns [`AnalyticsError`] if the database query fails.
 #[allow(clippy::too_many_lines)]
-pub async fn compare_periods(
-    db: &dyn Database,
+pub fn compare_periods(
+    db: &duckdb::Connection,
     params: &ComparePeriodParams,
 ) -> Result<ComparePeriodResult, AnalyticsError> {
-    // Parse all four date boundaries
     let a_from = parse_date(&params.period_a_from)?;
     let a_to = parse_date(&params.period_a_to)?;
     let b_from = parse_date(&params.period_b_from)?;
     let b_to = parse_date(&params.period_b_to)?;
 
-    // Build location + category filters (shared across both periods)
-    let mut frags = Vec::new();
-    let mut db_params: Vec<DatabaseValue> = Vec::new();
-    let mut idx = 1u32;
+    // Build base location/category filters
+    let mut base_frags = Vec::new();
+    let mut base_params: Vec<DuckValue> = Vec::new();
 
     if let Some(ref city) = params.city {
-        frags.push(format!("i.city ILIKE ${idx}"));
-        db_params.push(DatabaseValue::String(city.clone()));
-        idx += 1;
+        base_frags.push("i.city ILIKE ?".to_string());
+        base_params.push(DuckValue::Str(city.clone()));
     }
     if let Some(ref state) = params.state {
-        frags.push(format!("i.state = ${idx}"));
-        db_params.push(DatabaseValue::String(state.to_uppercase()));
-        idx += 1;
+        base_frags.push("i.state = ?".to_string());
+        base_params.push(DuckValue::Str(state.to_uppercase()));
     }
     if let Some(ref geoid) = params.geoid {
-        frags.push(format!("i.census_tract_geoid = ${idx}"));
-        db_params.push(DatabaseValue::String(geoid.clone()));
-        idx += 1;
+        base_frags.push("i.census_tract_geoid = ?".to_string());
+        base_params.push(DuckValue::Str(geoid.clone()));
     }
     if let Some(ref place_geoid) = params.place_geoid {
-        frags.push(format!("i.census_place_geoid = ${idx}"));
-        db_params.push(DatabaseValue::String(place_geoid.clone()));
-        idx += 1;
+        base_frags.push("i.census_place_geoid = ?".to_string());
+        base_params.push(DuckValue::Str(place_geoid.clone()));
     }
     if let Some(ref cat) = params.category {
-        frags.push(format!(
-            "i.parent_category_id = (SELECT id FROM crime_categories WHERE name = ${idx} AND parent_id IS NULL)"
-        ));
-        db_params.push(DatabaseValue::String(cat.to_uppercase()));
-        idx += 1;
+        base_frags.push("i.category = ?".to_string());
+        base_params.push(DuckValue::Str(cat.to_uppercase()));
     }
 
-    // Date range covering both periods so the planner can use
-    // the composite index on (place_geoid, occurred_at, ...).
-    let date_lo_idx = idx;
-    let date_hi_idx = idx + 1;
-    frags.push(format!("i.occurred_at >= ${date_lo_idx}"));
-    frags.push(format!("i.occurred_at <= ${date_hi_idx}"));
-    let date_lo = a_from.min(b_from);
-    let date_hi = a_to.max(b_to);
-    db_params.push(DatabaseValue::DateTime(date_lo));
-    db_params.push(DatabaseValue::DateTime(date_hi));
-    idx += 2;
+    // Outer date range covering both periods
+    let date_lo = if a_from <= b_from {
+        a_from.clone()
+    } else {
+        b_from.clone()
+    };
+    let date_hi = if a_to >= b_to {
+        a_to.clone()
+    } else {
+        b_to.clone()
+    };
 
-    // Period boundary params for FILTER clauses
-    let a_from_idx = idx;
-    let a_to_idx = idx + 1;
-    let b_from_idx = idx + 2;
-    let b_to_idx = idx + 3;
-    db_params.push(DatabaseValue::DateTime(a_from));
-    db_params.push(DatabaseValue::DateTime(a_to));
-    db_params.push(DatabaseValue::DateTime(b_from));
-    db_params.push(DatabaseValue::DateTime(b_to));
+    base_frags.push("i.occurred_at >= CAST(? AS TIMESTAMP)".to_string());
+    base_frags.push("i.occurred_at <= CAST(? AS TIMESTAMP)".to_string());
+    base_params.push(DuckValue::Timestamp(date_lo));
+    base_params.push(DuckValue::Timestamp(date_hi));
 
-    let wc = where_clause(&frags);
+    let wc = where_clause(&base_frags);
 
-    // ── Overall totals (single scan) ──────────────────────────────────
-    // No category join needed — parent_category_id filter is on the
-    // incidents table directly.
+    // Helper to build params in SQL text order.
+    // SQL has FILTER(a_from, a_to, b_from, b_to) then WHERE(base_params).
+    // `DuckDB` binds ? left-to-right in SQL text order.
+    let build_params = |base: &[DuckValue]| -> Vec<Box<dyn duckdb::ToSql>> {
+        let mut p: Vec<Box<dyn duckdb::ToSql>> = vec![
+            duck_value_to_boxed(DuckValue::Timestamp(a_from.clone())),
+            duck_value_to_boxed(DuckValue::Timestamp(a_to.clone())),
+            duck_value_to_boxed(DuckValue::Timestamp(b_from.clone())),
+            duck_value_to_boxed(DuckValue::Timestamp(b_to.clone())),
+        ];
+        for v in base {
+            p.push(duck_value_to_boxed(match v {
+                DuckValue::Str(s) => DuckValue::Str(s.clone()),
+                DuckValue::Int(i) => DuckValue::Int(*i),
+                DuckValue::Timestamp(s) => DuckValue::Timestamp(s.clone()),
+            }));
+        }
+        p
+    };
+
+    // Overall totals
     let totals_sql = format!(
         "SELECT
-           COUNT(*) FILTER (WHERE i.occurred_at >= ${a_from_idx} AND i.occurred_at <= ${a_to_idx}) as a_total,
-           COUNT(*) FILTER (WHERE i.occurred_at >= ${b_from_idx} AND i.occurred_at <= ${b_to_idx}) as b_total
-         FROM crime_incidents i
-         {wc}"
+           COUNT(*) FILTER (WHERE i.occurred_at >= CAST(? AS TIMESTAMP) AND i.occurred_at <= CAST(? AS TIMESTAMP)) as a_total,
+           COUNT(*) FILTER (WHERE i.occurred_at >= CAST(? AS TIMESTAMP) AND i.occurred_at <= CAST(? AS TIMESTAMP)) as b_total
+         FROM incidents i{wc}"
     );
 
-    let totals_rows = db.query_raw_params(&totals_sql, &db_params).await?;
-    let (a_total, b_total): (i64, i64) = totals_rows.first().map_or((0, 0), |r| {
-        (
-            r.to_value("a_total").unwrap_or(0),
-            r.to_value("b_total").unwrap_or(0),
-        )
-    });
+    let totals_boxed = build_params(&base_params);
+    let totals_refs = prepare_params(&totals_boxed);
 
-    // ── Per-category breakdown (single scan) ──────────────────────────
+    let (a_total, b_total): (i64, i64) = db
+        .prepare(&totals_sql)?
+        .query_row(totals_refs.as_slice(), |row| Ok((row.get(0)?, row.get(1)?)))?;
+
+    // Per-category breakdown
     let cat_sql = format!(
-        "SELECT pc.name as category,
-                COUNT(*) FILTER (WHERE i.occurred_at >= ${a_from_idx} AND i.occurred_at <= ${a_to_idx}) as a_cnt,
-                COUNT(*) FILTER (WHERE i.occurred_at >= ${b_from_idx} AND i.occurred_at <= ${b_to_idx}) as b_cnt
-         FROM crime_incidents i
-         JOIN crime_categories pc ON i.parent_category_id = pc.id
-         {wc}
-         GROUP BY pc.name
+        "SELECT i.category,
+                COUNT(*) FILTER (WHERE i.occurred_at >= CAST(? AS TIMESTAMP) AND i.occurred_at <= CAST(? AS TIMESTAMP)) as a_cnt,
+                COUNT(*) FILTER (WHERE i.occurred_at >= CAST(? AS TIMESTAMP) AND i.occurred_at <= CAST(? AS TIMESTAMP)) as b_cnt
+         FROM incidents i{wc}
+         GROUP BY i.category
          ORDER BY a_cnt DESC"
     );
 
-    let cat_rows = db.query_raw_params(&cat_sql, &db_params).await?;
+    let cat_boxed = build_params(&base_params);
+    let cat_refs = prepare_params(&cat_boxed);
 
     let area_desc = describe_area(
         params.city.as_deref(),
@@ -634,10 +614,16 @@ pub async fn compare_periods(
     };
 
     let mut by_category = Vec::new();
-    for row in &cat_rows {
-        let cat_name: String = row.to_value("category").unwrap_or_default();
-        let a_cnt: i64 = row.to_value("a_cnt").unwrap_or(0);
-        let b_cnt: i64 = row.to_value("b_cnt").unwrap_or(0);
+    let mut cat_stmt = db.prepare(&cat_sql)?;
+    let cat_rows = cat_stmt.query_map(cat_refs.as_slice(), |row| {
+        let cat_name: String = row.get(0)?;
+        let a_cnt: i64 = row.get(1)?;
+        let b_cnt: i64 = row.get(2)?;
+        Ok((cat_name, a_cnt, b_cnt))
+    })?;
+
+    for row_result in cat_rows {
+        let (cat_name, a_cnt, b_cnt) = row_result?;
 
         #[allow(clippy::cast_precision_loss)]
         let pct = if a_cnt > 0 {
@@ -673,8 +659,8 @@ pub async fn compare_periods(
 /// # Errors
 ///
 /// Returns [`AnalyticsError`] if the database query fails.
-pub async fn get_trend(
-    db: &dyn Database,
+pub fn get_trend(
+    db: &duckdb::Connection,
     params: &TrendParams,
 ) -> Result<TrendResult, AnalyticsError> {
     let trunc = match params.granularity {
@@ -684,7 +670,7 @@ pub async fn get_trend(
         TimeGranularity::Yearly => "year",
     };
 
-    let (frags, db_params, _) = build_common_filters(
+    let (frags, db_params) = build_common_filters(
         params.city.as_deref(),
         params.state.as_deref(),
         params.geoid.as_deref(),
@@ -694,33 +680,39 @@ pub async fn get_trend(
         params.category.as_deref(),
         None,
         None,
-        1,
     )?;
 
     let wc = where_clause(&frags);
-    let cat_join = if needs_category_join(None, None) {
-        "JOIN crime_categories c ON i.category_id = c.id"
-    } else {
-        ""
-    };
+    let and_or_where = if wc.is_empty() { " WHERE" } else { " AND" };
 
     let sql = format!(
-        "SELECT date_trunc('{trunc}', i.occurred_at)::date::text as period, COUNT(*) as cnt
-         FROM crime_incidents i
-         {cat_join}
+        "SELECT CAST(date_trunc('{trunc}', i.occurred_at) AS VARCHAR) as period, COUNT(*) as cnt
+         FROM incidents i
          {wc}{and_or_where} i.occurred_at IS NOT NULL
          GROUP BY period
-         ORDER BY period",
-        and_or_where = if wc.is_empty() { " WHERE" } else { " AND" }
+         ORDER BY period"
     );
 
-    let rows = db.query_raw_params(&sql, &db_params).await?;
+    let boxed: Vec<Box<dyn duckdb::ToSql>> =
+        db_params.into_iter().map(duck_value_to_boxed).collect();
+    let refs = prepare_params(&boxed);
+
+    let mut stmt = db.prepare(&sql)?;
+    let rows = stmt.query_map(refs.as_slice(), |row| {
+        let period: String = row.get(0)?;
+        let cnt: i64 = row.get(1)?;
+        Ok((period, cnt))
+    })?;
 
     let data: Vec<TimeSeriesPoint> = rows
-        .iter()
-        .map(|row| {
-            let period: String = row.to_value("period").unwrap_or_default();
-            let cnt: i64 = row.to_value("cnt").unwrap_or(0);
+        .filter_map(Result::ok)
+        .map(|(period, cnt)| {
+            // Trim the time component if present (e.g., "2024-01-01 00:00:00" -> "2024-01-01")
+            let period = period
+                .split_whitespace()
+                .next()
+                .unwrap_or(&period)
+                .to_string();
             TimeSeriesPoint {
                 period,
                 #[allow(clippy::cast_sign_loss)]
@@ -737,7 +729,7 @@ pub async fn get_trend(
     );
 
     Ok(TrendResult {
-        description: format!("{} crime trend for {area}", params.granularity,),
+        description: format!("{} crime trend for {area}", params.granularity),
         data,
     })
 }
@@ -747,13 +739,14 @@ pub async fn get_trend(
 /// # Errors
 ///
 /// Returns [`AnalyticsError`] if the database query fails.
-pub async fn top_crime_types(
-    db: &dyn Database,
+#[allow(clippy::too_many_lines)]
+pub fn top_crime_types(
+    db: &duckdb::Connection,
     params: &TopCrimeTypesParams,
 ) -> Result<TopCrimeTypesResult, AnalyticsError> {
     let limit = params.limit.unwrap_or(10);
 
-    let (frags, db_params, next_idx) = build_common_filters(
+    let (frags, _) = build_common_filters(
         params.city.as_deref(),
         params.state.as_deref(),
         params.geoid.as_deref(),
@@ -763,72 +756,112 @@ pub async fn top_crime_types(
         None,
         None,
         None,
-        1,
     )?;
 
     let wc = where_clause(&frags);
 
-    // By subcategory
+    // By subcategory (need limit param appended)
     let sub_sql = format!(
-        "SELECT c.name as subcategory, COUNT(*) as cnt
-         FROM crime_incidents i
-         JOIN crime_categories c ON i.category_id = c.id
-         {wc}
-         GROUP BY c.name
+        "SELECT i.subcategory, COUNT(*) as cnt
+         FROM incidents i{wc}
+         GROUP BY i.subcategory
          ORDER BY cnt DESC
-         LIMIT ${next_idx}"
+         LIMIT ?"
     );
 
-    let mut sub_params = db_params.clone();
-    sub_params.push(DatabaseValue::Int64(i64::from(limit)));
+    // Rebuild params with limit appended for subcategory query
+    let (_, sub_db_params) = build_common_filters(
+        params.city.as_deref(),
+        params.state.as_deref(),
+        params.geoid.as_deref(),
+        params.place_geoid.as_deref(),
+        params.date_from.as_deref(),
+        params.date_to.as_deref(),
+        None,
+        None,
+        None,
+    )?;
+    let mut sub_boxed: Vec<Box<dyn duckdb::ToSql>> =
+        sub_db_params.into_iter().map(duck_value_to_boxed).collect();
+    sub_boxed.push(Box::new(i64::from(limit)));
+    let sub_refs = prepare_params(&sub_boxed);
 
-    let sub_rows = db.query_raw_params(&sub_sql, &sub_params).await?;
+    let mut sub_stmt = db.prepare(&sub_sql)?;
+    let sub_rows = sub_stmt.query_map(sub_refs.as_slice(), |row| {
+        let name: String = row.get(0)?;
+        let cnt: i64 = row.get(1)?;
+        Ok((name, cnt))
+    })?;
+
     let subcategories: Vec<CategoryCount> = sub_rows
-        .iter()
-        .map(|row| {
-            let name: String = row.to_value("subcategory").unwrap_or_default();
-            let cnt: i64 = row.to_value("cnt").unwrap_or(0);
-            CategoryCount {
-                category: name,
-                #[allow(clippy::cast_sign_loss)]
-                count: cnt as u64,
-            }
+        .filter_map(Result::ok)
+        .map(|(category, cnt)| CategoryCount {
+            category,
+            #[allow(clippy::cast_sign_loss)]
+            count: cnt as u64,
         })
         .collect();
 
-    // By category — use denormalized parent_category_id
+    // By category
     let cat_sql = format!(
-        "SELECT pc.name as category, COUNT(*) as cnt
-         FROM crime_incidents i
-         JOIN crime_categories pc ON i.parent_category_id = pc.id
-         {wc}
-         GROUP BY pc.name
+        "SELECT i.category, COUNT(*) as cnt
+         FROM incidents i{wc}
+         GROUP BY i.category
          ORDER BY cnt DESC"
     );
 
-    let cat_rows = db.query_raw_params(&cat_sql, &db_params).await?;
+    let (_, cat_db_params) = build_common_filters(
+        params.city.as_deref(),
+        params.state.as_deref(),
+        params.geoid.as_deref(),
+        params.place_geoid.as_deref(),
+        params.date_from.as_deref(),
+        params.date_to.as_deref(),
+        None,
+        None,
+        None,
+    )?;
+    let cat_boxed: Vec<Box<dyn duckdb::ToSql>> =
+        cat_db_params.into_iter().map(duck_value_to_boxed).collect();
+    let cat_refs = prepare_params(&cat_boxed);
+
+    let mut cat_stmt = db.prepare(&cat_sql)?;
+    let cat_rows = cat_stmt.query_map(cat_refs.as_slice(), |row| {
+        let name: String = row.get(0)?;
+        let cnt: i64 = row.get(1)?;
+        Ok((name, cnt))
+    })?;
+
     let categories: Vec<CategoryCount> = cat_rows
-        .iter()
-        .map(|row| {
-            let name: String = row.to_value("category").unwrap_or_default();
-            let cnt: i64 = row.to_value("cnt").unwrap_or(0);
-            CategoryCount {
-                category: name,
-                #[allow(clippy::cast_sign_loss)]
-                count: cnt as u64,
-            }
+        .filter_map(Result::ok)
+        .map(|(category, cnt)| CategoryCount {
+            category,
+            #[allow(clippy::cast_sign_loss)]
+            count: cnt as u64,
         })
         .collect();
 
-    // Total — no category filter in the WHERE clause, so skip the join
-    let total_sql = format!(
-        "SELECT COUNT(*) as total FROM crime_incidents i
-         {wc}"
-    );
-    let total_rows = db.query_raw_params(&total_sql, &db_params).await?;
-    let total: i64 = total_rows
-        .first()
-        .map_or(0, |r| r.to_value("total").unwrap_or(0));
+    // Total
+    let total_sql = format!("SELECT COUNT(*) as total FROM incidents i{wc}");
+    let (_, total_db_params) = build_common_filters(
+        params.city.as_deref(),
+        params.state.as_deref(),
+        params.geoid.as_deref(),
+        params.place_geoid.as_deref(),
+        params.date_from.as_deref(),
+        params.date_to.as_deref(),
+        None,
+        None,
+        None,
+    )?;
+    let total_boxed: Vec<Box<dyn duckdb::ToSql>> = total_db_params
+        .into_iter()
+        .map(duck_value_to_boxed)
+        .collect();
+    let total_refs = prepare_params(&total_boxed);
+    let total: i64 = db
+        .prepare(&total_sql)?
+        .query_row(total_refs.as_slice(), |row| row.get(0))?;
 
     let area = describe_area(
         params.city.as_deref(),
@@ -852,46 +885,49 @@ pub async fn top_crime_types(
 ///
 /// Returns [`AnalyticsError`] if the database query fails.
 #[allow(clippy::option_if_let_else)]
-pub async fn list_cities(
-    db: &dyn Database,
+pub fn list_cities(
+    db: &duckdb::Connection,
     params: &ListCitiesParams,
 ) -> Result<ListCitiesResult, AnalyticsError> {
-    let (sql, db_params) = if let Some(ref state) = params.state {
-        (
-            "SELECT city, state, COUNT(*) as cnt
-             FROM crime_incidents
-             WHERE city IS NOT NULL AND city != '' AND state = $1
+    let (sql, bind_params): (String, Vec<Box<dyn duckdb::ToSql>>) =
+        if let Some(ref state) = params.state {
+            (
+                "SELECT city, state, COUNT(*) as cnt
+             FROM incidents
+             WHERE city IS NOT NULL AND city != '' AND state = ?
              GROUP BY city, state
              ORDER BY cnt DESC"
-                .to_string(),
-            vec![DatabaseValue::String(state.to_uppercase())],
-        )
-    } else {
-        (
-            "SELECT city, state, COUNT(*) as cnt
-             FROM crime_incidents
+                    .to_string(),
+                vec![Box::new(state.to_uppercase()) as Box<dyn duckdb::ToSql>],
+            )
+        } else {
+            (
+                "SELECT city, state, COUNT(*) as cnt
+             FROM incidents
              WHERE city IS NOT NULL AND city != ''
              GROUP BY city, state
              ORDER BY cnt DESC"
-                .to_string(),
-            vec![],
-        )
-    };
+                    .to_string(),
+                vec![],
+            )
+        };
 
-    let rows = db.query_raw_params(&sql, &db_params).await?;
+    let refs: Vec<&dyn duckdb::ToSql> = bind_params.iter().map(AsRef::as_ref).collect();
+    let mut stmt = db.prepare(&sql)?;
+    let rows = stmt.query_map(refs.as_slice(), |row| {
+        let city: String = row.get(0)?;
+        let state: String = row.get(1)?;
+        let cnt: i64 = row.get(2)?;
+        Ok((city, state, cnt))
+    })?;
 
     let cities: Vec<CityInfo> = rows
-        .iter()
-        .map(|row| {
-            let city: String = row.to_value("city").unwrap_or_default();
-            let state: String = row.to_value("state").unwrap_or_default();
-            let cnt: i64 = row.to_value("cnt").unwrap_or(0);
-            CityInfo {
-                city,
-                state,
-                #[allow(clippy::cast_sign_loss)]
-                incident_count: Some(cnt as u64),
-            }
+        .filter_map(Result::ok)
+        .map(|(city, state, cnt)| CityInfo {
+            city,
+            state,
+            #[allow(clippy::cast_sign_loss)]
+            incident_count: Some(cnt as u64),
         })
         .collect();
 
@@ -900,17 +936,12 @@ pub async fn list_cities(
 
 /// Searches for available locations matching a query string.
 ///
-/// Performs a case-insensitive partial match against city/county names
-/// in the dataset. Returns matching locations with incident counts,
-/// ordered by relevance (exact matches first, then prefix matches,
-/// then substring matches).
-///
 /// # Errors
 ///
 /// Returns [`AnalyticsError`] if the database query fails.
-#[allow(clippy::too_many_lines)]
-pub async fn search_locations(
-    db: &dyn Database,
+#[allow(clippy::too_many_lines, clippy::option_if_let_else)]
+pub fn search_locations(
+    db: &duckdb::Connection,
     params: &SearchLocationsParams,
 ) -> Result<SearchLocationsResult, AnalyticsError> {
     let query = params.query.trim();
@@ -923,67 +954,54 @@ pub async fn search_locations(
         });
     }
 
-    // Build query with optional state filter.
-    // Use ILIKE for case-insensitive matching. Rank results by match quality:
-    //   1. Exact match (city ILIKE query)
-    //   2. Prefix match (city ILIKE query%)
-    //   3. Substring match (city ILIKE %query%)
-    let mut idx = 1u32;
-    let mut frags = Vec::new();
-    let mut db_params: Vec<DatabaseValue> = Vec::new();
-
-    // The query value is used in the ILIKE pattern
     let like_pattern = format!("%{query}%");
-    frags.push(format!("city ILIKE ${idx}"));
-    db_params.push(DatabaseValue::String(like_pattern));
-    idx += 1;
-
-    if let Some(ref state) = params.state {
-        frags.push(format!("state = ${idx}"));
-        db_params.push(DatabaseValue::String(state.to_uppercase()));
-        idx += 1;
-    }
-
-    let _ = idx;
-    let where_clause = frags.join(" AND ");
-
-    // Use a CASE expression to sort by match quality
     let exact_pattern = query.to_string();
     let prefix_pattern = format!("{query}%");
-    db_params.push(DatabaseValue::String(exact_pattern));
-    db_params.push(DatabaseValue::String(prefix_pattern));
 
-    let exact_idx = idx;
-    let prefix_idx = idx + 1;
+    // Build params in SQL text order:
+    // CASE (exact_pattern, prefix_pattern) then WHERE (like_pattern, [state])
+    let mut bind_params: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
+    bind_params.push(Box::new(exact_pattern));
+    bind_params.push(Box::new(prefix_pattern));
+    bind_params.push(Box::new(like_pattern));
+
+    let state_filter = if let Some(ref state) = params.state {
+        bind_params.push(Box::new(state.to_uppercase()));
+        "AND state = ?"
+    } else {
+        ""
+    };
 
     let sql = format!(
         "SELECT city, state, COUNT(*) as cnt,
                 CASE
-                    WHEN city ILIKE ${exact_idx} THEN 0
-                    WHEN city ILIKE ${prefix_idx} THEN 1
+                    WHEN city ILIKE ? THEN 0
+                    WHEN city ILIKE ? THEN 1
                     ELSE 2
                 END as match_rank
-         FROM crime_incidents
-         WHERE city IS NOT NULL AND city != '' AND {where_clause}
+         FROM incidents
+         WHERE city IS NOT NULL AND city != '' AND city ILIKE ? {state_filter}
          GROUP BY city, state
          ORDER BY match_rank, cnt DESC
          LIMIT 10"
     );
 
-    let rows = db.query_raw_params(&sql, &db_params).await?;
+    let refs: Vec<&dyn duckdb::ToSql> = bind_params.iter().map(AsRef::as_ref).collect();
+    let mut stmt = db.prepare(&sql)?;
+    let rows = stmt.query_map(refs.as_slice(), |row| {
+        let city: String = row.get(0)?;
+        let state: String = row.get(1)?;
+        let cnt: i64 = row.get(2)?;
+        Ok((city, state, cnt))
+    })?;
 
     let matches: Vec<CityInfo> = rows
-        .iter()
-        .map(|row| {
-            let city: String = row.to_value("city").unwrap_or_default();
-            let state: String = row.to_value("state").unwrap_or_default();
-            let cnt: i64 = row.to_value("cnt").unwrap_or(0);
-            CityInfo {
-                city,
-                state,
-                #[allow(clippy::cast_sign_loss)]
-                incident_count: Some(cnt as u64),
-            }
+        .filter_map(Result::ok)
+        .map(|(city, state, cnt)| CityInfo {
+            city,
+            state,
+            #[allow(clippy::cast_sign_loss)]
+            incident_count: Some(cnt as u64),
         })
         .collect();
 
@@ -993,15 +1011,14 @@ pub async fn search_locations(
         format!("Found {} location(s) matching \"{query}\"", matches.len())
     };
 
-    // Also search census_places for matching incorporated cities, towns, CDPs
-    let mut place_params: Vec<DatabaseValue> = Vec::new();
+    // Also search census_places for matching places
     let place_like = format!("%{query}%");
-    place_params.push(DatabaseValue::String(place_like));
+    let mut place_params: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
+    place_params.push(Box::new(place_like));
 
-    #[allow(clippy::option_if_let_else)]
     let place_state_filter = if let Some(ref state) = params.state {
-        place_params.push(DatabaseValue::String(state.to_uppercase()));
-        "AND state_abbr = $2"
+        place_params.push(Box::new(state.to_uppercase()));
+        "AND state_abbr = ?"
     } else {
         ""
     };
@@ -1009,34 +1026,33 @@ pub async fn search_locations(
     let place_sql = format!(
         "SELECT geoid, name, full_name, state_abbr, place_type, population, land_area_sq_mi
          FROM census_places
-         WHERE name ILIKE $1 {place_state_filter}
+         WHERE name ILIKE ? {place_state_filter}
          ORDER BY population DESC NULLS LAST
          LIMIT 10"
     );
 
-    let place_rows = db.query_raw_params(&place_sql, &place_params).await?;
-
-    let places: Vec<PlaceInfo> = place_rows
-        .iter()
-        .map(|row| {
-            let geoid: String = row.to_value("geoid").unwrap_or_default();
-            let name: String = row.to_value("name").unwrap_or_default();
-            let full_name: String = row.to_value("full_name").unwrap_or_default();
-            let state: String = row.to_value("state_abbr").unwrap_or_default();
-            let place_type: String = row.to_value("place_type").unwrap_or_default();
-            let population: Option<i32> = row.to_value("population").unwrap_or(None);
-            let land_area_sq_mi: Option<f64> = row.to_value("land_area_sq_mi").unwrap_or(None);
-            PlaceInfo {
-                geoid,
-                name,
-                full_name,
-                state,
-                place_type,
-                population: population.map(i64::from),
-                land_area_sq_mi,
-            }
+    let place_refs: Vec<&dyn duckdb::ToSql> = place_params.iter().map(AsRef::as_ref).collect();
+    let mut place_stmt = db.prepare(&place_sql)?;
+    let place_rows = place_stmt.query_map(place_refs.as_slice(), |row| {
+        let geoid: String = row.get(0)?;
+        let name: String = row.get(1)?;
+        let full_name: String = row.get(2)?;
+        let state: String = row.get::<_, Option<String>>(3)?.unwrap_or_default();
+        let place_type: String = row.get::<_, Option<String>>(4)?.unwrap_or_default();
+        let population: Option<i32> = row.get(5)?;
+        let land_area_sq_mi: Option<f64> = row.get(6)?;
+        Ok(PlaceInfo {
+            geoid,
+            name,
+            full_name,
+            state,
+            place_type,
+            population: population.map(i64::from),
+            land_area_sq_mi,
         })
-        .collect();
+    })?;
+
+    let places: Vec<PlaceInfo> = place_rows.filter_map(Result::ok).collect();
 
     let full_description = if places.is_empty() {
         description

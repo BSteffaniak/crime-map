@@ -5,8 +5,9 @@
 //! Analytical query engine for AI agent tool execution.
 //!
 //! Each public function corresponds to a tool that the AI agent can invoke.
-//! Functions accept structured parameter types, execute optimized `PostGIS`
-//! queries, and return typed results that the agent feeds back to the LLM.
+//! Functions accept structured parameter types, execute optimized `DuckDB`
+//! queries against the pre-generated `analytics.duckdb` database, and return
+//! typed results that the agent feeds back to the LLM.
 
 pub mod tools;
 
@@ -17,7 +18,7 @@ use thiserror::Error;
 pub enum AnalyticsError {
     /// Database operation failed.
     #[error("Database error: {0}")]
-    Database(#[from] switchy_database::DatabaseError),
+    Database(#[from] duckdb::Error),
 
     /// Data conversion error.
     #[error("Conversion error: {message}")]

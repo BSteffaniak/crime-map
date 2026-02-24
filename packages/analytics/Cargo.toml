@@ -11,8 +11,7 @@ version = "0.1.0"
 crime_map_analytics_models = { workspace = true }
 crime_map_geography_models = { workspace = true }
 
-switchy_database = { workspace = true, features = ["postgres-raw"] }
-moosicbox_json_utils = { workspace = true, features = ["database"] }
+duckdb = { workspace = true }
 
 chrono = { workspace = true }
 log = { workspace = true }

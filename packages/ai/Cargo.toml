@@ -12,7 +12,7 @@ crime_map_analytics_models = { workspace = true }
 crime_map_analytics = { workspace = true }
 crime_map_geography_models = { workspace = true }
 
-switchy_database = { workspace = true, features = ["postgres-raw"] }
+duckdb = { workspace = true }
 
 async-trait = { workspace = true }
 chrono = { workspace = true }

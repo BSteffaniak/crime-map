@@ -417,7 +417,7 @@ pub struct HexbinEntry {
 }
 
 /// A data source as returned by the `GET /api/sources` endpoint.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiSource {
     /// Database primary key.

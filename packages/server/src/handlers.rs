@@ -5,14 +5,12 @@ use std::sync::LazyLock;
 
 use actix_web::{HttpResponse, web};
 use crime_map_crime_models::{CrimeCategory, CrimeSubcategory};
-use crime_map_database::queries;
-use crime_map_database_models::{BoundingBox, IncidentQuery};
+use crime_map_database_models::BoundingBox;
 use crime_map_server_models::{
-    ApiCategoryNode, ApiHealth, ApiIncident, ApiSource, ApiSubcategoryNode,
-    BoundaryCountsQueryParams, BoundaryCountsResponse, BoundarySearchParams, BoundarySearchResult,
-    ClusterEntry, ClusterQueryParams, CountFilterParams, HexbinEntry, HexbinQueryParams,
-    IncidentQueryParams, SidebarIncident, SidebarQueryParams, SidebarResponse,
-    SourceCountsQueryParams,
+    ApiCategoryNode, ApiHealth, ApiIncident, ApiSubcategoryNode, BoundaryCountsQueryParams,
+    BoundaryCountsResponse, BoundarySearchParams, BoundarySearchResult, ClusterEntry,
+    ClusterQueryParams, CountFilterParams, HexbinEntry, HexbinQueryParams, IncidentQueryParams,
+    SidebarIncident, SidebarQueryParams, SidebarResponse, SourceCountsQueryParams,
 };
 use moosicbox_json_utils::database::ToValue as _;
 use serde::Deserialize;
@@ -26,7 +24,7 @@ pub async fn health(state: web::Data<AppState>) -> HttpResponse {
         healthy: true,
         version: env!("CARGO_PKG_VERSION").to_string(),
         data_ready: state.data.get().is_some(),
-        database_connected: state.db.is_some(),
+        database_connected: false,
     })
 }
 
@@ -58,56 +56,184 @@ pub async fn categories() -> HttpResponse {
 
 /// `GET /api/incidents`
 ///
-/// Queries incidents with bounding box, time range, and category filters.
-/// Returns `503 Service Unavailable` when `PostGIS` is not configured.
+/// Queries incidents with bounding box, time range, and category filters
+/// from the pre-generated `SQLite` sidebar database.
+/// Returns `503 Service Unavailable` when data files are not yet loaded.
+#[allow(clippy::too_many_lines)]
 pub async fn incidents(
     state: web::Data<AppState>,
     params: web::Query<IncidentQueryParams>,
 ) -> HttpResponse {
-    let Some(ref db) = state.db else {
+    let Some(data) = state.data.get() else {
         return HttpResponse::ServiceUnavailable().json(serde_json::json!({
-            "error": "Database not configured (running in serverless mode)"
+            "error": "Data files are still loading. Please try again shortly."
         }));
     };
 
     let bbox = params.bbox.as_deref().and_then(parse_bbox);
+    let limit = params.limit.unwrap_or(100);
+    let offset = params.offset.unwrap_or(0);
 
-    let categories: Vec<CrimeCategory> = params
-        .categories
-        .as_deref()
-        .map(|s| s.split(',').filter_map(|c| c.trim().parse().ok()).collect())
-        .unwrap_or_default();
+    let mut conditions: Vec<String> = Vec::new();
+    let mut feature_params: Vec<DatabaseValue> = Vec::new();
+    let mut feat_idx: usize = 1;
 
-    let subcategories: Vec<CrimeSubcategory> = params
-        .subcategories
-        .as_deref()
-        .map(|s| s.split(',').filter_map(|c| c.trim().parse().ok()).collect())
-        .unwrap_or_default();
+    if let Some(ref b) = bbox {
+        conditions.push(format!(
+            "longitude >= ${feat_idx} AND longitude <= ${} AND latitude >= ${} AND latitude <= ${}",
+            feat_idx + 1,
+            feat_idx + 2,
+            feat_idx + 3
+        ));
+        feature_params.push(DatabaseValue::Real64(b.west));
+        feature_params.push(DatabaseValue::Real64(b.east));
+        feature_params.push(DatabaseValue::Real64(b.south));
+        feature_params.push(DatabaseValue::Real64(b.north));
+        feat_idx += 4;
+    }
 
-    let severity_min = params
-        .severity_min
-        .and_then(|v| crime_map_crime_models::CrimeSeverity::from_value(v).ok());
+    if let Some(ref from) = params.from {
+        let from_str = from.format("%Y-%m-%d %H:%M:%S").to_string();
+        conditions.push(format!("occurred_at >= ${feat_idx}"));
+        feature_params.push(DatabaseValue::String(from_str));
+        feat_idx += 1;
+    }
 
-    let query = IncidentQuery {
-        bbox,
-        from: params.from,
-        to: params.to,
-        categories,
-        subcategories,
-        severity_min,
-        source_ids: Vec::new(),
-        arrest_made: None,
-        limit: params.limit.unwrap_or(100),
-        offset: params.offset.unwrap_or(0),
+    if let Some(ref to) = params.to {
+        let to_str = to.format("%Y-%m-%d %H:%M:%S").to_string();
+        conditions.push(format!("occurred_at <= ${feat_idx}"));
+        feature_params.push(DatabaseValue::String(to_str));
+        feat_idx += 1;
+    }
+
+    // Category filter
+    if let Some(ref cats) = params.categories {
+        let items: Vec<&str> = cats
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !items.is_empty() {
+            let placeholders: Vec<String> = items
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("${}", feat_idx + i))
+                .collect();
+            conditions.push(format!("category IN ({})", placeholders.join(", ")));
+            for item in &items {
+                feature_params.push(DatabaseValue::String((*item).to_string()));
+            }
+            feat_idx += items.len();
+        }
+    }
+
+    // Subcategory filter
+    if let Some(ref subs) = params.subcategories {
+        let items: Vec<&str> = subs
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !items.is_empty() {
+            let placeholders: Vec<String> = items
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("${}", feat_idx + i))
+                .collect();
+            conditions.push(format!("subcategory IN ({})", placeholders.join(", ")));
+            for item in &items {
+                feature_params.push(DatabaseValue::String((*item).to_string()));
+            }
+            feat_idx += items.len();
+        }
+    }
+
+    // Severity filter
+    if let Some(sev) = params.severity_min
+        && sev > 1
+    {
+        conditions.push(format!("severity >= ${feat_idx}"));
+        feature_params.push(DatabaseValue::Int32(i32::from(sev)));
+        feat_idx += 1;
+    }
+
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
     };
 
-    match queries::query_incidents(db.as_ref(), &query).await {
+    let query = format!(
+        "SELECT id, subcategory, category, severity,
+                longitude, latitude, occurred_at, description, block_address,
+                city, state, arrest_made, location_type
+         FROM incidents{where_clause}
+         ORDER BY occurred_at DESC
+         LIMIT ${feat_idx} OFFSET ${}",
+        feat_idx + 1
+    );
+    feature_params.push(DatabaseValue::UInt32(limit));
+    feature_params.push(DatabaseValue::UInt32(offset));
+
+    let sidebar_db = data.sidebar_db.as_ref();
+
+    match sidebar_db.query_raw_params(&query, &feature_params).await {
         Ok(rows) => {
-            let api_incidents: Vec<ApiIncident> = rows.into_iter().map(ApiIncident::from).collect();
+            let api_incidents: Vec<ApiIncident> = rows
+                .iter()
+                .map(|row| {
+                    let category_str: String = row.to_value("category").unwrap_or_default();
+                    let subcategory_str: String = row.to_value("subcategory").unwrap_or_default();
+                    let severity_val: i32 = row.to_value("severity").unwrap_or(1);
+                    let arrest_int: Option<i32> = row.to_value("arrest_made").unwrap_or(None);
+
+                    let category = category_str
+                        .parse::<CrimeCategory>()
+                        .unwrap_or(CrimeCategory::Other);
+                    let subcategory = subcategory_str
+                        .parse::<CrimeSubcategory>()
+                        .unwrap_or(CrimeSubcategory::Unknown);
+
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let severity =
+                        crime_map_crime_models::CrimeSeverity::from_value(severity_val as u8)
+                            .unwrap_or(crime_map_crime_models::CrimeSeverity::Minimal);
+
+                    let occurred_at_str: Option<String> =
+                        row.to_value("occurred_at").unwrap_or(None);
+                    let occurred_at = occurred_at_str.and_then(|s| {
+                        chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S")
+                            .ok()
+                            .map(|naive| {
+                                chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+                                    naive,
+                                    chrono::Utc,
+                                )
+                            })
+                    });
+
+                    ApiIncident {
+                        id: row.to_value("id").unwrap_or(0),
+                        category,
+                        subcategory,
+                        severity,
+                        severity_value: severity.value(),
+                        longitude: row.to_value("longitude").unwrap_or(0.0),
+                        latitude: row.to_value("latitude").unwrap_or(0.0),
+                        occurred_at,
+                        description: row.to_value("description").unwrap_or(None),
+                        block_address: row.to_value("block_address").unwrap_or(None),
+                        city: row.to_value("city").unwrap_or_default(),
+                        state: row.to_value("state").unwrap_or_default(),
+                        arrest_made: arrest_int.map(|v| v != 0),
+                        location_type: row.to_value("location_type").unwrap_or(None),
+                    }
+                })
+                .collect();
             HttpResponse::Ok().json(api_incidents)
         }
         Err(e) => {
-            log::error!("Failed to query incidents: {e}");
+            log::error!("Failed to query incidents from SQLite: {e}");
             HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "Failed to query incidents"
             }))
@@ -118,39 +244,9 @@ pub async fn incidents(
 /// `GET /api/sources`
 ///
 /// Lists all configured data sources and their sync status.
-/// Returns `503 Service Unavailable` when `PostGIS` is not configured.
+/// Returns source metadata from the pre-generated `metadata.json` file.
 pub async fn sources(state: web::Data<AppState>) -> HttpResponse {
-    let Some(ref db) = state.db else {
-        return HttpResponse::ServiceUnavailable().json(serde_json::json!({
-            "error": "Database not configured (running in serverless mode)"
-        }));
-    };
-
-    match db
-        .query_raw_params("SELECT * FROM crime_sources ORDER BY name", &[])
-        .await
-    {
-        Ok(rows) => {
-            let sources: Vec<ApiSource> = rows
-                .iter()
-                .map(|row| ApiSource {
-                    id: row.to_value("id").unwrap_or(0),
-                    name: row.to_value("name").unwrap_or_default(),
-                    source_type: row.to_value("source_type").unwrap_or_default(),
-                    record_count: row.to_value("record_count").unwrap_or(0),
-                    coverage_area: row.to_value("coverage_area").unwrap_or_default(),
-                    portal_url: row.to_value("portal_url").unwrap_or(None),
-                })
-                .collect();
-            HttpResponse::Ok().json(sources)
-        }
-        Err(e) => {
-            log::error!("Failed to query sources: {e}");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to query sources"
-            }))
-        }
-    }
+    HttpResponse::Ok().json(&state.sources)
 }
 
 /// `GET /api/sidebar`
@@ -1631,12 +1727,13 @@ pub async fn ai_ask(state: web::Data<AppState>, body: web::Json<AiAskRequest>) -
         }));
     }
 
-    // Check if PostGIS is available (required for AI tools)
-    let Some(ref db) = state.db else {
+    // Check if analytics DuckDB is available (required for AI tools)
+    let Some(data) = state.data.get() else {
         return HttpResponse::ServiceUnavailable().json(serde_json::json!({
-            "error": "AI analytics require a database connection (DATABASE_URL not configured)"
+            "error": "Data files are still loading. AI analytics require the analytics database."
         }));
     };
+    let analytics_db = data.analytics_db.clone();
 
     // Check if AI is configured
     let provider = match crime_map_ai::providers::create_provider_from_env().await {
@@ -1689,7 +1786,7 @@ pub async fn ai_ask(state: web::Data<AppState>, body: web::Json<AiAskRequest>) -
         }
     }
 
-    let db = db.clone();
+    let db = analytics_db;
     let context = state.ai_context.clone();
     let conversations_db = state.conversations_db.clone();
     let conv_id = conversation_id.clone();
@@ -1709,7 +1806,7 @@ pub async fn ai_ask(state: web::Data<AppState>, body: web::Json<AiAskRequest>) -
             safety_timeout,
             crime_map_ai::agent::run_agent(
                 provider.as_ref(),
-                db.as_ref(),
+                db,
                 &context,
                 &question,
                 prior_messages,

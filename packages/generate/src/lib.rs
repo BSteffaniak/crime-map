@@ -63,6 +63,9 @@ pub const OUTPUT_BOUNDARIES_PMTILES: &str = "boundaries_pmtiles";
 /// Output name constant for the boundaries search `SQLite` database.
 pub const OUTPUT_BOUNDARIES_DB: &str = "boundaries_db";
 
+/// Output name constant for the analytics `DuckDB` database.
+pub const OUTPUT_ANALYTICS_DB: &str = "analytics_duckdb";
+
 /// Per-source fingerprint capturing the data state at generation time.
 ///
 /// Since `crime_incidents` is insert-only (`ON CONFLICT DO NOTHING`),
@@ -220,7 +223,8 @@ pub async fn run_with_cache(
     let needs_spatial = needs.get(OUTPUT_INCIDENTS_DB) == Some(&true)
         || needs.get(OUTPUT_COUNT_DB) == Some(&true)
         || needs.get(OUTPUT_H3_DB) == Some(&true)
-        || needs.get(OUTPUT_INCIDENTS_PMTILES) == Some(&true);
+        || needs.get(OUTPUT_INCIDENTS_PMTILES) == Some(&true)
+        || needs.get(OUTPUT_ANALYTICS_DB) == Some(&true);
 
     let spatial_index = if needs_spatial {
         progress.set_message("Loading spatial index (tracts + places)...".to_string());
@@ -326,6 +330,23 @@ pub async fn run_with_cache(
         progress.set_position(0);
         generate_boundaries_db(db, dir).await?;
         record_output(manifest, OUTPUT_BOUNDARIES_DB);
+        save_manifest(dir, manifest)?;
+    }
+
+    if needs.get(OUTPUT_ANALYTICS_DB) == Some(&true) {
+        progress.set_message("Generating analytics DB...".to_string());
+        progress.set_total(total_records);
+        progress.set_position(0);
+        generate_analytics_db(
+            db,
+            args,
+            source_ids,
+            dir,
+            spatial_index.as_ref().expect("spatial index required"),
+            &progress,
+        )
+        .await?;
+        record_output(manifest, OUTPUT_ANALYTICS_DB);
         save_manifest(dir, manifest)?;
     }
 
@@ -517,6 +538,7 @@ fn output_file_path(dir: &Path, output_name: &str) -> PathBuf {
         OUTPUT_METADATA => dir.join("metadata.json"),
         OUTPUT_BOUNDARIES_PMTILES => dir.join("boundaries.pmtiles"),
         OUTPUT_BOUNDARIES_DB => dir.join("boundaries.db"),
+        OUTPUT_ANALYTICS_DB => dir.join("analytics.duckdb"),
         _ => dir.join(output_name),
     }
 }
@@ -1713,10 +1735,52 @@ async fn generate_metadata(
         .first()
         .and_then(|r| r.to_value("max_date").unwrap_or(None));
 
+    // Query source metadata for the /api/sources endpoint
+    log::info!("Querying source metadata...");
+    let sources_query = if source_ids.is_empty() {
+        "SELECT id, name, source_type, record_count, coverage_area, portal_url
+         FROM crime_sources ORDER BY name"
+            .to_string()
+    } else {
+        let ids: Vec<String> = source_ids
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        format!(
+            "SELECT id, name, source_type, record_count, coverage_area, portal_url
+             FROM crime_sources WHERE id IN ({}) ORDER BY name",
+            ids.join(", ")
+        )
+    };
+    let source_rows = db.query_raw_params(&sources_query, &[]).await?;
+
+    let sources: Vec<serde_json::Value> = source_rows
+        .iter()
+        .map(|row| {
+            let id: i32 = row.to_value("id").unwrap_or(0);
+            let name: String = row.to_value("name").unwrap_or_default();
+            let source_type: String = row.to_value("source_type").unwrap_or_default();
+            let record_count: i64 = row.to_value("record_count").unwrap_or(0);
+            let coverage_area: String = row.to_value("coverage_area").unwrap_or_default();
+            let portal_url: Option<String> = row.to_value("portal_url").unwrap_or(None);
+            serde_json::json!({
+                "id": id,
+                "name": name,
+                "sourceType": source_type,
+                "recordCount": record_count,
+                "coverageArea": coverage_area,
+                "portalUrl": portal_url,
+            })
+        })
+        .collect();
+
+    log::info!("Found {} sources", sources.len());
+
     let metadata = serde_json::json!({
         "cities": cities,
         "minDate": min_date,
         "maxDate": max_date,
+        "sources": sources,
     });
 
     let path = dir.join("metadata.json");
@@ -1726,6 +1790,375 @@ async fn generate_metadata(
     std::fs::rename(&tmp_path, &path)?;
 
     log::info!("Server metadata generated: {}", path.display());
+    Ok(())
+}
+
+// ============================================================
+// Analytics DuckDB generation
+// ============================================================
+
+/// Generates a `DuckDB` database for AI analytics tool queries at runtime.
+///
+/// Creates `analytics.duckdb` with:
+/// - `incidents` table: denormalized incident rows with pre-resolved
+///   city, state, category, subcategory text columns
+/// - `census_tracts` table: tract metadata for `rank_areas` tool
+/// - `neighborhoods` / `tract_neighborhoods` tables: neighborhood mapping
+/// - `census_places` table: place metadata for `search_locations` tool
+/// - `crime_categories` table: category ID-to-name mapping
+///
+/// This replaces all runtime `PostGIS` queries from the AI analytics tools.
+///
+/// # Errors
+///
+/// Returns an error if the `PostGIS` export or `DuckDB` creation fails.
+#[allow(clippy::too_many_lines)]
+async fn generate_analytics_db(
+    db: &dyn Database,
+    args: &GenerateArgs,
+    source_ids: &[i32],
+    dir: &Path,
+    geo_index: &crate::spatial::SpatialIndex,
+    progress: &Arc<dyn ProgressCallback>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db_path = dir.join("analytics.duckdb");
+
+    // Remove existing files
+    if db_path.exists() {
+        std::fs::remove_file(&db_path)?;
+    }
+    let wal_path = dir.join("analytics.duckdb.wal");
+    if wal_path.exists() {
+        std::fs::remove_file(&wal_path)?;
+    }
+
+    log::info!("Creating analytics DuckDB database...");
+
+    {
+        let duck = duckdb::Connection::open(&db_path)?;
+
+        // Create denormalized incidents table
+        duck.execute_batch(
+            "CREATE TABLE incidents (
+                occurred_at TIMESTAMP,
+                city VARCHAR,
+                state VARCHAR,
+                category VARCHAR NOT NULL,
+                subcategory VARCHAR NOT NULL,
+                severity INTEGER NOT NULL,
+                arrest_made BOOLEAN,
+                parent_category_id INTEGER,
+                category_id INTEGER,
+                source_id INTEGER NOT NULL,
+                census_tract_geoid VARCHAR,
+                census_place_geoid VARCHAR,
+                neighborhood_id VARCHAR
+            )",
+        )?;
+    }
+
+    // Populate incidents from PostGIS using keyset pagination
+    let mut last_id: i64 = 0;
+    let mut total_count: u64 = 0;
+    let mut remaining = args.limit;
+
+    loop {
+        #[allow(clippy::cast_sign_loss)]
+        let batch_limit = match remaining {
+            Some(0) => break,
+            Some(r) => i64::try_from(r.min(BATCH_SIZE as u64))?,
+            None => BATCH_SIZE,
+        };
+
+        let (query, params) = build_batch_query(last_id, batch_limit, source_ids);
+        let rows = db.query_raw_params(&query, &params).await?;
+
+        if rows.is_empty() {
+            break;
+        }
+
+        #[allow(clippy::cast_possible_truncation)]
+        let batch_len = rows.len() as u64;
+
+        {
+            let duck = duckdb::Connection::open(&db_path)?;
+            duck.execute_batch("BEGIN TRANSACTION")?;
+
+            let mut stmt = duck.prepare(
+                "INSERT INTO incidents (occurred_at, city, state, category, subcategory,
+                    severity, arrest_made, parent_category_id, category_id, source_id,
+                    census_tract_geoid, census_place_geoid, neighborhood_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )?;
+
+            for row in &rows {
+                let id: i64 = row.to_value("id").unwrap_or(0);
+                let source_id: i32 = row.to_value("source_id").unwrap_or(0);
+                let subcategory: String = row.to_value("subcategory").unwrap_or_default();
+                let category: String = row.to_value("category").unwrap_or_default();
+                let severity: i32 = row.to_value("severity").unwrap_or(1);
+                let lng: f64 = row.to_value("longitude").unwrap_or(0.0);
+                let lat: f64 = row.to_value("latitude").unwrap_or(0.0);
+                let arrest_made: Option<bool> = row.to_value("arrest_made").unwrap_or(None);
+                let city: String = row.to_value("city").unwrap_or_default();
+                let state: String = row.to_value("state").unwrap_or_default();
+
+                let occurred_at_naive: Option<chrono::NaiveDateTime> =
+                    row.to_value("occurred_at").unwrap_or(None);
+                let occurred_at_str: Option<String> =
+                    occurred_at_naive.map(|naive| naive.format("%Y-%m-%d %H:%M:%S").to_string());
+
+                // Look up category IDs from the PostGIS batch query results
+                // The batch query JOINs crime_categories, but we need the IDs for
+                // the parent_category_id subquery pattern. We'll store them for
+                // reference table lookups. For now, we can reconstruct from the
+                // category/subcategory names.
+                let parent_category_id: Option<i32> = None;
+                let category_id: Option<i32> = None;
+
+                // Boundary GEOIDs
+                let tract_geoid = geo_index.lookup_tract(lng, lat).map(str::to_owned);
+                let place_geoid = geo_index.lookup_place(lng, lat).map(str::to_owned);
+                let neighborhood_id = tract_geoid
+                    .as_deref()
+                    .and_then(|g| geo_index.lookup_neighborhood(g))
+                    .map(str::to_owned);
+
+                stmt.execute(duckdb::params![
+                    occurred_at_str,
+                    city,
+                    state,
+                    category,
+                    subcategory,
+                    severity,
+                    arrest_made,
+                    parent_category_id,
+                    category_id,
+                    source_id,
+                    tract_geoid,
+                    place_geoid,
+                    neighborhood_id,
+                ])?;
+
+                last_id = id;
+            }
+
+            duck.execute_batch("COMMIT")?;
+        }
+
+        total_count += batch_len;
+        if let Some(ref mut r) = remaining {
+            *r = r.saturating_sub(batch_len);
+        }
+
+        progress.inc(batch_len);
+        log::info!("Inserted {total_count} rows into analytics DB...");
+
+        #[allow(clippy::cast_sign_loss)]
+        let batch_limit_u64 = batch_limit as u64;
+        if batch_len < batch_limit_u64 {
+            break;
+        }
+    }
+
+    // Now populate reference tables
+    let duck = duckdb::Connection::open(&db_path)?;
+
+    // Create indexes on the incidents table
+    log::info!("Creating analytics indexes...");
+    duck.execute_batch(
+        "CREATE INDEX idx_analytics_city ON incidents (city);
+         CREATE INDEX idx_analytics_state ON incidents (state);
+         CREATE INDEX idx_analytics_occurred_at ON incidents (occurred_at);
+         CREATE INDEX idx_analytics_category ON incidents (category);
+         CREATE INDEX idx_analytics_place_geoid ON incidents (census_place_geoid);
+         CREATE INDEX idx_analytics_tract_geoid ON incidents (census_tract_geoid);
+         CREATE INDEX idx_analytics_neighborhood_id ON incidents (neighborhood_id)",
+    )?;
+
+    // ── Census tracts reference table ──
+    log::info!("Populating census_tracts reference table...");
+    let tract_rows = db
+        .query_raw_params(
+            "SELECT geoid, name, state_abbr, county_name, population, land_area_sq_mi
+             FROM census_tracts ORDER BY geoid",
+            &[],
+        )
+        .await?;
+
+    duck.execute_batch(
+        "CREATE TABLE census_tracts (
+            geoid VARCHAR PRIMARY KEY,
+            name VARCHAR,
+            state_abbr VARCHAR,
+            county_name VARCHAR,
+            population INTEGER,
+            land_area_sq_mi DOUBLE
+        )",
+    )?;
+
+    {
+        let mut stmt = duck.prepare(
+            "INSERT INTO census_tracts (geoid, name, state_abbr, county_name, population, land_area_sq_mi)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )?;
+
+        for row in &tract_rows {
+            let geoid: String = row.to_value("geoid").unwrap_or_default();
+            let name: String = row.to_value("name").unwrap_or_default();
+            let state_abbr: Option<String> = row.to_value("state_abbr").unwrap_or(None);
+            let county_name: Option<String> = row.to_value("county_name").unwrap_or(None);
+            let population: Option<i32> = row.to_value("population").unwrap_or(None);
+            let land_area: Option<f64> = row.to_value("land_area_sq_mi").unwrap_or(None);
+            stmt.execute(duckdb::params![
+                geoid,
+                name,
+                state_abbr,
+                county_name,
+                population,
+                land_area
+            ])?;
+        }
+    }
+    log::info!("Inserted {} census tracts", tract_rows.len());
+
+    // ── Neighborhoods reference table ──
+    log::info!("Populating neighborhoods reference table...");
+    let nbhd_rows = db
+        .query_raw_params(
+            "SELECT id, name, city, state FROM neighborhoods ORDER BY id",
+            &[],
+        )
+        .await?;
+
+    duck.execute_batch(
+        "CREATE TABLE neighborhoods (
+            id VARCHAR PRIMARY KEY,
+            name VARCHAR NOT NULL
+        )",
+    )?;
+
+    {
+        let mut stmt = duck.prepare("INSERT INTO neighborhoods (id, name) VALUES (?, ?)")?;
+
+        for row in &nbhd_rows {
+            let id: i32 = row.to_value("id").unwrap_or(0);
+            let name: String = row.to_value("name").unwrap_or_default();
+            let nbhd_id = format!("nbhd-{id}");
+            stmt.execute(duckdb::params![nbhd_id, name])?;
+        }
+    }
+    log::info!("Inserted {} neighborhoods", nbhd_rows.len());
+
+    // ── Tract-neighborhood mapping table ──
+    log::info!("Populating tract_neighborhoods reference table...");
+    let tn_rows = db
+        .query_raw_params(
+            "SELECT geoid, neighborhood_id FROM tract_neighborhoods ORDER BY geoid",
+            &[],
+        )
+        .await?;
+
+    duck.execute_batch(
+        "CREATE TABLE tract_neighborhoods (
+            geoid VARCHAR NOT NULL,
+            neighborhood_id VARCHAR NOT NULL
+        )",
+    )?;
+
+    {
+        let mut stmt =
+            duck.prepare("INSERT INTO tract_neighborhoods (geoid, neighborhood_id) VALUES (?, ?)")?;
+
+        for row in &tn_rows {
+            let geoid: String = row.to_value("geoid").unwrap_or_default();
+            let nbhd_id: i32 = row.to_value("neighborhood_id").unwrap_or(0);
+            let nbhd_id_str = format!("nbhd-{nbhd_id}");
+            stmt.execute(duckdb::params![geoid, nbhd_id_str])?;
+        }
+    }
+    log::info!("Inserted {} tract-neighborhood mappings", tn_rows.len());
+
+    // ── Census places reference table ──
+    log::info!("Populating census_places reference table...");
+    let place_rows = db
+        .query_raw_params(
+            "SELECT geoid, name, full_name, state_abbr, place_type, population, land_area_sq_mi
+             FROM census_places ORDER BY geoid",
+            &[],
+        )
+        .await?;
+
+    duck.execute_batch(
+        "CREATE TABLE census_places (
+            geoid VARCHAR PRIMARY KEY,
+            name VARCHAR,
+            full_name VARCHAR,
+            state_abbr VARCHAR,
+            place_type VARCHAR,
+            population INTEGER,
+            land_area_sq_mi DOUBLE
+        )",
+    )?;
+
+    {
+        let mut stmt = duck.prepare(
+            "INSERT INTO census_places (geoid, name, full_name, state_abbr, place_type, population, land_area_sq_mi)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )?;
+
+        for row in &place_rows {
+            let geoid: String = row.to_value("geoid").unwrap_or_default();
+            let name: String = row.to_value("name").unwrap_or_default();
+            let full_name: String = row.to_value("full_name").unwrap_or_default();
+            let state_abbr: Option<String> = row.to_value("state_abbr").unwrap_or(None);
+            let place_type: String = row.to_value("place_type").unwrap_or_default();
+            let population: Option<i32> = row.to_value("population").unwrap_or(None);
+            let land_area: Option<f64> = row.to_value("land_area_sq_mi").unwrap_or(None);
+            stmt.execute(duckdb::params![
+                geoid, name, full_name, state_abbr, place_type, population, land_area
+            ])?;
+        }
+    }
+    log::info!("Inserted {} census places", place_rows.len());
+
+    // ── Crime categories reference table ──
+    log::info!("Populating crime_categories reference table...");
+    let cat_rows = db
+        .query_raw_params(
+            "SELECT id, name, parent_id, severity FROM crime_categories ORDER BY id",
+            &[],
+        )
+        .await?;
+
+    duck.execute_batch(
+        "CREATE TABLE crime_categories (
+            id INTEGER PRIMARY KEY,
+            name VARCHAR NOT NULL,
+            parent_id INTEGER,
+            severity INTEGER
+        )",
+    )?;
+
+    {
+        let mut stmt = duck.prepare(
+            "INSERT INTO crime_categories (id, name, parent_id, severity) VALUES (?, ?, ?, ?)",
+        )?;
+
+        for row in &cat_rows {
+            let id: i32 = row.to_value("id").unwrap_or(0);
+            let name: String = row.to_value("name").unwrap_or_default();
+            let parent_id: Option<i32> = row.to_value("parent_id").unwrap_or(None);
+            let severity: Option<i32> = row.to_value("severity").unwrap_or(None);
+            stmt.execute(duckdb::params![id, name, parent_id, severity])?;
+        }
+    }
+    log::info!("Inserted {} crime categories", cat_rows.len());
+
+    log::info!(
+        "Analytics DuckDB database generated: {} ({total_count} incident rows + reference tables)",
+        db_path.display()
+    );
     Ok(())
 }
 

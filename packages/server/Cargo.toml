@@ -18,16 +18,11 @@ path = "src/main.rs"
 [dependencies]
 crime_map_crime_models = { workspace = true }
 crime_map_database_models = { workspace = true }
-crime_map_database = { workspace = true }
 crime_map_server_models = { workspace = true }
-crime_map_geography = { workspace = true }
 crime_map_ai = { workspace = true }
 crime_map_conversations = { workspace = true }
 moosicbox_json_utils = { workspace = true, features = ["database"] }
-switchy_database = { workspace = true, features = [
-  "postgres-raw",
-  "sqlite-rusqlite",
-] }
+switchy_database = { workspace = true, features = ["sqlite-rusqlite"] }
 switchy_database_connection = { workspace = true, features = [
   "sqlite-rusqlite",
 ] }
@@ -48,6 +43,7 @@ serde = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["full"] }
 uuid = { workspace = true }
+chrono = { workspace = true }
 
 [features]
 default = ["bedrock"]
@@ -57,8 +53,6 @@ fail-on-warnings = [
   "crime_map_ai/fail-on-warnings",
   "crime_map_conversations/fail-on-warnings",
   "crime_map_crime_models/fail-on-warnings",
-  "crime_map_database/fail-on-warnings",
   "crime_map_database_models/fail-on-warnings",
-  "crime_map_geography/fail-on-warnings",
   "crime_map_server_models/fail-on-warnings",
 ]

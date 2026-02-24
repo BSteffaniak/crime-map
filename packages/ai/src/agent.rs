@@ -16,6 +16,7 @@
 //!   termination with whatever findings the agent has so far.
 
 use std::fmt::Write;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::Datelike as _;
@@ -25,7 +26,6 @@ use crime_map_analytics_models::{
     ComparePeriodParams, CountIncidentsParams, ListCitiesParams, RankAreaParams,
     SearchLocationsParams, TopCrimeTypesParams, TrendParams, tool_definitions,
 };
-use switchy_database::Database;
 use tokio::sync::mpsc;
 
 use crate::providers::{ContentBlock, LlmProvider, Message, MessageContent, StopReason};
@@ -183,7 +183,7 @@ impl AgentBudget {
 #[allow(clippy::too_many_lines)]
 pub async fn run_agent(
     provider: &dyn LlmProvider,
-    db: &dyn Database,
+    db: Arc<Mutex<duckdb::Connection>>,
     context: &AgentContext,
     question: &str,
     prior_messages: Option<Vec<Message>>,
@@ -357,7 +357,7 @@ pub async fn run_agent(
                     // ── Per-tool timeout ───────────────────────────────
                     let result = tokio::time::timeout(
                         limits.per_tool_timeout,
-                        execute_tool(db, name.as_str(), input),
+                        execute_tool(Arc::clone(&db), name.as_str(), input),
                     )
                     .await
                     .unwrap_or_else(|_| {
@@ -569,51 +569,70 @@ fn extract_text(blocks: &[ContentBlock]) -> String {
 }
 
 /// Executes a single tool by name with the given parameters.
+///
+/// Runs the `DuckDB` query on a blocking thread to avoid blocking the
+/// async runtime, since `duckdb::Connection` is synchronous.
+#[allow(clippy::significant_drop_tightening)]
 async fn execute_tool(
-    db: &dyn Database,
+    db: Arc<Mutex<duckdb::Connection>>,
     name: &str,
     input: &serde_json::Value,
 ) -> Result<serde_json::Value, AiError> {
-    match name {
-        "count_incidents" => {
-            let params: CountIncidentsParams = serde_json::from_value(input.clone())?;
-            let result = tools::count_incidents(db, &params).await?;
-            Ok(serde_json::to_value(result).unwrap_or_default())
+    let name = name.to_string();
+    let input = input.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = db.lock().map_err(|e| AiError::Provider {
+            message: format!("Failed to lock analytics DB: {e}"),
+        })?;
+
+        match name.as_str() {
+            "count_incidents" => {
+                let params: CountIncidentsParams = serde_json::from_value(input)?;
+                let result = tools::count_incidents(&conn, &params)?;
+                Ok(serde_json::to_value(result).unwrap_or_default())
+            }
+            "rank_areas" => {
+                let params: RankAreaParams = serde_json::from_value(input)?;
+                let result = tools::rank_areas(&conn, &params)?;
+                Ok(serde_json::to_value(result).unwrap_or_default())
+            }
+            "compare_periods" => {
+                let params: ComparePeriodParams = serde_json::from_value(input)?;
+                let result = tools::compare_periods(&conn, &params)?;
+                Ok(serde_json::to_value(result).unwrap_or_default())
+            }
+            "get_trend" => {
+                let params: TrendParams = serde_json::from_value(input)?;
+                let result = tools::get_trend(&conn, &params)?;
+                Ok(serde_json::to_value(result).unwrap_or_default())
+            }
+            "top_crime_types" => {
+                let params: TopCrimeTypesParams = serde_json::from_value(input)?;
+                let result = tools::top_crime_types(&conn, &params)?;
+                Ok(serde_json::to_value(result).unwrap_or_default())
+            }
+            "list_cities" => {
+                let params: ListCitiesParams = serde_json::from_value(input)?;
+                let result = tools::list_cities(&conn, &params)?;
+                Ok(serde_json::to_value(result).unwrap_or_default())
+            }
+            "search_locations" => {
+                let params: SearchLocationsParams = serde_json::from_value(input)?;
+                let result = tools::search_locations(&conn, &params)?;
+                Ok(serde_json::to_value(result).unwrap_or_default())
+            }
+            other => Err(AiError::Provider {
+                message: format!("Unknown tool: {other}"),
+            }),
         }
-        "rank_areas" => {
-            let params: RankAreaParams = serde_json::from_value(input.clone())?;
-            let result = tools::rank_areas(db, &params).await?;
-            Ok(serde_json::to_value(result).unwrap_or_default())
-        }
-        "compare_periods" => {
-            let params: ComparePeriodParams = serde_json::from_value(input.clone())?;
-            let result = tools::compare_periods(db, &params).await?;
-            Ok(serde_json::to_value(result).unwrap_or_default())
-        }
-        "get_trend" => {
-            let params: TrendParams = serde_json::from_value(input.clone())?;
-            let result = tools::get_trend(db, &params).await?;
-            Ok(serde_json::to_value(result).unwrap_or_default())
-        }
-        "top_crime_types" => {
-            let params: TopCrimeTypesParams = serde_json::from_value(input.clone())?;
-            let result = tools::top_crime_types(db, &params).await?;
-            Ok(serde_json::to_value(result).unwrap_or_default())
-        }
-        "list_cities" => {
-            let params: ListCitiesParams = serde_json::from_value(input.clone())?;
-            let result = tools::list_cities(db, &params).await?;
-            Ok(serde_json::to_value(result).unwrap_or_default())
-        }
-        "search_locations" => {
-            let params: SearchLocationsParams = serde_json::from_value(input.clone())?;
-            let result = tools::search_locations(db, &params).await?;
-            Ok(serde_json::to_value(result).unwrap_or_default())
-        }
-        other => Err(AiError::Provider {
-            message: format!("Unknown tool: {other}"),
-        }),
-    }
+    })
+    .await
+    .map_err(|e| AiError::Provider {
+        message: format!("Tool execution task failed: {e}"),
+    })??;
+
+    Ok(result)
 }
 
 /// Creates a brief human-readable summary of a tool result.

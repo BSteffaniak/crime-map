@@ -5,8 +5,12 @@
 //! Actix-Web API server for the crime map application.
 //!
 //! Serves the REST API for querying crime data and static tile files
-//! (`PMTiles`) for the `MapLibre` frontend. Sidebar queries are served
-//! from a pre-generated `SQLite` database with R-tree spatial indexing.
+//! (`PMTiles`) for the `MapLibre` frontend. All data is served from
+//! pre-generated files: sidebar queries from `SQLite` (`incidents.db`),
+//! fast counts from `DuckDB` (`counts.duckdb`), hexbin analytics from
+//! `DuckDB` (`h3.duckdb`), AI analytics from `DuckDB`
+//! (`analytics.duckdb`), and source metadata from `metadata.json`.
+//!
 //! AI-powered queries are served via SSE streaming from the `/api/ai/ask`
 //! endpoint. Conversation history is persisted in a dedicated `SQLite`
 //! database at `data/conversations.db`.
@@ -15,18 +19,16 @@
 //!
 //! The server starts immediately and serves the health endpoint even if
 //! the pre-generated data files (`incidents.db`, `counts.duckdb`,
-//! `h3.duckdb`) are not yet present. A background task polls for the
-//! files and initializes the data connections once they appear. Endpoints
-//! that depend on the data return `503 Service Unavailable` until the
-//! data is ready.
+//! `h3.duckdb`, `analytics.duckdb`) are not yet present. A background
+//! task polls for the files and initializes the data connections once they
+//! appear. Endpoints that depend on the data return `503 Service
+//! Unavailable` until the data is ready.
 //!
-//! ## Optional `PostGIS`
+//! ## No Runtime `PostgreSQL`
 //!
-//! If the `DATABASE_URL` environment variable is not set, the server boots
-//! without a `PostGIS` connection. Only the AI chat, `/api/incidents`, and
-//! `/api/sources` endpoints require `PostGIS` and will return `503` when
-//! it is absent. The AI agent context is loaded from a pre-generated
-//! `metadata.json` file instead.
+//! The server runs entirely from pre-generated files. No `PostGIS` or
+//! `PostgreSQL` connection is needed at runtime. All data is materialized
+//! during the `cargo generate all` step.
 
 mod handlers;
 pub mod interactive;
@@ -34,6 +36,7 @@ pub mod interactive;
 use actix_cors::Cors;
 use actix_files::Files;
 use actix_web::{App, HttpServer, middleware, web};
+use crime_map_server_models::ApiSource;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -100,13 +103,13 @@ pub struct DataState {
     pub count_db: Arc<Mutex<duckdb::Connection>>,
     /// Pool of read-only `DuckDB` connections for H3 hexbin queries.
     pub h3_pool: Arc<DuckDbPool>,
+    /// `DuckDB` connection for AI analytics tool queries.
+    /// Contains denormalized incident data and reference tables.
+    pub analytics_db: Arc<Mutex<duckdb::Connection>>,
 }
 
 /// Shared application state.
 pub struct AppState {
-    /// `PostGIS` database connection for primary queries.
-    /// `None` when `DATABASE_URL` is not set (serverless mode).
-    pub db: Option<Arc<dyn Database>>,
     /// Pre-generated data connections. Starts empty and gets populated
     /// by the background file watcher once all data files are present.
     pub data: Arc<OnceLock<DataState>>,
@@ -117,11 +120,18 @@ pub struct AppState {
     /// Pre-generated `SQLite` database for boundary name searches.
     /// `None` when `boundaries.db` is not present.
     pub boundaries_db: Option<Arc<dyn Database>>,
+    /// Pre-generated source metadata loaded from `metadata.json`.
+    pub sources: Vec<ApiSource>,
 }
 
 /// Required data files that must all be present before the server can
 /// serve map data.
-const REQUIRED_DATA_FILES: &[&str] = &["incidents.db", "counts.duckdb", "h3.duckdb"];
+const REQUIRED_DATA_FILES: &[&str] = &[
+    "incidents.db",
+    "counts.duckdb",
+    "h3.duckdb",
+    "analytics.duckdb",
+];
 
 /// Interval between file existence checks when data files are missing.
 const DATA_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
@@ -152,10 +162,21 @@ fn init_data_state(dir: &Path) -> Result<DataState, Box<dyn std::error::Error>> 
     let h3_path = dir.join("h3.duckdb");
     let h3_pool = DuckDbPool::new(&h3_path, 4);
 
+    log::info!("Opening analytics DuckDB database...");
+    let analytics_path = dir.join("analytics.duckdb");
+    let analytics_db = duckdb::Connection::open_with_flags(
+        &analytics_path,
+        duckdb::Config::default()
+            .access_mode(duckdb::AccessMode::ReadOnly)
+            .map_err(|e| format!("Failed to set DuckDB access mode: {e}"))?,
+    )
+    .map_err(|e| format!("Failed to open analytics DuckDB: {e}"))?;
+
     Ok(DataState {
         sidebar_db: Arc::from(sidebar_db),
         count_db: Arc::new(Mutex::new(count_db)),
         h3_pool: Arc::new(h3_pool),
+        analytics_db: Arc::new(Mutex::new(analytics_db)),
     })
 }
 
@@ -201,33 +222,49 @@ fn spawn_data_watcher(data_lock: Arc<OnceLock<DataState>>, data_dir: PathBuf) {
     });
 }
 
-/// Loads the AI agent context from a pre-generated `metadata.json` file.
+/// Pre-generated metadata loaded from `metadata.json`.
+///
+/// Contains the AI agent context and source metadata for the
+/// `/api/sources` endpoint.
+struct LoadedMetadata {
+    context: crime_map_ai::agent::AgentContext,
+    sources: Vec<ApiSource>,
+}
+
+/// Loads metadata from a pre-generated `metadata.json` file.
 ///
 /// The file is produced by `cargo generate all` and contains:
 /// - `cities`: array of `[city, state]` pairs
 /// - `minDate` / `maxDate`: dataset date range
+/// - `sources`: array of source metadata objects
 ///
 /// Falls back to empty defaults if the file is missing or malformed.
-fn load_metadata_context(dir: &Path) -> crime_map_ai::agent::AgentContext {
+fn load_metadata(dir: &Path) -> LoadedMetadata {
     let path = dir.join("metadata.json");
     let Ok(contents) = std::fs::read_to_string(&path) else {
         log::warn!(
             "No metadata.json found at {}; AI context will be empty",
             path.display()
         );
-        return crime_map_ai::agent::AgentContext {
-            available_cities: Vec::new(),
-            min_date: None,
-            max_date: None,
+        return LoadedMetadata {
+            context: crime_map_ai::agent::AgentContext {
+                available_cities: Vec::new(),
+                min_date: None,
+                max_date: None,
+            },
+            sources: Vec::new(),
         };
     };
 
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
         log::warn!("Failed to parse metadata.json; AI context will be empty");
-        return crime_map_ai::agent::AgentContext {
-            available_cities: Vec::new(),
-            min_date: None,
-            max_date: None,
+        return LoadedMetadata {
+            context: crime_map_ai::agent::AgentContext {
+                available_cities: Vec::new(),
+                min_date: None,
+                max_date: None,
+            },
+            sources: Vec::new(),
         };
     };
 
@@ -248,17 +285,30 @@ fn load_metadata_context(dir: &Path) -> crime_map_ai::agent::AgentContext {
     let min_date = value["minDate"].as_str().map(String::from);
     let max_date = value["maxDate"].as_str().map(String::from);
 
+    let sources: Vec<ApiSource> = value["sources"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+
     log::info!(
-        "Loaded metadata: {} cities, date range {:?} to {:?}",
+        "Loaded metadata: {} cities, {} sources, date range {:?} to {:?}",
         cities.len(),
+        sources.len(),
         min_date,
         max_date
     );
 
-    crime_map_ai::agent::AgentContext {
-        available_cities: cities,
-        min_date,
-        max_date,
+    LoadedMetadata {
+        context: crime_map_ai::agent::AgentContext {
+            available_cities: cities,
+            min_date,
+            max_date,
+        },
+        sources,
     }
 }
 
@@ -269,9 +319,9 @@ fn load_metadata_context(dir: &Path) -> crime_map_ai::agent::AgentContext {
 /// `/api/hexbins`, `/api/clusters`) become available once the
 /// pre-generated data files appear on the volume.
 ///
-/// If `DATABASE_URL` is set, connects to `PostGIS`, runs migrations, and
-/// enables all endpoints. If not set, boots in serverless mode where
-/// `PostGIS`-dependent endpoints return `503`.
+/// All data is served from pre-generated files (`SQLite`, `DuckDB`,
+/// `PMTiles`, `metadata.json`). No `PostGIS` connection is needed at
+/// runtime.
 ///
 /// # Errors
 ///
@@ -280,31 +330,12 @@ fn load_metadata_context(dir: &Path) -> crime_map_ai::agent::AgentContext {
 ///
 /// # Panics
 ///
-/// Panics if `DATABASE_URL` is set but the connection or migration fails,
-/// or if the conversations database cannot be opened.
+/// Panics if the conversations database cannot be opened.
 #[allow(clippy::future_not_send, clippy::too_many_lines)]
 pub async fn run_server() -> std::io::Result<()> {
     pretty_env_logger::init_custom_env("RUST_LOG");
 
     let data_dir = PathBuf::from("data/generated");
-
-    // Optionally connect to PostGIS
-    let db_conn: Option<Arc<dyn Database>> = if std::env::var("DATABASE_URL").is_ok() {
-        log::info!("Connecting to database...");
-        let conn = crime_map_database::db::connect_from_env()
-            .await
-            .expect("Failed to connect to database");
-
-        log::info!("Running migrations...");
-        crime_map_database::run_migrations(conn.as_ref())
-            .await
-            .expect("Failed to run migrations");
-
-        Some(Arc::from(conn))
-    } else {
-        log::info!("DATABASE_URL not set; running without PostGIS (serverless mode)");
-        None
-    };
 
     // Initialize data state lazily via OnceLock
     let data = Arc::new(OnceLock::new());
@@ -344,25 +375,9 @@ pub async fn run_server() -> std::io::Result<()> {
         spawn_data_watcher(Arc::clone(&data), data_dir.clone());
     }
 
-    // Build AI context from metadata.json or PostGIS (if available)
-    log::info!("Building AI context...");
-    let ai_context = if let Some(ref db) = db_conn {
-        // PostGIS available -- query live data (more up-to-date)
-        let available_cities = crime_map_geography::queries::get_available_cities(db.as_ref())
-            .await
-            .unwrap_or_default();
-        let (min_date, max_date) = crime_map_geography::queries::get_data_date_range(db.as_ref())
-            .await
-            .unwrap_or((None, None));
-        crime_map_ai::agent::AgentContext {
-            available_cities,
-            min_date,
-            max_date,
-        }
-    } else {
-        // No PostGIS -- load from pre-generated metadata
-        load_metadata_context(&data_dir)
-    };
+    // Load metadata from pre-generated file
+    log::info!("Loading metadata...");
+    let metadata = load_metadata(&data_dir);
 
     log::info!("Opening conversations database...");
     let conversations_db =
@@ -388,11 +403,11 @@ pub async fn run_server() -> std::io::Result<()> {
     };
 
     let state = web::Data::new(AppState {
-        db: db_conn,
         data,
-        ai_context: Arc::new(ai_context),
+        ai_context: Arc::new(metadata.context),
         conversations_db: Arc::from(conversations_db),
         boundaries_db,
+        sources: metadata.sources,
     });
 
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".to_string());
