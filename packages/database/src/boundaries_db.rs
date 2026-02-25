@@ -22,7 +22,7 @@ pub fn open(path: &Path) -> Result<Connection, DbError> {
 
     let conn = Connection::open(path)?;
 
-    conn.execute_batch("SET threads = 4; SET memory_limit = '512MB';")?;
+    conn.execute_batch("SET threads = 4; SET memory_limit = '4GB';")?;
 
     create_schema(&conn)?;
 
