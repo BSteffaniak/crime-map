@@ -19,16 +19,14 @@ path = "src/lib.rs"
 crime_map_database = { workspace = true }
 crime_map_geography_models = { workspace = true }
 crime_map_source = { workspace = true }
+crime_map_spatial = { workspace = true }
 
 clap = { workspace = true }
 chrono = { workspace = true }
 dialoguer = { workspace = true }
 duckdb = { workspace = true }
-geo = { workspace = true }
-geojson = { workspace = true }
 h3o = { workspace = true }
 log = { workspace = true }
-rstar = { workspace = true }
 pretty_env_logger = { workspace = true }
 switchy_database = { workspace = true, features = ["sqlite-rusqlite"] }
 switchy_database_connection = { workspace = true, features = [
@@ -40,9 +38,14 @@ tokio = { workspace = true, features = ["full"] }
 
 [features]
 default = []
-duckdb-bundled = ["duckdb/bundled", "crime_map_database/duckdb-bundled"]
+duckdb-bundled = [
+  "duckdb/bundled",
+  "crime_map_database/duckdb-bundled",
+  "crime_map_spatial/duckdb-bundled",
+]
 fail-on-warnings = [
   "crime_map_database/fail-on-warnings",
   "crime_map_geography_models/fail-on-warnings",
   "crime_map_source/fail-on-warnings",
+  "crime_map_spatial/fail-on-warnings",
 ]

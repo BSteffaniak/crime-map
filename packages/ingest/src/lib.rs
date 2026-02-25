@@ -77,6 +77,14 @@ pub struct GeocodeArgs {
     pub nominatim_only: bool,
 }
 
+/// Arguments for [`run_enrich`].
+pub struct EnrichArgs {
+    /// Source IDs to enrich. Empty means all sources with local `DuckDB` files.
+    pub source_ids: Vec<String>,
+    /// Force re-enrichment of all records (not just un-enriched ones).
+    pub force: bool,
+}
+
 /// Result of a [`run_sync`] call.
 pub struct SyncResult {
     /// Number of sources that synced successfully.
@@ -99,6 +107,14 @@ impl GeocodeResult {
     pub const fn total(&self) -> u64 {
         self.missing_geocoded + self.re_geocoded
     }
+}
+
+/// Result of a [`run_enrich`] call.
+pub struct EnrichResult {
+    /// Total incidents enriched across all sources.
+    pub enriched: u64,
+    /// Number of sources processed.
+    pub sources_processed: u64,
 }
 
 // ── High-level orchestration functions ───────────────────────────
@@ -243,6 +259,177 @@ pub async fn run_geocode(
     Ok(GeocodeResult {
         missing_geocoded,
         re_geocoded,
+    })
+}
+
+/// Batch size for spatial enrichment (rows per UPDATE round-trip).
+const ENRICH_BATCH_SIZE: i64 = 50_000;
+
+/// Enriches source `DuckDB` incidents with spatial attribution data.
+///
+/// For each source, queries un-enriched incidents (or all incidents if
+/// `args.force` is `true`), performs point-in-polygon lookups against
+/// the boundaries `SpatialIndex`, and writes the results
+/// (`census_tract_geoid`, `census_place_geoid`, `state_fips`,
+/// `county_geoid`, `neighborhood_id`) back to the source `DuckDB`.
+///
+/// Records that fall outside all known census tracts / places are still
+/// marked `enriched = TRUE` with `NULL` geo fields so they are not
+/// re-processed on subsequent runs.
+///
+/// # Errors
+///
+/// Returns an error if the boundaries database cannot be opened, the
+/// spatial index fails to load, or any source database operation fails.
+#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
+pub fn run_enrich(
+    args: &EnrichArgs,
+    progress: Option<Arc<dyn ProgressCallback>>,
+) -> Result<EnrichResult, Box<dyn std::error::Error>> {
+    use crime_map_spatial::SpatialIndex;
+
+    // Determine which source IDs to process
+    let target_ids: Vec<String> = if args.source_ids.is_empty() {
+        source_db::discover_source_ids()
+    } else {
+        args.source_ids.clone()
+    };
+
+    if target_ids.is_empty() {
+        log::info!("No source DuckDB files found to enrich");
+        return Ok(EnrichResult {
+            enriched: 0,
+            sources_processed: 0,
+        });
+    }
+
+    // Load spatial index from boundaries DB
+    log::info!("Loading spatial index from boundaries database...");
+    let boundaries_conn = crime_map_database::boundaries_db::open_default()?;
+    let geo_index = SpatialIndex::load(&boundaries_conn)?;
+    drop(boundaries_conn);
+
+    let mut total_enriched = 0u64;
+    let mut sources_processed = 0u64;
+
+    for sid in &target_ids {
+        let source_conn = match source_db::open_by_id(sid) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("Skipping source '{sid}': {e}");
+                continue;
+            }
+        };
+
+        let filter = if args.force {
+            "WHERE has_coordinates = TRUE \
+                AND longitude BETWEEN -180 AND 180 \
+                AND latitude BETWEEN -90 AND 90"
+        } else {
+            "WHERE has_coordinates = TRUE \
+                AND enriched = FALSE \
+                AND longitude BETWEEN -180 AND 180 \
+                AND latitude BETWEEN -90 AND 90"
+        };
+
+        // Count eligible rows for progress
+        let count_sql = format!("SELECT COUNT(*) FROM incidents {filter}");
+        let mut count_stmt = source_conn.prepare(&count_sql)?;
+        let eligible: i64 = count_stmt.query_row([], |row| row.get(0))?;
+
+        if eligible == 0 {
+            log::info!("{sid}: no un-enriched records, skipping");
+            continue;
+        }
+
+        #[allow(clippy::cast_sign_loss)]
+        {
+            log::info!("{sid}: enriching {eligible} record(s)");
+            if let Some(ref p) = progress {
+                p.set_total(eligible as u64);
+            }
+        }
+
+        // Keyset pagination using source_incident_id ordering
+        let query_sql = format!(
+            "SELECT source_incident_id, longitude, latitude \
+             FROM incidents {filter} \
+                AND source_incident_id > ? \
+             ORDER BY source_incident_id ASC \
+             LIMIT ?"
+        );
+
+        let mut last_id = String::new();
+        let mut source_enriched = 0u64;
+
+        loop {
+            let mut stmt = source_conn.prepare(&query_sql)?;
+            let mut rows = stmt.query(duckdb::params![&last_id, ENRICH_BATCH_SIZE])?;
+
+            let mut batch: Vec<source_db::AttributionUpdate> = Vec::new();
+            while let Some(row) = rows.next()? {
+                let incident_id: String = row.get(0)?;
+                let lng: f64 = row.get(1)?;
+                let lat: f64 = row.get(2)?;
+
+                let tract_geoid = geo_index.lookup_tract(lng, lat).map(str::to_owned);
+                let place_geoid = geo_index.lookup_place(lng, lat).map(str::to_owned);
+                let state_fips = tract_geoid
+                    .as_deref()
+                    .and_then(SpatialIndex::derive_state_fips)
+                    .map(str::to_owned);
+                let county_geoid = tract_geoid
+                    .as_deref()
+                    .and_then(SpatialIndex::derive_county_geoid)
+                    .map(str::to_owned);
+                let neighborhood_id = tract_geoid
+                    .as_deref()
+                    .and_then(|g| geo_index.lookup_neighborhood(g))
+                    .map(str::to_owned);
+
+                last_id.clone_from(&incident_id);
+
+                batch.push(source_db::AttributionUpdate {
+                    source_incident_id: incident_id,
+                    census_tract_geoid: tract_geoid,
+                    census_place_geoid: place_geoid,
+                    state_fips,
+                    county_geoid,
+                    neighborhood_id,
+                });
+            }
+
+            if batch.is_empty() {
+                break;
+            }
+
+            #[allow(clippy::cast_possible_truncation)]
+            let batch_len = batch.len() as u64;
+            source_db::batch_update_attribution(&source_conn, &batch)?;
+            source_enriched += batch_len;
+
+            if let Some(ref p) = progress {
+                p.inc(batch_len);
+            }
+
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            if (batch_len as i64) < ENRICH_BATCH_SIZE {
+                break;
+            }
+        }
+
+        log::info!("{sid}: enriched {source_enriched} record(s)");
+        total_enriched += source_enriched;
+        sources_processed += 1;
+    }
+
+    if let Some(ref p) = progress {
+        p.finish(format!("Enriched {total_enriched} record(s)"));
+    }
+
+    Ok(EnrichResult {
+        enriched: total_enriched,
+        sources_processed,
     })
 }
 

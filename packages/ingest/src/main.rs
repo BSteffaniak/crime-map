@@ -9,7 +9,9 @@ use std::time::Instant;
 use clap::{Parser, Subcommand};
 use crime_map_cli_utils::IndicatifProgress;
 use crime_map_database::source_db;
-use crime_map_ingest::{GeocodeArgs, SyncArgs, all_sources, enabled_sources, sync_source};
+use crime_map_ingest::{
+    EnrichArgs, GeocodeArgs, SyncArgs, all_sources, enabled_sources, sync_source,
+};
 use crime_map_source::source_def::SourceDefinition;
 
 #[derive(Parser)]
@@ -122,6 +124,21 @@ enum Commands {
         /// current batch. Progress is preserved in the `DuckDB` files.
         #[arg(long)]
         max_time: Option<u64>,
+    },
+    /// Enrich incidents with spatial attribution data (census tract,
+    /// place, county, state, neighborhood). Loads the boundaries spatial
+    /// index and performs point-in-polygon lookups for each un-enriched
+    /// incident. Results are stored in the source `DuckDB` so generation
+    /// does not need to repeat the spatial lookups.
+    Enrich {
+        /// Comma-separated source IDs to enrich. If not specified, enriches
+        /// all sources with local `DuckDB` files.
+        #[arg(long)]
+        sources: Option<String>,
+        /// Force re-enrichment of all records (not just un-enriched ones).
+        /// Use when boundaries have changed.
+        #[arg(long)]
+        force: bool,
     },
     /// Pull `DuckDB` files from Cloudflare R2 to the local `data/` directory
     Pull {
@@ -510,6 +527,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 result.total(),
                 result.missing_geocoded,
                 result.re_geocoded,
+                elapsed.as_secs_f64()
+            );
+        }
+        Commands::Enrich { sources, force } => {
+            let start = Instant::now();
+            let enrich_bar = IndicatifProgress::batch_bar(&multi, "Enriching");
+
+            let args = EnrichArgs {
+                source_ids: parse_source_csv(sources.as_deref()),
+                force,
+            };
+
+            let result = crime_map_ingest::run_enrich(&args, Some(enrich_bar.clone()))?;
+            enrich_bar.finish("Enrichment complete".to_string());
+
+            let elapsed = start.elapsed();
+            log::info!(
+                "Enrichment complete: {} incidents enriched across {} source(s) in {:.1}s",
+                result.enriched,
+                result.sources_processed,
                 elapsed.as_secs_f64()
             );
         }

@@ -1,0 +1,24 @@
+[package]
+authors = { workspace = true }
+description = "Shared spatial index for boundary attribution (R-tree point-in-polygon lookups)"
+edition = { workspace = true }
+license = { workspace = true }
+name = "crime_map_spatial"
+repository = { workspace = true }
+version = "0.1.0"
+
+[lib]
+name = "crime_map_spatial"
+path = "src/lib.rs"
+
+[dependencies]
+duckdb = { workspace = true }
+geo = { workspace = true }
+geojson = { workspace = true }
+log = { workspace = true }
+rstar = { workspace = true }
+
+[features]
+default = []
+duckdb-bundled = ["duckdb/bundled"]
+fail-on-warnings = []

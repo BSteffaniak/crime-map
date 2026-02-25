@@ -24,6 +24,7 @@ members = [
   "packages/geocoder",
   "packages/conversations",
   "packages/r2",
+  "packages/spatial",
   "packages/cli",
   "packages/cli_utils",
 ]
@@ -76,6 +77,7 @@ crime_map_geocoder = { default-features = false, path = "packages/geocoder" }
 crime_map_cli = { default-features = false, path = "packages/cli" }
 crime_map_cli_utils = { default-features = false, path = "packages/cli_utils" }
 crime_map_r2 = { default-features = false, path = "packages/r2" }
+crime_map_spatial = { default-features = false, path = "packages/spatial" }
 # MoosicBox / Switchy (git references)
 moosicbox_assert = { git = "https://github.com/MoosicBox/MoosicBox.git", branch = "master", default-features = false }
 moosicbox_profiles = { git = "https://github.com/MoosicBox/MoosicBox.git", branch = "master", default-features = false }

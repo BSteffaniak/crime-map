@@ -1582,14 +1582,12 @@ dependencies = [
  "crime_map_database",
  "crime_map_geography_models",
  "crime_map_source",
+ "crime_map_spatial",
  "dialoguer",
  "duckdb",
- "geo",
- "geojson",
  "h3o",
  "log",
  "pretty_env_logger",
- "rstar 0.12.2",
  "serde",
  "serde_json",
  "switchy_database",
@@ -1649,6 +1647,7 @@ dependencies = [
  "crime_map_neighborhood",
  "crime_map_r2",
  "crime_map_source",
+ "crime_map_spatial",
  "dialoguer",
  "duckdb",
  "futures",
@@ -1808,6 +1807,17 @@ dependencies = [
  "serde",
  "strum 0.27.2",
  "strum_macros 0.27.2",
+]
+
+[[package]]
+name = "crime_map_spatial"
+version = "0.1.0"
+dependencies = [
+ "duckdb",
+ "geo",
+ "geojson",
+ "log",
+ "rstar 0.12.2",
 ]
 
 [[package]]

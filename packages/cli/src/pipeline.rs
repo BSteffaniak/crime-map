@@ -15,13 +15,14 @@ use crime_map_generate::{
     GenerateArgs, OUTPUT_ANALYTICS_DB, OUTPUT_BOUNDARIES_DB, OUTPUT_BOUNDARIES_PMTILES,
     OUTPUT_COUNT_DB, OUTPUT_H3_DB, OUTPUT_INCIDENTS_DB, OUTPUT_INCIDENTS_PMTILES, OUTPUT_METADATA,
 };
-use crime_map_ingest::{GeocodeArgs, IngestBoundariesArgs, SyncArgs};
+use crime_map_ingest::{EnrichArgs, GeocodeArgs, IngestBoundariesArgs, SyncArgs};
 use dialoguer::{Confirm, Input, MultiSelect, Select};
 
 /// Steps available in the pipeline.
 enum PipelineStep {
     Sync,
     Geocode,
+    Enrich,
     IngestBoundaries,
     Generate,
     R2Pull,
@@ -32,6 +33,7 @@ impl PipelineStep {
     const ALL: &[Self] = &[
         Self::Sync,
         Self::Geocode,
+        Self::Enrich,
         Self::IngestBoundaries,
         Self::Generate,
         Self::R2Pull,
@@ -43,6 +45,7 @@ impl PipelineStep {
         match self {
             Self::Sync => "Sync sources",
             Self::Geocode => "Geocode",
+            Self::Enrich => "Enrich spatial attribution",
             Self::IngestBoundaries => "Ingest boundaries (tracts, places, counties, states)",
             Self::Generate => "Generate tiles & databases",
             Self::R2Pull => "Pull from R2 (before sync)",
@@ -54,7 +57,9 @@ impl PipelineStep {
     #[must_use]
     const fn default_enabled(&self) -> bool {
         match self {
-            Self::Sync | Self::Geocode | Self::IngestBoundaries | Self::Generate => true,
+            Self::Sync | Self::Geocode | Self::Enrich | Self::IngestBoundaries | Self::Generate => {
+                true
+            }
             Self::R2Pull | Self::R2Push => false,
         }
     }
@@ -97,6 +102,9 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
     let has_geocode = selected_steps
         .iter()
         .any(|&i| matches!(PipelineStep::ALL[i], PipelineStep::Geocode));
+    let has_enrich = selected_steps
+        .iter()
+        .any(|&i| matches!(PipelineStep::ALL[i], PipelineStep::Enrich));
     let has_ingest_boundaries = selected_steps
         .iter()
         .any(|&i| matches!(PipelineStep::ALL[i], PipelineStep::IngestBoundaries));
@@ -328,6 +336,36 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
             Err(e) => {
                 geocode_bar.finish(format!("[{current_step}/{total_steps}] Geocoding failed"));
                 log::error!("Geocoding failed: {e}");
+                if !ask_continue()? {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    // --- Enrich ---
+    if has_enrich {
+        current_step += 1;
+        let enrich_bar = IndicatifProgress::batch_bar(
+            multi,
+            &format!("[{current_step}/{total_steps}] Enriching"),
+        );
+
+        let args = EnrichArgs {
+            source_ids: source_ids.clone(),
+            force: false,
+        };
+
+        match crime_map_ingest::run_enrich(&args, Some(enrich_bar.clone())) {
+            Ok(result) => {
+                enrich_bar.finish(format!(
+                    "[{current_step}/{total_steps}] Enriched {} incidents",
+                    result.enriched
+                ));
+            }
+            Err(e) => {
+                enrich_bar.finish(format!("[{current_step}/{total_steps}] Enrichment failed"));
+                log::error!("Enrichment failed: {e}");
                 if !ask_continue()? {
                     return Ok(());
                 }

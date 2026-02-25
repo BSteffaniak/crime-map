@@ -166,6 +166,11 @@ pub async fn run_with_cache(
         fingerprints.len()
     );
 
+    // Validate that all records have been spatially enriched
+    if total_records > 0 {
+        validate_enrichment(source_ids)?;
+    }
+
     // Each output processes all records, so total work = outputs_needing_regen * total_records.
     // But we use a single progress bar showing records for the current output being generated.
     let progress = progress.unwrap_or_else(crime_map_source::progress::null_progress);
@@ -214,15 +219,12 @@ pub async fn run_with_cache(
     });
 
     // Build spatial index if any output that uses it is needed
-    let needs_spatial = needs.get(OUTPUT_INCIDENTS_DB) == Some(&true)
-        || needs.get(OUTPUT_COUNT_DB) == Some(&true)
-        || needs.get(OUTPUT_H3_DB) == Some(&true)
-        || needs.get(OUTPUT_INCIDENTS_PMTILES) == Some(&true)
-        || needs.get(OUTPUT_ANALYTICS_DB) == Some(&true);
+    // NOTE: Spatial enrichment now happens at ingest time (`cargo ingest enrich`).
+    // The spatial index is no longer loaded here for per-incident lookups.
+    // It is still needed for boundary generation (PMTiles, DB).
 
-    // Open boundaries DuckDB for spatial index and boundary outputs
-    let needs_boundaries = needs_spatial
-        || needs.get(OUTPUT_BOUNDARIES_PMTILES) == Some(&true)
+    // Open boundaries DuckDB for boundary outputs
+    let needs_boundaries = needs.get(OUTPUT_BOUNDARIES_PMTILES) == Some(&true)
         || needs.get(OUTPUT_BOUNDARIES_DB) == Some(&true)
         || needs.get(OUTPUT_METADATA) == Some(&true);
 
@@ -232,33 +234,12 @@ pub async fn run_with_cache(
         None
     };
 
-    let spatial_index = if needs_spatial {
-        progress.set_message("Loading spatial index (tracts + places)...".to_string());
-        progress.set_total(0);
-        progress.set_position(0);
-        Some(crate::spatial::SpatialIndex::load(
-            boundaries_conn
-                .as_ref()
-                .expect("boundaries connection required"),
-        )?)
-    } else {
-        None
-    };
-
     // Run each output that needs it
     if needs.get(OUTPUT_INCIDENTS_PMTILES) == Some(&true) {
         progress.set_message("Generating PMTiles...".to_string());
         progress.set_total(total_records);
         progress.set_position(0);
-        generate_pmtiles(
-            args,
-            source_ids,
-            dir,
-            spatial_index
-                .as_ref()
-                .expect("spatial index required for PMTiles"),
-            &progress,
-        )?;
+        generate_pmtiles(args, source_ids, dir, &progress)?;
         record_output(manifest, OUTPUT_INCIDENTS_PMTILES);
         save_manifest(dir, manifest)?;
     }
@@ -267,14 +248,7 @@ pub async fn run_with_cache(
         progress.set_message("Generating sidebar DB...".to_string());
         progress.set_total(total_records);
         progress.set_position(0);
-        generate_sidebar_db(
-            args,
-            source_ids,
-            dir,
-            spatial_index.as_ref().expect("spatial index required"),
-            &progress,
-        )
-        .await?;
+        generate_sidebar_db(args, source_ids, dir, &progress).await?;
         record_output(manifest, OUTPUT_INCIDENTS_DB);
         save_manifest(dir, manifest)?;
     }
@@ -283,13 +257,7 @@ pub async fn run_with_cache(
         progress.set_message("Generating count DB...".to_string());
         progress.set_total(total_records);
         progress.set_position(0);
-        generate_count_db(
-            args,
-            source_ids,
-            dir,
-            spatial_index.as_ref().expect("spatial index required"),
-            &progress,
-        )?;
+        generate_count_db(args, source_ids, dir, &progress)?;
         record_output(manifest, OUTPUT_COUNT_DB);
         save_manifest(dir, manifest)?;
     }
@@ -298,13 +266,7 @@ pub async fn run_with_cache(
         progress.set_message("Generating H3 hexbin DB...".to_string());
         progress.set_total(total_records);
         progress.set_position(0);
-        generate_h3_db(
-            args,
-            source_ids,
-            dir,
-            spatial_index.as_ref().expect("spatial index required"),
-            &progress,
-        )?;
+        generate_h3_db(args, source_ids, dir, &progress)?;
         record_output(manifest, OUTPUT_H3_DB);
         save_manifest(dir, manifest)?;
     }
@@ -365,7 +327,6 @@ pub async fn run_with_cache(
                 .as_ref()
                 .expect("boundaries connection required"),
             dir,
-            spatial_index.as_ref().expect("spatial index required"),
             &progress,
         )?;
         record_output(manifest, OUTPUT_ANALYTICS_DB);
@@ -457,6 +418,65 @@ fn count_exportable_records(source_ids: &[String]) -> Result<u64, Box<dyn std::e
     }
 
     Ok(total)
+}
+
+/// Validates that all exportable records in the given sources have been
+/// spatially enriched (i.e., `enriched = TRUE`).
+///
+/// Returns an error listing un-enriched sources if any are found.
+/// This ensures the `cargo ingest enrich` step was run before generation.
+///
+/// # Errors
+///
+/// Returns an error if any source has un-enriched records or if
+/// database queries fail.
+fn validate_enrichment(source_ids: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut unenriched: Vec<(String, u64)> = Vec::new();
+
+    for sid in source_ids {
+        let path = crime_map_database::paths::source_db_path(sid);
+        if !path.exists() {
+            continue;
+        }
+
+        let conn = crime_map_database::source_db::open_by_id(sid)?;
+        let mut stmt = conn.prepare(
+            "SELECT COUNT(*) FROM incidents
+             WHERE has_coordinates = TRUE
+               AND enriched = FALSE
+               AND longitude BETWEEN -180 AND 180
+               AND latitude BETWEEN -90 AND 90",
+        )?;
+        let count: i64 = stmt.query_row([], |row| row.get(0))?;
+
+        #[allow(clippy::cast_sign_loss)]
+        if count > 0 {
+            unenriched.push((sid.clone(), count as u64));
+        }
+    }
+
+    if unenriched.is_empty() {
+        return Ok(());
+    }
+
+    let mut msg = String::from(
+        "Found un-enriched records. Run `cargo ingest enrich` before generation.\n\
+         Un-enriched sources:\n",
+    );
+    for (sid, count) in &unenriched {
+        use std::fmt::Write;
+        writeln!(msg, "  - {sid}: {count} record(s)").unwrap();
+    }
+    msg.push_str("Hint: cargo ingest enrich --sources ");
+    msg.push_str(
+        &unenriched
+            .iter()
+            .map(|(s, _)| s.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+
+    Err(msg.into())
 }
 
 /// Loads the generation manifest from `dir/manifest.json`.
@@ -703,6 +723,12 @@ struct IncidentRow {
     arrest_made: Option<bool>,
     domestic: Option<bool>,
     location_type: Option<String>,
+    // Pre-computed spatial attribution (populated by `cargo ingest enrich`)
+    census_tract_geoid: Option<String>,
+    census_place_geoid: Option<String>,
+    state_fips: Option<String>,
+    county_geoid: Option<String>,
+    neighborhood_id: Option<String>,
 }
 
 /// Iterates over incidents from a single source `DuckDB` with keyset
@@ -743,7 +769,9 @@ where
                     source_incident_id, category, parent_category, severity,
                     longitude, latitude, occurred_at::TEXT as occurred_at_text,
                     description, block_address,
-                    city, state, arrest_made, domestic, location_type
+                    city, state, arrest_made, domestic, location_type,
+                    census_tract_geoid, census_place_geoid, state_fips,
+                    county_geoid, neighborhood_id
              FROM incidents
              WHERE has_coordinates = TRUE
                AND longitude BETWEEN -180 AND 180
@@ -777,6 +805,11 @@ where
                 arrest_made: row.get(12)?,
                 domestic: row.get(13)?,
                 location_type: row.get(14)?,
+                census_tract_geoid: row.get(15)?,
+                census_place_geoid: row.get(16)?,
+                state_fips: row.get(17)?,
+                county_geoid: row.get(18)?,
+                neighborhood_id: row.get(19)?,
             };
 
             callback(&incident)?;
@@ -830,19 +863,12 @@ fn generate_pmtiles(
     args: &GenerateArgs,
     source_ids: &[String],
     dir: &Path,
-    geo_index: &crate::spatial::SpatialIndex,
     progress: &Arc<dyn ProgressCallback>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let geojsonseq_path = dir.join("incidents.geojsonseq");
 
     log::info!("Exporting incidents to GeoJSONSeq...");
-    export_geojsonseq(
-        &geojsonseq_path,
-        args.limit,
-        source_ids,
-        geo_index,
-        progress,
-    )?;
+    export_geojsonseq(&geojsonseq_path, args.limit, source_ids, progress)?;
 
     // Skip tippecanoe if no features were exported (empty GeoJSONSeq).
     // tippecanoe crashes with "Did not read any valid geometries" on empty input.
@@ -895,7 +921,6 @@ fn export_geojsonseq(
     output_path: &Path,
     limit: Option<u64>,
     source_ids: &[String],
-    geo_index: &crate::spatial::SpatialIndex,
     progress: &Arc<dyn ProgressCallback>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let file = std::fs::File::create(output_path)?;
@@ -911,25 +936,12 @@ fn export_geojsonseq(
         let source_name = resolve_source_name(sid);
         let source_count =
             iterate_source_incidents(sid, &source_name, &mut remaining, &mut |incident| {
-                // Derive boundary GEOIDs from spatial index
-                let tract_geoid = geo_index
-                    .lookup_tract(incident.longitude, incident.latitude)
-                    .map(str::to_owned);
-                let state_fips = tract_geoid
-                    .as_deref()
-                    .and_then(crate::spatial::SpatialIndex::derive_state_fips)
-                    .map(str::to_owned);
-                let county_geoid = tract_geoid
-                    .as_deref()
-                    .and_then(crate::spatial::SpatialIndex::derive_county_geoid)
-                    .map(str::to_owned);
-                let place_geoid = geo_index
-                    .lookup_place(incident.longitude, incident.latitude)
-                    .map(str::to_owned);
-                let neighborhood_id = tract_geoid
-                    .as_deref()
-                    .and_then(|g| geo_index.lookup_neighborhood(g))
-                    .map(str::to_owned);
+                // Read pre-computed spatial attribution from source DuckDB
+                let tract_geoid = incident.census_tract_geoid.clone();
+                let state_fips = incident.state_fips.clone();
+                let county_geoid = incident.county_geoid.clone();
+                let place_geoid = incident.census_place_geoid.clone();
+                let neighborhood_id = incident.neighborhood_id.clone();
 
                 let feature = serde_json::json!({
                     "type": "Feature",
@@ -1000,7 +1012,6 @@ async fn generate_sidebar_db(
     args: &GenerateArgs,
     source_ids: &[String],
     dir: &Path,
-    geo_index: &crate::spatial::SpatialIndex,
     progress: &Arc<dyn ProgressCallback>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use switchy_database::DatabaseValue;
@@ -1097,7 +1108,9 @@ async fn generate_sidebar_db(
                                 source_incident_id, category, parent_category, severity,
                                 longitude, latitude, occurred_at::TEXT as occurred_at_text,
                                 description, block_address,
-                                city, state, arrest_made, domestic, location_type
+                                city, state, arrest_made, domestic, location_type,
+                                census_tract_geoid, census_place_geoid, state_fips,
+                                county_geoid, neighborhood_id
                          FROM incidents
                          WHERE has_coordinates = TRUE
                    AND longitude BETWEEN -180 AND 180
@@ -1131,6 +1144,11 @@ async fn generate_sidebar_db(
                             arrest_made: row.get(12)?,
                             domestic: row.get(13)?,
                             location_type: row.get(14)?,
+                            census_tract_geoid: row.get(15)?,
+                            census_place_geoid: row.get(16)?,
+                            state_fips: row.get(17)?,
+                            county_geoid: row.get(18)?,
+                            neighborhood_id: row.get(19)?,
                         });
                     }
                     batch
@@ -1152,24 +1170,11 @@ async fn generate_sidebar_db(
                     .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
                 for incident in &batch {
-                    let tract_geoid = geo_index
-                        .lookup_tract(incident.longitude, incident.latitude)
-                        .map(str::to_owned);
-                    let state_fips = tract_geoid
-                        .as_deref()
-                        .and_then(crate::spatial::SpatialIndex::derive_state_fips)
-                        .map(str::to_owned);
-                    let county_geoid = tract_geoid
-                        .as_deref()
-                        .and_then(crate::spatial::SpatialIndex::derive_county_geoid)
-                        .map(str::to_owned);
-                    let place_geoid = geo_index
-                        .lookup_place(incident.longitude, incident.latitude)
-                        .map(str::to_owned);
-                    let neighborhood_id = tract_geoid
-                        .as_deref()
-                        .and_then(|g| geo_index.lookup_neighborhood(g))
-                        .map(str::to_owned);
+                    let tract_geoid = incident.census_tract_geoid.clone();
+                    let state_fips = incident.state_fips.clone();
+                    let county_geoid = incident.county_geoid.clone();
+                    let place_geoid = incident.census_place_geoid.clone();
+                    let neighborhood_id = incident.neighborhood_id.clone();
 
                     let arrest_int = incident.arrest_made.map(i32::from);
 
@@ -1308,7 +1313,6 @@ fn generate_count_db(
     args: &GenerateArgs,
     source_ids: &[String],
     dir: &Path,
-    geo_index: &crate::spatial::SpatialIndex,
     progress: &Arc<dyn ProgressCallback>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db_path = dir.join("counts.duckdb");
@@ -1348,7 +1352,7 @@ fn generate_count_db(
         )?;
     }
 
-    let total_count = populate_duckdb_incidents(args, source_ids, &db_path, geo_index, progress)?;
+    let total_count = populate_duckdb_incidents(args, source_ids, &db_path, progress)?;
 
     // Reopen for aggregation
     let duck = duckdb::Connection::open(&db_path)?;
@@ -1412,7 +1416,6 @@ fn populate_duckdb_incidents(
     args: &GenerateArgs,
     source_ids: &[String],
     duck_path: &Path,
-    geo_index: &crate::spatial::SpatialIndex,
     progress: &Arc<dyn ProgressCallback>,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let mut total_count: u64 = 0;
@@ -1446,7 +1449,9 @@ fn populate_duckdb_incidents(
                         source_incident_id, category, parent_category, severity,
                         longitude, latitude, occurred_at::TEXT as occurred_at_text,
                         description, block_address,
-                        city, state, arrest_made, domestic, location_type
+                        city, state, arrest_made, domestic, location_type,
+                        census_tract_geoid, census_place_geoid, state_fips,
+                        county_geoid, neighborhood_id
                  FROM incidents
                  WHERE has_coordinates = TRUE
                    AND longitude BETWEEN -180 AND 180
@@ -1481,6 +1486,11 @@ fn populate_duckdb_incidents(
                     arrest_made: row.get(12)?,
                     domestic: row.get(13)?,
                     location_type: row.get(14)?,
+                    census_tract_geoid: row.get(15)?,
+                    census_place_geoid: row.get(16)?,
+                    state_fips: row.get(17)?,
+                    county_geoid: row.get(18)?,
+                    neighborhood_id: row.get(19)?,
                 });
             }
 
@@ -1504,24 +1514,11 @@ fn populate_duckdb_incidents(
                 )?;
 
                 for incident in &batch {
-                    let tract_geoid = geo_index
-                        .lookup_tract(incident.longitude, incident.latitude)
-                        .map(str::to_owned);
-                    let state_fips = tract_geoid
-                        .as_deref()
-                        .and_then(crate::spatial::SpatialIndex::derive_state_fips)
-                        .map(str::to_owned);
-                    let county_geoid = tract_geoid
-                        .as_deref()
-                        .and_then(crate::spatial::SpatialIndex::derive_county_geoid)
-                        .map(str::to_owned);
-                    let place_geoid = geo_index
-                        .lookup_place(incident.longitude, incident.latitude)
-                        .map(str::to_owned);
-                    let neighborhood_id = tract_geoid
-                        .as_deref()
-                        .and_then(|g| geo_index.lookup_neighborhood(g))
-                        .map(str::to_owned);
+                    let tract_geoid = incident.census_tract_geoid.clone();
+                    let state_fips = incident.state_fips.clone();
+                    let county_geoid = incident.county_geoid.clone();
+                    let place_geoid = incident.census_place_geoid.clone();
+                    let neighborhood_id = incident.neighborhood_id.clone();
 
                     let arrest_int: Option<i32> = incident.arrest_made.map(i32::from);
 
@@ -1597,7 +1594,6 @@ fn generate_h3_db(
     args: &GenerateArgs,
     source_ids: &[String],
     dir: &Path,
-    geo_index: &crate::spatial::SpatialIndex,
     progress: &Arc<dyn ProgressCallback>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use h3o::{LatLng, Resolution};
@@ -1681,7 +1677,9 @@ fn generate_h3_db(
                         source_incident_id, category, parent_category, severity,
                         longitude, latitude, occurred_at::TEXT as occurred_at_text,
                         description, block_address,
-                        city, state, arrest_made, domestic, location_type
+                        city, state, arrest_made, domestic, location_type,
+                        census_tract_geoid, census_place_geoid, state_fips,
+                        county_geoid, neighborhood_id
                  FROM incidents
                  WHERE has_coordinates = TRUE
                    AND longitude BETWEEN -180 AND 180
@@ -1715,6 +1713,11 @@ fn generate_h3_db(
                     arrest_made: row.get(12)?,
                     domestic: row.get(13)?,
                     location_type: row.get(14)?,
+                    census_tract_geoid: row.get(15)?,
+                    census_place_geoid: row.get(16)?,
+                    state_fips: row.get(17)?,
+                    county_geoid: row.get(18)?,
+                    neighborhood_id: row.get(19)?,
                 });
             }
 
@@ -1751,24 +1754,11 @@ fn generate_h3_db(
                         .unwrap_or("");
 
                     // Boundary GEOIDs
-                    let tract_geoid = geo_index
-                        .lookup_tract(incident.longitude, incident.latitude)
-                        .map(str::to_owned);
-                    let state_fips = tract_geoid
-                        .as_deref()
-                        .and_then(crate::spatial::SpatialIndex::derive_state_fips)
-                        .map(str::to_owned);
-                    let county_geoid = tract_geoid
-                        .as_deref()
-                        .and_then(crate::spatial::SpatialIndex::derive_county_geoid)
-                        .map(str::to_owned);
-                    let place_geoid = geo_index
-                        .lookup_place(incident.longitude, incident.latitude)
-                        .map(str::to_owned);
-                    let neighborhood_id = tract_geoid
-                        .as_deref()
-                        .and_then(|g| geo_index.lookup_neighborhood(g))
-                        .map(str::to_owned);
+                    let tract_geoid = incident.census_tract_geoid.clone();
+                    let state_fips = incident.state_fips.clone();
+                    let county_geoid = incident.county_geoid.clone();
+                    let place_geoid = incident.census_place_geoid.clone();
+                    let neighborhood_id = incident.neighborhood_id.clone();
 
                     let Ok(coord) = LatLng::new(incident.latitude, incident.longitude) else {
                         continue;
@@ -2105,7 +2095,6 @@ fn generate_analytics_db(
     source_ids: &[String],
     boundaries_conn: &duckdb::Connection,
     dir: &Path,
-    geo_index: &crate::spatial::SpatialIndex,
     progress: &Arc<dyn ProgressCallback>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db_path = dir.join("analytics.duckdb");
@@ -2175,7 +2164,9 @@ fn generate_analytics_db(
                         source_incident_id, category, parent_category, severity,
                         longitude, latitude, occurred_at::TEXT as occurred_at_text,
                         description, block_address,
-                        city, state, arrest_made, domestic, location_type
+                        city, state, arrest_made, domestic, location_type,
+                        census_tract_geoid, census_place_geoid, state_fips,
+                        county_geoid, neighborhood_id
                  FROM incidents
                  WHERE has_coordinates = TRUE
                    AND longitude BETWEEN -180 AND 180
@@ -2209,6 +2200,11 @@ fn generate_analytics_db(
                     arrest_made: row.get(12)?,
                     domestic: row.get(13)?,
                     location_type: row.get(14)?,
+                    census_tract_geoid: row.get(15)?,
+                    census_place_geoid: row.get(16)?,
+                    state_fips: row.get(17)?,
+                    county_geoid: row.get(18)?,
+                    neighborhood_id: row.get(19)?,
                 });
             }
 
@@ -2231,17 +2227,10 @@ fn generate_analytics_db(
                 )?;
 
                 for incident in &batch {
-                    // Boundary GEOIDs
-                    let tract_geoid = geo_index
-                        .lookup_tract(incident.longitude, incident.latitude)
-                        .map(str::to_owned);
-                    let place_geoid = geo_index
-                        .lookup_place(incident.longitude, incident.latitude)
-                        .map(str::to_owned);
-                    let neighborhood_id = tract_geoid
-                        .as_deref()
-                        .and_then(|g| geo_index.lookup_neighborhood(g))
-                        .map(str::to_owned);
+                    // Read pre-computed spatial attribution
+                    let tract_geoid = incident.census_tract_geoid.clone();
+                    let place_geoid = incident.census_place_geoid.clone();
+                    let neighborhood_id = incident.neighborhood_id.clone();
 
                     let parent_category_id: Option<i32> = None;
                     let category_id: Option<i32> = None;

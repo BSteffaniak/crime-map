@@ -16,6 +16,7 @@ enum IngestAction {
     SyncSources,
     ListSources,
     Geocode,
+    Enrich,
     IngestTracts,
     IngestPlaces,
     IngestCounties,
@@ -28,6 +29,7 @@ impl IngestAction {
         Self::SyncSources,
         Self::ListSources,
         Self::Geocode,
+        Self::Enrich,
         Self::IngestTracts,
         Self::IngestPlaces,
         Self::IngestCounties,
@@ -41,6 +43,7 @@ impl IngestAction {
             Self::SyncSources => "Sync sources",
             Self::ListSources => "List sources",
             Self::Geocode => "Geocode missing coordinates",
+            Self::Enrich => "Enrich spatial attribution",
             Self::IngestTracts => "Ingest census tracts",
             Self::IngestPlaces => "Ingest census places",
             Self::IngestCounties => "Ingest counties",
@@ -74,6 +77,7 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
         IngestAction::SyncSources => sync_sources(multi).await?,
         IngestAction::ListSources => list_sources(),
         IngestAction::Geocode => geocode_interactive(multi).await?,
+        IngestAction::Enrich => enrich_interactive(multi)?,
         IngestAction::IngestTracts => ingest_census_tracts().await?,
         IngestAction::IngestPlaces => ingest_census_places().await?,
         IngestAction::IngestCounties => ingest_census_counties().await?,
@@ -175,6 +179,36 @@ async fn geocode_interactive(multi: &MultiProgress) -> Result<(), Box<dyn std::e
         result.total(),
         result.missing_geocoded,
         result.re_geocoded,
+        elapsed.as_secs_f64()
+    );
+
+    Ok(())
+}
+
+/// Prompts for enrichment parameters and runs via [`crate::run_enrich`].
+fn enrich_interactive(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>> {
+    let source_ids = crime_map_cli_utils::prompt_source_multiselect(
+        "Sources to enrich (space=toggle, a=all, enter=confirm)",
+    )?;
+
+    let force = Confirm::new()
+        .with_prompt("Force re-enrichment of all records (not just new)?")
+        .default(false)
+        .interact()?;
+
+    let start = Instant::now();
+    let enrich_bar = IndicatifProgress::batch_bar(multi, "Enriching");
+
+    let args = crate::EnrichArgs { source_ids, force };
+
+    let result = crate::run_enrich(&args, Some(enrich_bar.clone()))?;
+    enrich_bar.finish("Enrichment complete".to_string());
+
+    let elapsed = start.elapsed();
+    log::info!(
+        "Enrichment complete: {} incidents enriched across {} source(s) in {:.1}s",
+        result.enriched,
+        result.sources_processed,
         elapsed.as_secs_f64()
     );
 

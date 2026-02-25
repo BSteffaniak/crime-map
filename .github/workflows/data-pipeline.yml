@@ -342,6 +342,12 @@ jobs:
           crime_map_ingest push --sources ${{ matrix.sources }}
           crime_map_ingest push --shared-only
 
+      - name: Enrich spatial attribution
+        run: crime_map_ingest enrich --sources ${{ matrix.sources }}
+
+      - name: Push enriched data to R2
+        run: crime_map_ingest push --sources ${{ matrix.sources }}
+
       - name: Generate artifacts
         run: |
           GENERATE_ARGS="all --skip-boundaries --sources ${{ matrix.sources }} --output-dir data/partitions/${{ matrix.name }}"

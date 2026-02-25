@@ -24,6 +24,7 @@ crime_map_geocoder = { workspace = true }
 crime_map_neighborhood = { workspace = true }
 crime_map_cli_utils = { workspace = true }
 crime_map_r2 = { workspace = true }
+crime_map_spatial = { workspace = true }
 
 duckdb = { workspace = true }
 
@@ -46,6 +47,7 @@ duckdb-bundled = [
   "crime_map_database/duckdb-bundled",
   "crime_map_geography/duckdb-bundled",
   "crime_map_neighborhood/duckdb-bundled",
+  "crime_map_spatial/duckdb-bundled",
 ]
 fail-on-warnings = [
   "crime_map_cli_utils/fail-on-warnings",
@@ -55,4 +57,5 @@ fail-on-warnings = [
   "crime_map_neighborhood/fail-on-warnings",
   "crime_map_r2/fail-on-warnings",
   "crime_map_source/fail-on-warnings",
+  "crime_map_spatial/fail-on-warnings",
 ]

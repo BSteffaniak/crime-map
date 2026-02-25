@@ -68,13 +68,28 @@ fn create_schema(conn: &Connection) -> Result<(), DbError> {
             has_coordinates BOOLEAN NOT NULL DEFAULT TRUE,
             geocoded BOOLEAN NOT NULL DEFAULT FALSE,
             census_place_geoid TEXT,
-            census_tract_geoid TEXT
+            census_tract_geoid TEXT,
+            state_fips TEXT,
+            county_geoid TEXT,
+            neighborhood_id TEXT,
+            enriched BOOLEAN NOT NULL DEFAULT FALSE
         );
 
         CREATE TABLE IF NOT EXISTS _meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );",
+    )?;
+
+    // Migration for existing DuckDB files that lack the new columns.
+    // DuckDB does not support ADD COLUMN with constraints (NOT NULL / DEFAULT),
+    // so we add the column as bare BOOLEAN and backfill NULLs separately.
+    conn.execute_batch(
+        "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS state_fips TEXT;
+         ALTER TABLE incidents ADD COLUMN IF NOT EXISTS county_geoid TEXT;
+         ALTER TABLE incidents ADD COLUMN IF NOT EXISTS neighborhood_id TEXT;
+         ALTER TABLE incidents ADD COLUMN IF NOT EXISTS enriched BOOLEAN;
+         UPDATE incidents SET enriched = FALSE WHERE enriched IS NULL;",
     )?;
 
     Ok(())
@@ -396,7 +411,11 @@ pub fn batch_update_geocoded(
             longitude = ?, latitude = ?,
             geocoded = TRUE,
             census_place_geoid = NULL,
-            census_tract_geoid = NULL
+            census_tract_geoid = NULL,
+            state_fips = NULL,
+            county_geoid = NULL,
+            neighborhood_id = NULL,
+            enriched = FALSE
          WHERE source_incident_id = ?"
     } else {
         "UPDATE incidents SET
@@ -447,14 +466,31 @@ pub fn batch_mark_geocoded(conn: &Connection, incident_ids: &[String]) -> Result
     Ok(total)
 }
 
-/// Updates census place and tract GEOIDs for a batch of incidents.
+/// Spatial attribution data for a single incident.
+pub struct AttributionUpdate {
+    /// The unique incident identifier.
+    pub source_incident_id: String,
+    /// Census tract GEOID (11 chars, e.g., `"42101000100"`).
+    pub census_tract_geoid: Option<String>,
+    /// Census place GEOID (7 chars, e.g., `"4260000"`).
+    pub census_place_geoid: Option<String>,
+    /// State FIPS code (2 chars, derived from tract GEOID).
+    pub state_fips: Option<String>,
+    /// County GEOID (5 chars, derived from tract GEOID).
+    pub county_geoid: Option<String>,
+    /// Neighborhood ID (e.g., `"nbhd-42"`).
+    pub neighborhood_id: Option<String>,
+}
+
+/// Updates spatial attribution columns for a batch of incidents and
+/// marks them as `enriched = TRUE`.
 ///
 /// # Errors
 ///
 /// Returns [`DbError`] if the update fails.
 pub fn batch_update_attribution(
     conn: &Connection,
-    updates: &[(String, Option<String>, Option<String>)],
+    updates: &[AttributionUpdate],
 ) -> Result<u64, DbError> {
     if updates.is_empty() {
         return Ok(0);
@@ -462,18 +498,25 @@ pub fn batch_update_attribution(
 
     let mut stmt = conn.prepare(
         "UPDATE incidents SET
+            census_tract_geoid = ?,
             census_place_geoid = ?,
-            census_tract_geoid = ?
+            state_fips = ?,
+            county_geoid = ?,
+            neighborhood_id = ?,
+            enriched = TRUE
          WHERE source_incident_id = ?",
     )?;
 
     let mut total = 0u64;
 
-    for (incident_id, place_geoid, tract_geoid) in updates {
+    for update in updates {
         let rows = stmt.execute(duckdb::params![
-            place_geoid.as_deref(),
-            tract_geoid.as_deref(),
-            incident_id,
+            update.census_tract_geoid.as_deref(),
+            update.census_place_geoid.as_deref(),
+            update.state_fips.as_deref(),
+            update.county_geoid.as_deref(),
+            update.neighborhood_id.as_deref(),
+            update.source_incident_id,
         ])?;
         total += u64::try_from(rows).unwrap_or(0);
     }
