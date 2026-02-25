@@ -28,13 +28,22 @@ use std::time::Duration;
 
 use crate::SourceError;
 
-/// Maximum number of retry attempts for transient HTTP errors.
+/// Maximum number of retry attempts for transient HTTP errors
+/// (connection failures, timeouts, server errors).
 ///
 /// With exponential backoff (2s, 4s, 8s) the total wait before giving
 /// up is 14 seconds. Combined with the per-request timeout of 120s
 /// this means a worst-case latency of ~8 minutes for a single request
 /// (4 attempts × 120s timeout + 14s backoff).
 const MAX_RETRIES: u32 = 3;
+
+/// Maximum number of full re-fetch attempts when the response body
+/// cannot be decoded (truncated JSON, garbled response, etc.).
+///
+/// Each body-decode retry goes through [`send_inner`] again, so
+/// connection-level retries still apply. Worst case: `(1 + MAX_BODY_RETRIES)`
+/// × `(1 + MAX_RETRIES)` = 16 HTTP requests for a single logical call.
+const MAX_BODY_RETRIES: u32 = 3;
 
 /// Sends an HTTP request and parses the response body as JSON.
 ///
@@ -45,11 +54,15 @@ const MAX_RETRIES: u32 = 3;
 ///
 /// # Retry behaviour
 ///
-/// Retries up to [`MAX_RETRIES`] times with exponential backoff on:
-/// - Connection errors and timeouts
-/// - Response body decode errors
-/// - HTTP 429 (Too Many Requests)
-/// - HTTP 5xx (Server Error)
+/// Two layers of retry:
+///
+/// 1. **Connection-level** ([`send_inner`]): retries up to [`MAX_RETRIES`]
+///    times with exponential backoff on connection errors, timeouts,
+///    HTTP 429, and HTTP 5xx.
+/// 2. **Body-decode**: if the response arrives successfully but the body
+///    cannot be parsed as JSON (truncated response, garbled data), the
+///    *entire* request is re-fetched up to [`MAX_BODY_RETRIES`] times,
+///    each attempt going through the full connection-level retry loop.
 ///
 /// Does **not** retry HTTP 4xx (except 429) — these are permanent.
 ///
@@ -57,34 +70,35 @@ const MAX_RETRIES: u32 = 3;
 ///
 /// Returns [`SourceError`] if the request fails after all retries, the
 /// server returns a non-retryable status code, or the response body
-/// cannot be parsed as JSON.
+/// cannot be parsed as JSON after all body-decode retries.
 #[allow(clippy::future_not_send)]
 pub async fn send_json<F>(build_request: F) -> Result<serde_json::Value, SourceError>
 where
     F: Fn() -> reqwest::RequestBuilder,
 {
-    let response = send_inner(&build_request, MAX_RETRIES).await?;
+    for body_attempt in 0..=MAX_BODY_RETRIES {
+        let response = send_inner(&build_request, MAX_RETRIES).await?;
 
-    // Parse body with one extra retry — the server may have sent a
-    // truncated response even though the status was 200.
-    match response.json().await {
-        Ok(value) => Ok(value),
-        Err(first_err) => {
-            log::warn!("JSON decode failed ({first_err}), retrying request once more...");
-            tokio::time::sleep(Duration::from_secs(2)).await;
-
-            let retry_response = build_request().send().await.map_err(SourceError::Http)?;
-
-            let status = retry_response.status();
-            if !status.is_success() {
-                return Err(SourceError::Normalization {
-                    message: format!("HTTP {status} on body-decode retry"),
-                });
+        match response.json().await {
+            Ok(value) => return Ok(value),
+            Err(e) => {
+                if body_attempt < MAX_BODY_RETRIES {
+                    let delay = Duration::from_secs(1u64 << (body_attempt + 1)); // 2s, 4s, 8s
+                    log::warn!(
+                        "JSON decode failed ({e}), re-fetching in {delay:?} \
+                         (body retry {}/{MAX_BODY_RETRIES})...",
+                        body_attempt + 1,
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                return Err(SourceError::Http(e));
             }
-
-            Ok(retry_response.json().await?)
         }
     }
+
+    // Unreachable — the loop always returns via Ok or Err.
+    unreachable!("send_json body-decode retry loop exited without returning")
 }
 
 /// Sends an HTTP request and returns the response body as a `String`.
@@ -96,32 +110,34 @@ where
 /// # Errors
 ///
 /// Returns [`SourceError`] if the request fails after all retries or the
-/// body cannot be read as text.
+/// body cannot be read as text after all body-decode retries.
 #[allow(clippy::future_not_send)]
 pub async fn send_text<F>(build_request: F) -> Result<String, SourceError>
 where
     F: Fn() -> reqwest::RequestBuilder,
 {
-    let response = send_inner(&build_request, MAX_RETRIES).await?;
+    for body_attempt in 0..=MAX_BODY_RETRIES {
+        let response = send_inner(&build_request, MAX_RETRIES).await?;
 
-    match response.text().await {
-        Ok(text) => Ok(text),
-        Err(first_err) => {
-            log::warn!("Text decode failed ({first_err}), retrying request once more...");
-            tokio::time::sleep(Duration::from_secs(2)).await;
-
-            let retry_response = build_request().send().await.map_err(SourceError::Http)?;
-
-            let status = retry_response.status();
-            if !status.is_success() {
-                return Err(SourceError::Normalization {
-                    message: format!("HTTP {status} on body-decode retry"),
-                });
+        match response.text().await {
+            Ok(text) => return Ok(text),
+            Err(e) => {
+                if body_attempt < MAX_BODY_RETRIES {
+                    let delay = Duration::from_secs(1u64 << (body_attempt + 1)); // 2s, 4s, 8s
+                    log::warn!(
+                        "Text decode failed ({e}), re-fetching in {delay:?} \
+                         (body retry {}/{MAX_BODY_RETRIES})...",
+                        body_attempt + 1,
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                return Err(SourceError::Http(e));
             }
-
-            Ok(retry_response.text().await.map_err(SourceError::Http)?)
         }
     }
+
+    unreachable!("send_text body-decode retry loop exited without returning")
 }
 
 /// Core retry loop shared by [`send_json`] and [`send_text`].
