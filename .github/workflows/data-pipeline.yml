@@ -26,8 +26,8 @@ on:
       skip_geocode:
         description: "Skip geocoding step in partition jobs"
         required: false
-        type: boolean
-        default: false
+        type: string
+        default: 'false'
 
 concurrency:
   group: data-pipeline
@@ -329,7 +329,7 @@ jobs:
         run: crime_map_ingest push --sources ${{ matrix.sources }}
 
       - name: Geocode missing coordinates
-        if: inputs.skip_geocode != true
+        if: inputs.skip_geocode != 'true'
         run: crime_map_ingest geocode --sources ${{ matrix.sources }} --max-time 240
         env:
           PELIAS_URL: ${{ secrets.PELIAS_URL }}
@@ -337,7 +337,7 @@ jobs:
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
 
       - name: Push geocode progress to R2
-        if: inputs.skip_geocode != true
+        if: inputs.skip_geocode != 'true'
         run: |
           crime_map_ingest push --sources ${{ matrix.sources }}
           crime_map_ingest push --shared-only
