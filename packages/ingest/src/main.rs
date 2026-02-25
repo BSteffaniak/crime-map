@@ -531,6 +531,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::PullBoundaryPart { name } => {
             let r2 = crime_map_r2::R2Client::from_env()?;
             let local = crime_map_database::paths::boundaries_db_path();
+            crime_map_database::paths::ensure_dir(
+                local.parent().expect("boundaries path has parent"),
+            )?;
             let key = format!("boundaries-part/{name}.duckdb");
             if r2.download(&key, &local).await? {
                 log::info!("Pulled boundary partition '{name}' from R2");
