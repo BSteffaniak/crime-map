@@ -37,8 +37,7 @@ async fn query_socrata_count(
         let since_str = since.format("%Y-%m-%dT%H:%M:%S").to_string();
         write!(url, "&$where={} > '{since_str}'", config.date_column).unwrap();
     }
-    let response = client.get(&url).send().await.ok()?;
-    let body: serde_json::Value = response.json().await.ok()?;
+    let body = crate::retry::send_json(|| client.get(&url)).await.ok()?;
     body.as_array()?
         .first()?
         .get("count")?
@@ -121,8 +120,8 @@ pub async fn fetch_socrata(
             log::info!("{}: offset={offset}, limit={page_limit}", config.label);
         }
 
-        let response = client.get(&url).send().await?;
-        let records: Vec<serde_json::Value> = response.json().await?;
+        let body = crate::retry::send_json(|| client.get(&url)).await?;
+        let records: Vec<serde_json::Value> = serde_json::from_value(body)?;
 
         let count = records.len() as u64;
         if count == 0 {

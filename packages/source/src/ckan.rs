@@ -82,12 +82,12 @@ async fn fetch_ckan_standard(
     let mut total_available: u64 = 0;
 
     for resource_id in config.resource_ids {
-        let response = client
-            .get(config.api_url)
-            .query(&[("resource_id", resource_id.as_str()), ("limit", "0")])
-            .send()
-            .await?;
-        let body: serde_json::Value = response.json().await?;
+        let body = crate::retry::send_json(|| {
+            client
+                .get(config.api_url)
+                .query(&[("resource_id", resource_id.as_str()), ("limit", "0")])
+        })
+        .await?;
         let count = body
             .get("result")
             .and_then(|r| r.get("total"))
@@ -176,16 +176,14 @@ async fn fetch_ckan_standard(
                 remaining_global.min(resource_count),
             );
 
-            let response = client
-                .get(config.api_url)
-                .query(&[
+            let body = crate::retry::send_json(|| {
+                client.get(config.api_url).query(&[
                     ("resource_id", resource_id.as_str()),
                     ("limit", &page_limit.to_string()),
                     ("offset", &offset.to_string()),
                 ])
-                .send()
-                .await?;
-            let body: serde_json::Value = response.json().await?;
+            })
+            .await?;
 
             let records = body
                 .get("result")
@@ -253,12 +251,9 @@ async fn fetch_ckan_sql(
         let count_sql = format!(
             "SELECT COUNT(*) as count FROM \"{resource_id}\" WHERE \"{date_column}\" >= '{since_str}'"
         );
-        let response = client
-            .get(&sql_url)
-            .query(&[("sql", count_sql.as_str())])
-            .send()
-            .await?;
-        let body: serde_json::Value = response.json().await?;
+        let body =
+            crate::retry::send_json(|| client.get(&sql_url).query(&[("sql", count_sql.as_str())]))
+                .await?;
         let count = body
             .get("result")
             .and_then(|r| r.get("records"))
@@ -359,12 +354,9 @@ async fn fetch_ckan_sql(
                 "SELECT * FROM \"{resource_id}\" WHERE \"{date_column}\" >= '{since_str}' ORDER BY \"{date_column}\" DESC LIMIT {page_limit} OFFSET {offset}"
             ).unwrap();
 
-            let response = client
-                .get(&sql_url)
-                .query(&[("sql", sql.as_str())])
-                .send()
-                .await?;
-            let body: serde_json::Value = response.json().await?;
+            let body =
+                crate::retry::send_json(|| client.get(&sql_url).query(&[("sql", sql.as_str())]))
+                    .await?;
 
             let records = body
                 .get("result")

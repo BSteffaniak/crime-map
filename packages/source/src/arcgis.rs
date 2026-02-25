@@ -60,8 +60,7 @@ async fn query_arcgis_counts(
     let mut total: u64 = 0;
     for query_url in config.query_urls {
         let url = format!("{query_url}?where={where_clause}&returnCountOnly=true&f=json");
-        let response = client.get(&url).send().await.ok()?;
-        let body: serde_json::Value = response.json().await.ok()?;
+        let body = crate::retry::send_json(|| client.get(&url)).await.ok()?;
         let count = body.get("count")?.as_u64()?;
         total += count;
     }
@@ -148,8 +147,7 @@ pub async fn fetch_arcgis(
         for query_url in config.query_urls {
             let url = format!("{query_url}?where={where_clause}&returnCountOnly=true&f=json");
             let count = async {
-                let resp = client.get(&url).send().await.ok()?;
-                let body: serde_json::Value = resp.json().await.ok()?;
+                let body = crate::retry::send_json(|| client.get(&url)).await.ok()?;
                 body.get("count")?.as_u64()
             }
             .await
@@ -215,8 +213,7 @@ pub async fn fetch_arcgis(
                 log::info!("{}: offset={offset}, limit={page_limit}", config.label);
             }
 
-            let response = client.get(&url).send().await?;
-            let body: serde_json::Value = response.json().await?;
+            let body = crate::retry::send_json(|| client.get(&url)).await?;
 
             let features = body
                 .get("features")

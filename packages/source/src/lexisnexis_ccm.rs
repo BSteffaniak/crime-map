@@ -98,18 +98,10 @@ fn build_request_body(bbox: &[f64; 4], from_date: &str, to_date: &str) -> serde_
 
 /// Obtains an anonymous JWT token from the CCM auth endpoint.
 async fn get_token(client: &reqwest::Client) -> Result<String, SourceError> {
-    let resp = client
-        .get("https://communitycrimemap.com/api/v1/auth/newToken")
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        return Err(SourceError::Normalization {
-            message: format!("CCM auth returned {}", resp.status()),
-        });
-    }
-
-    let body: serde_json::Value = resp.json().await?;
+    let body = crate::retry::send_json(|| {
+        client.get("https://communitycrimemap.com/api/v1/auth/newToken")
+    })
+    .await?;
     body.get("data")
         .and_then(|d| d.get("jwt"))
         .and_then(serde_json::Value::as_str)
@@ -230,31 +222,15 @@ pub async fn fetch_lexisnexis_ccm(
 
         let body = build_request_body(config.bbox, &start_str, &end_str);
 
-        let response = client
-            .post("https://communitycrimemap.com/api/v1/search/load-data")
-            .header("Authorization", format!("Bearer {token}"))
-            .header("Origin", "https://communitycrimemap.com")
-            .header("Referer", "https://communitycrimemap.com/map")
-            .json(&body)
-            .send()
-            .await?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let err_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| String::from("(no body)"));
-            return Err(SourceError::Normalization {
-                message: format!(
-                    "{}: CCM API returned {status}: {}",
-                    config.label,
-                    &err_body[..err_body.len().min(500)],
-                ),
-            });
-        }
-
-        let resp_body: serde_json::Value = response.json().await?;
+        let resp_body = crate::retry::send_json(|| {
+            client
+                .post("https://communitycrimemap.com/api/v1/search/load-data")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Origin", "https://communitycrimemap.com")
+                .header("Referer", "https://communitycrimemap.com/map")
+                .json(&body)
+        })
+        .await?;
 
         // Extract pins from data.data.pins (object with string keys)
         let pins = resp_body

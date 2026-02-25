@@ -27,6 +27,7 @@ pub mod pdf_extract;
 pub mod press_release;
 pub mod progress;
 pub mod registry;
+pub mod retry;
 pub mod socrata;
 pub mod source_def;
 pub mod type_mapping;

@@ -38,8 +38,7 @@ async fn query_odata_count(
         let since_str = since.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
         write!(url, "?$filter={} gt {since_str}", config.date_column).unwrap();
     }
-    let response = client.get(&url).send().await.ok()?;
-    let text = response.text().await.ok()?;
+    let text = crate::retry::send_text(|| client.get(&url)).await.ok()?;
     text.trim().parse::<u64>().ok()
 }
 
@@ -117,8 +116,8 @@ pub async fn fetch_odata(
             log::info!("{}: offset={offset}, limit={page_limit}", config.label);
         }
 
-        let response = client.get(&url).send().await?;
-        let records: Vec<serde_json::Value> = response.json().await?;
+        let body = crate::retry::send_json(|| client.get(&url)).await?;
+        let records: Vec<serde_json::Value> = serde_json::from_value(body)?;
 
         let count = records.len() as u64;
         if count == 0 {

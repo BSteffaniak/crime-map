@@ -252,29 +252,14 @@ pub async fn fetch_city_protect(
                 config.label,
             );
 
-            let response = client
-                .post(config.api_url)
-                .header("Origin", "https://cityprotect.com")
-                .header("Referer", "https://cityprotect.com/")
-                .json(&body)
-                .send()
-                .await?;
-
-            let status = response.status();
-            if !status.is_success() {
-                let err_body = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| String::from("(no body)"));
-                return Err(SourceError::Normalization {
-                    message: format!(
-                        "{}: CityProtect API returned {status}: {err_body}",
-                        config.label
-                    ),
-                });
-            }
-
-            let resp_body: serde_json::Value = response.json().await?;
+            let resp_body = crate::retry::send_json(|| {
+                client
+                    .post(config.api_url)
+                    .header("Origin", "https://cityprotect.com")
+                    .header("Referer", "https://cityprotect.com/")
+                    .json(&body)
+            })
+            .await?;
 
             // Extract incidents from result.list.incidents
             let incidents = resp_body

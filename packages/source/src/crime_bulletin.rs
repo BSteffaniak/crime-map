@@ -418,14 +418,7 @@ pub async fn fetch_crime_bulletin(
         config.url,
     );
 
-    let resp = client.get(config.url).send().await?;
-    if !resp.status().is_success() {
-        return Err(SourceError::Normalization {
-            message: format!("{}: bulletin page returned {}", config.label, resp.status(),),
-        });
-    }
-
-    let html = resp.text().await?;
+    let html = crate::retry::send_text(|| client.get(config.url)).await?;
 
     // Parse accordion items in a non-async block (Html is not Send)
     let all_entries = {

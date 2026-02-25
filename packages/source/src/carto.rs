@@ -42,13 +42,9 @@ async fn query_carto_count(
             )
         },
     );
-    let response = client
-        .get(config.api_url)
-        .query(&[("q", &query)])
-        .send()
+    let body = crate::retry::send_json(|| client.get(config.api_url).query(&[("q", &query)]))
         .await
         .ok()?;
-    let body: serde_json::Value = response.json().await.ok()?;
     body.get("rows")?
         .as_array()?
         .first()?
@@ -143,12 +139,8 @@ pub async fn fetch_carto(
             log::info!("{}: offset={offset}, limit={page_limit}", config.label);
         }
 
-        let response = client
-            .get(config.api_url)
-            .query(&[("q", &query)])
-            .send()
-            .await?;
-        let body: serde_json::Value = response.json().await?;
+        let body =
+            crate::retry::send_json(|| client.get(config.api_url).query(&[("q", &query)])).await?;
 
         let rows = body
             .get("rows")

@@ -580,17 +580,13 @@ pub async fn fetch_press_release(
             config.label,
         );
 
-        let resp = client.get(&listing_url).send().await?;
-        if !resp.status().is_success() {
-            log::warn!(
-                "{}: listing page {page_num} returned {}",
-                config.label,
-                resp.status(),
-            );
-            break;
-        }
-
-        let html = resp.text().await?;
+        let html = match crate::retry::send_text(|| client.get(&listing_url)).await {
+            Ok(text) => text,
+            Err(e) => {
+                log::warn!("{}: listing page {page_num} failed: {e}", config.label,);
+                break;
+            }
+        };
 
         // Parse the listing page in a block so the non-Send `Html` is
         // dropped before the next `.await`.
@@ -637,20 +633,13 @@ pub async fn fetch_press_release(
 
             tokio::time::sleep(tokio::time::Duration::from_millis(REQUEST_DELAY_MS)).await;
 
-            let resp = match client.get(release_url).send().await {
-                Ok(r) => r,
+            let release_html = match crate::retry::send_text(|| client.get(release_url)).await {
+                Ok(text) => text,
                 Err(e) => {
                     log::warn!("{}: failed to fetch {release_url}: {e}", config.label);
                     continue;
                 }
             };
-
-            if !resp.status().is_success() {
-                log::warn!("{}: {release_url} returned {}", config.label, resp.status(),);
-                continue;
-            }
-
-            let release_html = resp.text().await?;
             let incidents = if config.parse_mode == "drupal_narrative" {
                 parse_drupal_narrative(&release_html)
             } else {
