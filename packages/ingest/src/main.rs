@@ -474,7 +474,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 nominatim_only,
             };
 
-            let result = crime_map_ingest::run_geocode(&args, Some(geocode_bar.clone()))?;
+            let result = crime_map_ingest::run_geocode(&args, Some(geocode_bar.clone())).await?;
             geocode_bar.finish("Geocoding complete".to_string());
 
             let elapsed = start.elapsed();

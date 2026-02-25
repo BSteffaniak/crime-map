@@ -318,7 +318,7 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
             nominatim_only: geocode_nominatim_only,
         };
 
-        match crime_map_ingest::run_geocode(&args, Some(geocode_bar.clone())) {
+        match crime_map_ingest::run_geocode(&args, Some(geocode_bar.clone())).await {
             Ok(result) => {
                 geocode_bar.finish(format!(
                     "[{current_step}/{total_steps}] Geocoded {} incidents",

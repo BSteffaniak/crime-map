@@ -174,8 +174,8 @@ pub async fn run_sync(args: &SyncArgs, progress: Option<&Arc<dyn ProgressCallbac
 ///
 /// Returns an error if database connections, geocoding, or batch updates
 /// fail.
-#[allow(clippy::needless_pass_by_value)] // progress is cloned into child calls
-pub fn run_geocode(
+#[allow(clippy::needless_pass_by_value, clippy::future_not_send)]
+pub async fn run_geocode(
     args: &GeocodeArgs,
     progress: Option<Arc<dyn ProgressCallback>>,
 ) -> Result<GeocodeResult, Box<dyn std::error::Error>> {
@@ -190,7 +190,6 @@ pub fn run_geocode(
     };
 
     let cache_conn = geocode_cache::open_default()?;
-    let rt = tokio::runtime::Handle::current();
 
     let mut missing_geocoded = 0u64;
 
@@ -204,8 +203,8 @@ pub fn run_geocode(
             args.limit,
             args.nominatim_only,
             progress.clone(),
-            &rt,
-        )?;
+        )
+        .await?;
         missing_geocoded += count;
 
         if args.limit.is_some_and(|l| missing_geocoded >= l) {
@@ -234,8 +233,8 @@ pub fn run_geocode(
                     remaining_limit,
                     args.nominatim_only,
                     progress.clone(),
-                    &rt,
-                )?;
+                )
+                .await?;
                 re_geocoded += count;
             }
         }
@@ -626,14 +625,17 @@ pub async fn sync_source(
 /// # Errors
 ///
 /// Returns an error if cache lookups, geocoder requests, or cache writes fail.
-#[allow(clippy::too_many_lines, clippy::type_complexity)]
-pub fn resolve_addresses(
+#[allow(
+    clippy::too_many_lines,
+    clippy::type_complexity,
+    clippy::future_not_send
+)]
+pub async fn resolve_addresses(
     cache_conn: &Connection,
     client: &reqwest::Client,
     addr_groups: &std::collections::BTreeMap<(String, String, String), Vec<String>>,
     nominatim_only: bool,
     progress: &Option<Arc<dyn ProgressCallback>>,
-    rt: &tokio::runtime::Handle,
 ) -> Result<(Vec<(String, f64, f64)>, Vec<String>), Box<dyn std::error::Error>> {
     use crime_map_geocoder::address::build_one_line_address;
     use crime_map_geocoder::service_registry::{ProviderConfig, enabled_services};
@@ -731,7 +733,7 @@ pub fn resolve_addresses(
                 benchmark,
                 max_batch_size,
             } => {
-                rt.block_on(resolve_via_census(
+                resolve_via_census(
                     client,
                     base_url,
                     benchmark,
@@ -739,7 +741,8 @@ pub fn resolve_addresses(
                     &unresolved,
                     &mut state,
                     progress.as_ref(),
-                ))?;
+                )
+                .await?;
             }
             ProviderConfig::Pelias {
                 base_url,
@@ -755,15 +758,13 @@ pub fn resolve_addresses(
                 let cf_access = crime_map_geocoder::pelias::cf_access_credentials_from_env();
 
                 // Health check — skip if the instance is unreachable
-                if !rt.block_on(crime_map_geocoder::pelias::is_available(
-                    client,
-                    &base_url,
-                    cf_access.as_ref(),
-                )) {
+                if !crime_map_geocoder::pelias::is_available(client, &base_url, cf_access.as_ref())
+                    .await
+                {
                     log::info!("Pelias at {base_url} is not reachable, skipping");
                     continue;
                 }
-                rt.block_on(resolve_via_pelias(
+                resolve_via_pelias(
                     client,
                     &base_url,
                     country_code,
@@ -772,20 +773,22 @@ pub fn resolve_addresses(
                     &mut state,
                     progress.as_ref(),
                     cf_access.as_ref(),
-                ))?;
+                )
+                .await?;
             }
             ProviderConfig::Nominatim {
                 base_url,
                 rate_limit_ms,
             } => {
-                rt.block_on(resolve_via_nominatim(
+                resolve_via_nominatim(
                     client,
                     base_url,
                     *rate_limit_ms,
                     &unresolved,
                     &mut state,
                     progress.as_ref(),
-                ))?;
+                )
+                .await?;
             }
         }
     }
@@ -1064,15 +1067,18 @@ async fn resolve_via_nominatim(
 /// # Errors
 ///
 /// Returns an error if database queries, geocoding, or batch updates fail.
-#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
-pub fn geocode_missing(
+#[allow(
+    clippy::too_many_lines,
+    clippy::needless_pass_by_value,
+    clippy::future_not_send
+)]
+pub async fn geocode_missing(
     source_conn: &Connection,
     cache_conn: &Connection,
     batch_size: u64,
     limit: Option<u64>,
     nominatim_only: bool,
     progress: Option<Arc<dyn ProgressCallback>>,
-    rt: &tokio::runtime::Handle,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     use crime_map_geocoder::address::{CleanedAddress, clean_block_address};
     use std::collections::BTreeMap;
@@ -1178,14 +1184,8 @@ pub fn geocode_missing(
             rows.len()
         );
 
-        let (pending_updates, all_ids) = resolve_addresses(
-            cache_conn,
-            &client,
-            &addr_groups,
-            nominatim_only,
-            &progress,
-            rt,
-        )?;
+        let (pending_updates, all_ids) =
+            resolve_addresses(cache_conn, &client, &addr_groups, nominatim_only, &progress).await?;
 
         let mut batch_geocoded = 0u64;
 
@@ -1241,15 +1241,18 @@ pub fn geocode_missing(
 /// # Errors
 ///
 /// Returns an error if database queries, geocoding, or batch updates fail.
-#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
-pub fn re_geocode_source(
+#[allow(
+    clippy::too_many_lines,
+    clippy::needless_pass_by_value,
+    clippy::future_not_send
+)]
+pub async fn re_geocode_source(
     source_conn: &Connection,
     cache_conn: &Connection,
     batch_size: u64,
     limit: Option<u64>,
     nominatim_only: bool,
     progress: Option<Arc<dyn ProgressCallback>>,
-    rt: &tokio::runtime::Handle,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     use crime_map_geocoder::address::{CleanedAddress, clean_block_address};
     use std::collections::BTreeMap;
@@ -1355,14 +1358,8 @@ pub fn re_geocode_source(
             rows.len()
         );
 
-        let (pending_updates, all_ids) = resolve_addresses(
-            cache_conn,
-            &client,
-            &addr_groups,
-            nominatim_only,
-            &progress,
-            rt,
-        )?;
+        let (pending_updates, all_ids) =
+            resolve_addresses(cache_conn, &client, &addr_groups, nominatim_only, &progress).await?;
 
         let mut batch_geocoded = 0u64;
 

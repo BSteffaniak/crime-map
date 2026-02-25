@@ -73,7 +73,7 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
     match IngestAction::ALL[idx] {
         IngestAction::SyncSources => sync_sources(multi).await?,
         IngestAction::ListSources => list_sources(),
-        IngestAction::Geocode => geocode_interactive(multi)?,
+        IngestAction::Geocode => geocode_interactive(multi).await?,
         IngestAction::IngestTracts => ingest_census_tracts().await?,
         IngestAction::IngestPlaces => ingest_census_places().await?,
         IngestAction::IngestCounties => ingest_census_counties().await?,
@@ -137,7 +137,8 @@ fn list_sources() {
 }
 
 /// Prompts for geocoding parameters and runs via [`crate::run_geocode`].
-fn geocode_interactive(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>> {
+#[allow(clippy::future_not_send)]
+async fn geocode_interactive(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>> {
     let source_ids = crime_map_cli_utils::prompt_source_multiselect(
         "Sources to geocode (space=toggle, a=all, enter=confirm)",
     )?;
@@ -165,7 +166,7 @@ fn geocode_interactive(multi: &MultiProgress) -> Result<(), Box<dyn std::error::
         nominatim_only,
     };
 
-    let result = crate::run_geocode(&args, Some(geocode_bar.clone()))?;
+    let result = crate::run_geocode(&args, Some(geocode_bar.clone())).await?;
     geocode_bar.finish("Geocoding complete".to_string());
 
     let elapsed = start.elapsed();
