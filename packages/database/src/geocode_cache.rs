@@ -87,6 +87,7 @@ pub fn cache_lookup(
             stmt.raw_bind_parameter(i + 1, key)?;
         }
 
+        stmt.raw_execute()?;
         let mut rows = stmt.raw_query();
         while let Some(row) = rows.next()? {
             let key: String = row.get(0)?;
