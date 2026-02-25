@@ -164,7 +164,6 @@ async fn geocode_interactive(multi: &MultiProgress) -> Result<(), Box<dyn std::e
         batch_size,
         limit,
         nominatim_only,
-        max_time: None,
     };
 
     let result = crate::run_geocode(&args, Some(geocode_bar.clone())).await?;

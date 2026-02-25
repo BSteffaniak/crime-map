@@ -478,10 +478,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 batch_size,
                 limit,
                 nominatim_only,
-                max_time: max_time.map(|m| std::time::Duration::from_secs(m * 60)),
             };
 
-            let result = crime_map_ingest::run_geocode(&args, Some(geocode_bar.clone())).await?;
+            let geocode_future = crime_map_ingest::run_geocode(&args, Some(geocode_bar.clone()));
+
+            let result = if let Some(minutes) = max_time {
+                let duration = std::time::Duration::from_secs(minutes * 60);
+                match tokio::time::timeout(duration, geocode_future).await {
+                    Ok(inner) => inner?,
+                    Err(_elapsed) => {
+                        log::info!(
+                            "Geocode time limit ({minutes}m) reached, stopping gracefully. \
+                             Progress is preserved in DuckDB files."
+                        );
+                        geocode_bar.finish("Geocoding timed out (progress saved)".to_string());
+
+                        let elapsed = start.elapsed();
+                        log::info!("Geocoding stopped after {:.1}s", elapsed.as_secs_f64());
+                        return Ok(());
+                    }
+                }
+            } else {
+                geocode_future.await?
+            };
+
             geocode_bar.finish("Geocoding complete".to_string());
 
             let elapsed = start.elapsed();

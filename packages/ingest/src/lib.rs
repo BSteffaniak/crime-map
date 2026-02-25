@@ -75,11 +75,6 @@ pub struct GeocodeArgs {
     pub limit: Option<u64>,
     /// Skip Census Bureau batch geocoder and only use Nominatim.
     pub nominatim_only: bool,
-    /// Maximum wall-clock time to spend geocoding. When the deadline is
-    /// reached, geocoding stops gracefully after the current batch and
-    /// returns whatever progress was made. The caller should push the
-    /// updated `DuckDB` files to R2 so progress is preserved.
-    pub max_time: Option<std::time::Duration>,
 }
 
 /// Result of a [`run_sync`] call.
@@ -195,19 +190,11 @@ pub async fn run_geocode(
     };
 
     let cache_conn = geocode_cache::open_default()?;
-    let deadline = args.max_time.map(|d| std::time::Instant::now() + d);
 
     let mut missing_geocoded = 0u64;
 
     // Phase 1: Geocode incidents missing coordinates
     for src in &target_sources {
-        if let Some(d) = deadline
-            && std::time::Instant::now() >= d
-        {
-            log::info!("Geocode time limit reached, stopping (phase 1)");
-            break;
-        }
-
         let source_conn = source_db::open_by_id(src.id())?;
         let count = geocode_missing(
             &source_conn,
@@ -216,7 +203,6 @@ pub async fn run_geocode(
             args.limit,
             args.nominatim_only,
             progress.clone(),
-            deadline,
         )
         .await?;
         missing_geocoded += count;
@@ -229,8 +215,7 @@ pub async fn run_geocode(
     // Phase 2: Re-geocode sources with imprecise coords
     let mut re_geocoded = 0u64;
     let remaining_limit = args.limit.map(|l| l.saturating_sub(missing_geocoded));
-    let time_remaining = deadline.is_none_or(|d| std::time::Instant::now() < d);
-    if time_remaining && remaining_limit.is_none_or(|l| l > 0) {
+    if remaining_limit.is_none_or(|l| l > 0) {
         let re_geocode_sources: Vec<&&SourceDefinition> =
             target_sources.iter().filter(|s| s.re_geocode()).collect();
 
@@ -240,13 +225,6 @@ pub async fn run_geocode(
                 re_geocode_sources.len()
             );
             for src in re_geocode_sources {
-                if let Some(d) = deadline
-                    && std::time::Instant::now() >= d
-                {
-                    log::info!("Geocode time limit reached, stopping (phase 2)");
-                    break;
-                }
-
                 let source_conn = source_db::open_by_id(src.id())?;
                 let count = re_geocode_source(
                     &source_conn,
@@ -255,20 +233,10 @@ pub async fn run_geocode(
                     remaining_limit,
                     args.nominatim_only,
                     progress.clone(),
-                    deadline,
                 )
                 .await?;
                 re_geocoded += count;
             }
-        }
-    }
-
-    if let Some(d) = deadline {
-        let elapsed = d.saturating_duration_since(std::time::Instant::now());
-        if elapsed.is_zero() {
-            log::info!(
-                "Geocode completed at time limit: {missing_geocoded} missing + {re_geocoded} re-geocoded"
-            );
         }
     }
 
@@ -1111,7 +1079,6 @@ pub async fn geocode_missing(
     limit: Option<u64>,
     nominatim_only: bool,
     progress: Option<Arc<dyn ProgressCallback>>,
-    deadline: Option<std::time::Instant>,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     use crime_map_geocoder::address::{CleanedAddress, clean_block_address};
     use std::collections::BTreeMap;
@@ -1138,14 +1105,6 @@ pub async fn geocode_missing(
     let mut batch_num = 0u64;
 
     loop {
-        // Check time limit between batches
-        if let Some(d) = deadline
-            && std::time::Instant::now() >= d
-        {
-            log::info!("Geocode time limit reached after {grand_total} incidents, saving progress");
-            break;
-        }
-
         batch_num += 1;
 
         let effective_size = limit.map_or(batch_size, |l| batch_size.min(l - grand_total));
@@ -1294,7 +1253,6 @@ pub async fn re_geocode_source(
     limit: Option<u64>,
     nominatim_only: bool,
     progress: Option<Arc<dyn ProgressCallback>>,
-    deadline: Option<std::time::Instant>,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     use crime_map_geocoder::address::{CleanedAddress, clean_block_address};
     use std::collections::BTreeMap;
@@ -1321,16 +1279,6 @@ pub async fn re_geocode_source(
     let mut batch_num = 0u64;
 
     loop {
-        // Check time limit between batches
-        if let Some(d) = deadline
-            && std::time::Instant::now() >= d
-        {
-            log::info!(
-                "Re-geocode time limit reached after {grand_total} incidents, saving progress"
-            );
-            break;
-        }
-
         batch_num += 1;
 
         let effective_size = limit.map_or(batch_size, |l| batch_size.min(l - grand_total));
