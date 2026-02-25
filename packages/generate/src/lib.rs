@@ -431,7 +431,7 @@ fn query_fingerprints(
 
 /// Counts incidents with coordinates across all source `DuckDB` files.
 ///
-/// Uses the same `has_coordinates = TRUE` filter as the export loops so
+/// Uses the same `has_coordinates = TRUE` + coordinate range filter as
 /// the progress bar total matches the real feature count.
 ///
 /// # Errors
@@ -448,7 +448,7 @@ fn count_exportable_records(source_ids: &[String]) -> Result<u64, Box<dyn std::e
 
         let conn = crime_map_database::source_db::open_by_id(sid)?;
         let mut stmt =
-            conn.prepare("SELECT COUNT(*) FROM incidents WHERE has_coordinates = TRUE")?;
+            conn.prepare("SELECT COUNT(*) FROM incidents WHERE has_coordinates = TRUE AND longitude BETWEEN -180 AND 180 AND latitude BETWEEN -90 AND 90")?;
         let count: i64 = stmt.query_row([], |row| row.get(0))?;
         #[allow(clippy::cast_sign_loss)]
         {
@@ -745,7 +745,10 @@ where
                     description, block_address,
                     city, state, arrest_made, domestic, location_type
              FROM incidents
-             WHERE has_coordinates = TRUE AND rowid > ?
+             WHERE has_coordinates = TRUE
+               AND longitude BETWEEN -180 AND 180
+               AND latitude BETWEEN -90 AND 90
+               AND rowid > ?
              ORDER BY rowid ASC
              LIMIT ?",
         )?;
@@ -1096,7 +1099,10 @@ async fn generate_sidebar_db(
                                 description, block_address,
                                 city, state, arrest_made, domestic, location_type
                          FROM incidents
-                         WHERE has_coordinates = TRUE AND rowid > ?
+                         WHERE has_coordinates = TRUE
+                   AND longitude BETWEEN -180 AND 180
+                   AND latitude BETWEEN -90 AND 90
+                   AND rowid > ?
                          ORDER BY rowid ASC
                          LIMIT ?",
                     )?;
@@ -1442,7 +1448,10 @@ fn populate_duckdb_incidents(
                         description, block_address,
                         city, state, arrest_made, domestic, location_type
                  FROM incidents
-                 WHERE has_coordinates = TRUE AND rowid > ?
+                 WHERE has_coordinates = TRUE
+                   AND longitude BETWEEN -180 AND 180
+                   AND latitude BETWEEN -90 AND 90
+                   AND rowid > ?
                  ORDER BY rowid ASC
                  LIMIT ?",
             )?;
@@ -1674,7 +1683,10 @@ fn generate_h3_db(
                         description, block_address,
                         city, state, arrest_made, domestic, location_type
                  FROM incidents
-                 WHERE has_coordinates = TRUE AND rowid > ?
+                 WHERE has_coordinates = TRUE
+                   AND longitude BETWEEN -180 AND 180
+                   AND latitude BETWEEN -90 AND 90
+                   AND rowid > ?
                  ORDER BY rowid ASC
                  LIMIT ?",
             )?;
@@ -1993,7 +2005,10 @@ fn generate_metadata(
         // Collect date range
         let mut stmt = conn.prepare(
             "SELECT MIN(occurred_at)::TEXT as min_d, MAX(occurred_at)::TEXT as max_d
-             FROM incidents WHERE has_coordinates = TRUE AND occurred_at IS NOT NULL",
+              FROM incidents WHERE has_coordinates = TRUE
+                AND longitude BETWEEN -180 AND 180
+                AND latitude BETWEEN -90 AND 90
+                AND occurred_at IS NOT NULL",
         )?;
         let mut rows = stmt.query([])?;
         if let Some(row) = rows.next()? {
@@ -2162,7 +2177,10 @@ fn generate_analytics_db(
                         description, block_address,
                         city, state, arrest_made, domestic, location_type
                  FROM incidents
-                 WHERE has_coordinates = TRUE AND rowid > ?
+                 WHERE has_coordinates = TRUE
+                   AND longitude BETWEEN -180 AND 180
+                   AND latitude BETWEEN -90 AND 90
+                   AND rowid > ?
                  ORDER BY rowid ASC
                  LIMIT ?",
             )?;

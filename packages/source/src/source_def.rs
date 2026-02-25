@@ -1080,9 +1080,19 @@ impl SourceDefinition {
             let latitude = fields.lat.as_ref().and_then(|f| f.extract(record));
             let longitude = fields.lng.as_ref().and_then(|f| f.extract(record));
 
-            // Reject zero coordinates (treat as missing)
+            // Reject zero or out-of-range coordinates (treat as missing).
+            // Some sources return projected coordinates (e.g. State Plane)
+            // instead of WGS84 decimal degrees — filter those out so they
+            // can be geocoded from block addresses instead.
             let (latitude, longitude) = match (latitude, longitude) {
-                (Some(lat), Some(lng)) if lat != 0.0 && lng != 0.0 => (Some(lat), Some(lng)),
+                (Some(lat), Some(lng))
+                    if lat != 0.0
+                        && lng != 0.0
+                        && (-90.0..=90.0).contains(&lat)
+                        && (-180.0..=180.0).contains(&lng) =>
+                {
+                    (Some(lat), Some(lng))
+                }
                 _ => (None, None),
             };
 
