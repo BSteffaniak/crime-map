@@ -117,6 +117,11 @@ enum Commands {
         /// eligible incidents.
         #[arg(long)]
         sources: Option<String>,
+        /// Maximum wall-clock time (in minutes) to spend geocoding. When
+        /// the limit is reached, geocoding stops gracefully after the
+        /// current batch. Progress is preserved in the `DuckDB` files.
+        #[arg(long)]
+        max_time: Option<u64>,
     },
     /// Pull `DuckDB` files from Cloudflare R2 to the local `data/` directory
     Pull {
@@ -463,6 +468,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             batch_size,
             nominatim_only,
             sources,
+            max_time,
         } => {
             let start = Instant::now();
             let geocode_bar = IndicatifProgress::batch_bar(&multi, "Geocoding");
@@ -472,6 +478,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 batch_size,
                 limit,
                 nominatim_only,
+                max_time: max_time.map(|m| std::time::Duration::from_secs(m * 60)),
             };
 
             let result = crime_map_ingest::run_geocode(&args, Some(geocode_bar.clone())).await?;

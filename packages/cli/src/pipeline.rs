@@ -316,6 +316,7 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
             batch_size: geocode_batch_size,
             limit: None,
             nominatim_only: geocode_nominatim_only,
+            max_time: None,
         };
 
         match crime_map_ingest::run_geocode(&args, Some(geocode_bar.clone())).await {
