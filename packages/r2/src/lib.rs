@@ -87,6 +87,12 @@ pub enum R2Error {
     Io(#[from] std::io::Error),
 }
 
+/// Maximum number of download attempts (initial + retries).
+const MAX_DOWNLOAD_ATTEMPTS: u32 = 3;
+
+/// Base delay between download retries (doubles each attempt).
+const RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Client for syncing `DuckDB` files with Cloudflare R2.
 pub struct R2Client {
     client: aws_sdk_s3::Client,
@@ -235,16 +241,48 @@ impl R2Client {
 
     /// Downloads an object from R2 to a local file.
     ///
+    /// Retries up to [`MAX_DOWNLOAD_ATTEMPTS`] times on transient errors
+    /// (network failures, incomplete body streams). Uses exponential backoff
+    /// between attempts.
+    ///
     /// Returns `true` if the file was downloaded, `false` if the object
     /// doesn't exist in R2 (logged as a warning).
     ///
     /// # Errors
     ///
-    /// Returns [`R2Error::Download`] on S3 failures, [`R2Error::Io`] on
-    /// local filesystem errors.
+    /// Returns [`R2Error::Download`] on S3 failures after all retries are
+    /// exhausted, [`R2Error::Io`] on local filesystem errors.
     pub async fn download(&self, key: &str, local_path: &Path) -> Result<bool, R2Error> {
         log::info!("Pulling s3://{BUCKET}/{key} -> {}", local_path.display());
 
+        let mut last_err: Option<R2Error> = None;
+
+        for attempt in 1..=MAX_DOWNLOAD_ATTEMPTS {
+            match self.download_once(key, local_path).await {
+                Ok(found) => return Ok(found),
+                Err(e @ R2Error::Download { .. }) if attempt < MAX_DOWNLOAD_ATTEMPTS => {
+                    let delay = RETRY_BASE_DELAY * 2u32.saturating_pow(attempt - 1);
+                    log::warn!(
+                        "  download attempt {attempt}/{MAX_DOWNLOAD_ATTEMPTS} failed, \
+                         retrying in {delay:.1?}..."
+                    );
+                    last_err = Some(e);
+                    tokio::time::sleep(delay).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| R2Error::Download {
+            bucket: BUCKET.to_string(),
+            key: key.to_string(),
+            source: "all download attempts exhausted".into(),
+        }))
+    }
+
+    /// Single download attempt. Separated from [`Self::download`] to keep
+    /// the retry loop clean.
+    async fn download_once(&self, key: &str, local_path: &Path) -> Result<bool, R2Error> {
         let result = self
             .client
             .get_object()
