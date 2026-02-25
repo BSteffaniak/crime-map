@@ -1,0 +1,147 @@
+name: Build Geocoder Index
+
+# Builds the Tantivy geocoder index from OpenAddresses (zip) + OSM PBF
+# data and uploads the packed index to R2.
+#
+# Disk budget on GitHub Actions (14 GB RAM, ~60 GB free after cleanup):
+#   1. Build release binary          (~2 GB target/)
+#   2. Delete target/ after build    (reclaim 2 GB)
+#   3. Download OA zip               (~6-8 GB)
+#   4. Download OSM PBF              (~9 GB)
+#   5. Build index (streams OA zip)  (~4-6 GB index on disk)
+#   6. Delete source data            (reclaim ~15 GB)
+#   7. Pack index to .tar.zst        (~2-3 GB archive)
+#   8. Delete unpacked index         (reclaim ~4-6 GB)
+#   9. Upload archive to R2
+
+on:
+  workflow_dispatch:
+    inputs:
+      oa_url:
+        description: "OpenAddresses US zip URL (from batch.openaddresses.io)"
+        required: true
+        type: string
+      skip_osm:
+        description: "Skip OSM PBF download and indexing"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: build-geocoder-index
+  cancel-in-progress: false
+
+env:
+  RUST_LOG: crime_map=info
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+  R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+
+jobs:
+  build-index:
+    name: Build Geocoder Index
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          echo "=== Before cleanup ==="
+          df -h /
+          # Remove large pre-installed packages we don't need
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /usr/share/swift /opt/hostedtoolcache
+          sudo apt-get clean
+          echo "=== After cleanup ==="
+          df -h /
+
+      - name: Setup pipeline tools (with Rust)
+        uses: ./.github/actions/setup-pipeline
+        with:
+          install-rust: 'true'
+          rust-cache-key: geocoder-index
+
+      - name: Build release binary
+        run: cargo build --release -p crime_map_ingest
+
+      - name: Stage binary and delete build artifacts
+        run: |
+          mkdir -p staging
+          cp target/release/crime_map_ingest staging/
+          # Reclaim ~2+ GB from build artifacts
+          rm -rf target/
+          echo "=== After deleting target/ ==="
+          df -h /
+
+      - name: Download OpenAddresses data
+        run: |
+          OA_PATH="data/shared/openaddresses.zip"
+          mkdir -p data/shared
+          echo "Downloading OpenAddresses data..."
+          curl -L --retry 3 --retry-delay 10 -o "$OA_PATH" "${{ inputs.oa_url }}"
+          ls -lh "$OA_PATH"
+          echo "=== Disk after OA download ==="
+          df -h /
+
+      - name: Download OSM PBF
+        if: inputs.skip_osm != true
+        run: |
+          OSM_DIR="data/shared/osm"
+          mkdir -p "$OSM_DIR"
+          echo "Downloading US OSM PBF from Geofabrik..."
+          curl -L --retry 3 --retry-delay 10 -o "$OSM_DIR/us-latest.osm.pbf" \
+            "https://download.geofabrik.de/north-america/us-latest.osm.pbf"
+          ls -lh "$OSM_DIR/us-latest.osm.pbf"
+          echo "=== Disk after OSM download ==="
+          df -h /
+
+      - name: Build geocoder index
+        run: |
+          BUILD_ARGS="geocoder-build --heap-mb 512 --oa-archive data/shared/openaddresses.zip"
+          if [ "${{ inputs.skip_osm }}" = "true" ]; then
+            BUILD_ARGS="$BUILD_ARGS --skip-osm"
+          fi
+          staging/crime_map_ingest $BUILD_ARGS
+          echo "=== Index directory ==="
+          du -sh data/shared/geocoder_index/ 2>/dev/null || echo "No index dir"
+          echo "=== Disk after index build ==="
+          df -h /
+
+      - name: Delete source data to free disk
+        run: |
+          rm -f data/shared/openaddresses.zip
+          rm -rf data/shared/osm/
+          echo "=== Disk after deleting source data ==="
+          df -h /
+
+      - name: Pack geocoder index
+        run: |
+          staging/crime_map_ingest geocoder-pack
+          echo "=== Archive size ==="
+          ls -lh data/shared/geocoder_index.tar.zst
+          echo "=== Disk after packing ==="
+          df -h /
+
+      - name: Delete unpacked index
+        run: |
+          rm -rf data/shared/geocoder_index/
+          echo "=== Disk after deleting unpacked index ==="
+          df -h /
+
+      - name: Push geocoder index to R2
+        run: |
+          staging/crime_map_ingest push --shared-only
+
+      - name: Summary
+        run: |
+          echo "### Geocoder Index Build Complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          ARCHIVE_SIZE=$(stat -c%s data/shared/geocoder_index.tar.zst 2>/dev/null || echo "0")
+          ARCHIVE_MB=$((ARCHIVE_SIZE / 1048576))
+          echo "- Archive size: ${ARCHIVE_MB} MB" >> "$GITHUB_STEP_SUMMARY"
+          echo "- OA URL: \`${{ inputs.oa_url }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Skip OSM: ${{ inputs.skip_osm }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Uploaded to R2 as \`geocoder_index.tar.zst\`" >> "$GITHUB_STEP_SUMMARY"

@@ -219,6 +219,15 @@ enum Commands {
         /// Writer heap size in MB (default: 256).
         #[arg(long, default_value = "256")]
         heap_mb: usize,
+        /// Path to an `OpenAddresses` `.tar.zst` archive. When set,
+        /// CSV files are streamed directly from the archive without
+        /// extracting to disk (saves ~30 GB on CI runners).
+        #[arg(long)]
+        oa_archive: Option<String>,
+        /// Skip OSM PBF indexing. Useful for quick builds with only
+        /// `OpenAddresses` data.
+        #[arg(long)]
+        skip_osm: bool,
     },
     /// Pack the geocoder index into a `.tar.zst` archive for R2 upload.
     GeocoderPack,
@@ -845,35 +854,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 elapsed.as_secs_f64()
             );
         }
-        Commands::GeocoderBuild { heap_mb } => {
+        Commands::GeocoderBuild {
+            heap_mb,
+            oa_archive,
+            skip_osm,
+        } => {
             let start = Instant::now();
 
             let index_dir = crime_map_geocoder_index::default_index_dir();
             let oa_dir = crime_map_geocoder_index::default_openaddresses_dir();
             let osm_path = crime_map_geocoder_index::default_osm_pbf_path();
 
-            let oa_ref = if oa_dir.exists() {
+            let oa_archive_path = oa_archive.map(std::path::PathBuf::from);
+
+            let oa_dir_ref = if oa_archive_path.is_some() {
+                // When using an archive, skip the directory scan
+                None
+            } else if oa_dir.exists() {
                 Some(oa_dir.as_path())
             } else {
                 log::warn!("OpenAddresses directory not found: {}", oa_dir.display());
                 None
             };
 
-            let osm_ref = if osm_path.exists() {
+            let osm_ref = if skip_osm {
+                None
+            } else if osm_path.exists() {
                 Some(osm_path.as_path())
             } else {
                 log::warn!("OSM PBF not found: {}", osm_path.display());
                 None
             };
 
-            if oa_ref.is_none() && osm_ref.is_none() {
+            if oa_dir_ref.is_none() && oa_archive_path.is_none() && osm_ref.is_none() {
                 return Err("No address data found. Run `geocoder-download` first.".into());
             }
 
             let heap_bytes = heap_mb * 1024 * 1024;
-            let stats =
-                crime_map_geocoder_index::build_index(&index_dir, oa_ref, osm_ref, heap_bytes)
-                    .await?;
+            let stats = crime_map_geocoder_index::build_index(
+                &index_dir,
+                crime_map_geocoder_index::BuildConfig {
+                    oa_dir: oa_dir_ref,
+                    oa_archive: oa_archive_path.as_deref(),
+                    osm_pbf: osm_ref,
+                    writer_heap_bytes: heap_bytes,
+                },
+            )
+            .await?;
 
             let elapsed = start.elapsed();
             #[allow(clippy::cast_precision_loss)]

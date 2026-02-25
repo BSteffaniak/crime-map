@@ -164,6 +164,7 @@ tantivy = { version = "0.25.0", default-features = false, features = [
 ] }
 osmpbf = { version = "0.3.8", default-features = false }
 tar = { version = "0.4.44", default-features = false }
+zip = { version = "8.1.0", default-features = false, features = ["deflate"] }
 zstd = { version = "0.13.3", default-features = false }
 
 # AWS SDK

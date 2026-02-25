@@ -314,6 +314,14 @@ jobs:
           crime_map_ingest pull --sources ${{ matrix.sources }}
           crime_map_ingest pull --shared-only
 
+      - name: Unpack geocoder index (if available)
+        run: |
+          if [ -f data/shared/geocoder_index.tar.zst ]; then
+            crime_map_ingest geocoder-unpack
+          else
+            echo "No geocoder index archive found, skipping unpack"
+          fi
+
       - name: Ingest sources
         run: |
           INGEST_ARGS="sync-all --sources ${{ matrix.sources }}"

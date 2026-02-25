@@ -291,11 +291,27 @@ fn search_sync(
     }))
 }
 
+/// Configuration for building a geocoder index.
+///
+/// Specifies the data sources to include. At least one of `oa_dir`,
+/// `oa_archive`, or `osm_pbf` must be provided.
+pub struct BuildConfig<'a> {
+    /// Directory containing extracted `OpenAddresses` CSV files.
+    pub oa_dir: Option<&'a Path>,
+    /// Path to an `OpenAddresses` `.tar.zst` archive (streamed
+    /// in-memory, no extraction to disk).
+    pub oa_archive: Option<&'a Path>,
+    /// Path to a US OSM PBF extract.
+    pub osm_pbf: Option<&'a Path>,
+    /// Tantivy writer heap size in bytes.
+    pub writer_heap_bytes: usize,
+}
+
 /// Builds a geocoder index from `OpenAddresses` and OSM data.
 ///
 /// This is the main entry point for index construction. It:
 /// 1. Creates or overwrites the index directory
-/// 2. Parses all `OpenAddresses` CSV files from the OA directory
+/// 2. Parses `OpenAddresses` CSV files (from directory or `.tar.zst` archive)
 /// 3. Parses the OSM PBF file for address nodes
 /// 4. Commits and optimizes the index
 ///
@@ -304,18 +320,19 @@ fn search_sync(
 /// Returns an error if data parsing or index writing fails.
 pub async fn build_index(
     index_dir: &Path,
-    oa_dir: Option<&Path>,
-    osm_pbf: Option<&Path>,
-    writer_heap_bytes: usize,
+    config: BuildConfig<'_>,
 ) -> Result<IndexStats, GeocoderIndexError> {
     let index_dir = index_dir.to_path_buf();
-    let oa_dir = oa_dir.map(Path::to_path_buf);
-    let osm_pbf = osm_pbf.map(Path::to_path_buf);
+    let oa_dir = config.oa_dir.map(Path::to_path_buf);
+    let oa_archive = config.oa_archive.map(Path::to_path_buf);
+    let osm_pbf = config.osm_pbf.map(Path::to_path_buf);
+    let writer_heap_bytes = config.writer_heap_bytes;
 
     tokio::task::spawn_blocking(move || {
         build_index_sync(
             &index_dir,
             oa_dir.as_deref(),
+            oa_archive.as_deref(),
             osm_pbf.as_deref(),
             writer_heap_bytes,
         )
@@ -327,6 +344,7 @@ pub async fn build_index(
 fn build_index_sync(
     index_dir: &Path,
     oa_dir: Option<&Path>,
+    oa_archive: Option<&Path>,
     osm_pbf: Option<&Path>,
     writer_heap_bytes: usize,
 ) -> Result<IndexStats, GeocoderIndexError> {
@@ -362,9 +380,45 @@ fn build_index_sync(
                 }
             })?;
             oa_count = count;
-            log::info!("  OpenAddresses: {oa_count} records indexed");
+            log::info!("  OpenAddresses (dir): {oa_count} records indexed");
         } else {
             log::warn!("OpenAddresses directory not found: {}", oa_dir.display());
+        }
+    }
+
+    // Phase 1b: Index OpenAddresses data from archive (.tar.zst or .zip)
+    if let Some(archive) = oa_archive {
+        if archive.exists() {
+            log::info!(
+                "Indexing OpenAddresses data from archive: {}",
+                archive.display()
+            );
+
+            let archive_name = archive.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let is_zip = archive_name.to_ascii_lowercase().ends_with(".zip");
+
+            let count = if is_zip {
+                openaddresses::parse_zip_archive(archive, |addr| {
+                    add_document(&writer, &fields, &addr, AddressSource::OpenAddresses);
+                    total_count += 1;
+                    if total_count.is_multiple_of(1_000_000) {
+                        log::info!("  indexed {total_count} records...");
+                    }
+                })?
+            } else {
+                openaddresses::parse_tar_zst_archive(archive, |addr| {
+                    add_document(&writer, &fields, &addr, AddressSource::OpenAddresses);
+                    total_count += 1;
+                    if total_count.is_multiple_of(1_000_000) {
+                        log::info!("  indexed {total_count} records...");
+                    }
+                })?
+            };
+
+            oa_count += count;
+            log::info!("  OpenAddresses (archive): {count} records indexed");
+        } else {
+            log::warn!("OpenAddresses archive not found: {}", archive.display());
         }
     }
 
@@ -465,7 +519,17 @@ mod tests {
         let tmp = std::env::temp_dir().join("geocoder_index_test_empty");
         let _ = std::fs::remove_dir_all(&tmp);
 
-        let stats = build_index(&tmp, None, None, 50_000_000).await.unwrap();
+        let stats = build_index(
+            &tmp,
+            BuildConfig {
+                oa_dir: None,
+                oa_archive: None,
+                osm_pbf: None,
+                writer_heap_bytes: 50_000_000,
+            },
+        )
+        .await
+        .unwrap();
 
         assert_eq!(stats.total_documents, 0);
         assert_eq!(stats.openaddresses_count, 0);
@@ -495,9 +559,17 @@ mod tests {
         .unwrap();
 
         let index_dir = tmp.join("index");
-        let stats = build_index(&index_dir, Some(&oa_dir), None, 50_000_000)
-            .await
-            .unwrap();
+        let stats = build_index(
+            &index_dir,
+            BuildConfig {
+                oa_dir: Some(&oa_dir),
+                oa_archive: None,
+                osm_pbf: None,
+                writer_heap_bytes: 50_000_000,
+            },
+        )
+        .await
+        .unwrap();
 
         assert_eq!(stats.total_documents, 2);
         assert_eq!(stats.openaddresses_count, 2);

@@ -3,6 +3,7 @@
 //! Parses the standardized `OpenAddresses` CSV format and yields
 //! normalized address records for indexing.
 
+use std::io::Read;
 use std::path::Path;
 
 use serde::Deserialize;
@@ -164,6 +165,165 @@ pub fn parse_directory(
     Ok(total)
 }
 
+/// Reads and parses `OpenAddresses` CSV files from a `.tar.zst` archive.
+///
+/// Streams the archive in-memory: no files are extracted to disk.
+/// Each `.csv` entry in the archive is parsed for address records.
+///
+/// # Errors
+///
+/// Returns an error if the archive cannot be read or a CSV entry
+/// cannot be parsed.
+pub fn parse_tar_zst_archive(
+    archive_path: &Path,
+    mut on_record: impl FnMut(NormalizedAddress),
+) -> Result<u64, OaError> {
+    if !archive_path.exists() {
+        return Err(OaError::DirectoryNotFound(
+            archive_path.display().to_string(),
+        ));
+    }
+
+    log::info!(
+        "Streaming OpenAddresses data from archive: {}",
+        archive_path.display()
+    );
+
+    let file = std::fs::File::open(archive_path).map_err(|e| OaError::Io {
+        path: archive_path.display().to_string(),
+        source: e,
+    })?;
+
+    let decoder = zstd::Decoder::new(file).map_err(|e| OaError::Io {
+        path: archive_path.display().to_string(),
+        source: e,
+    })?;
+
+    let mut archive = tar::Archive::new(decoder);
+    let mut total = 0u64;
+    let mut csv_files_seen = 0u64;
+
+    let entries = archive.entries().map_err(|e| OaError::Io {
+        path: archive_path.display().to_string(),
+        source: e,
+    })?;
+
+    for entry_result in entries {
+        let entry = match entry_result {
+            Ok(e) => e,
+            Err(e) => {
+                log::warn!("  skipping corrupt tar entry: {e}");
+                continue;
+            }
+        };
+
+        let entry_path = match entry.header().path() {
+            Ok(p) => p.to_path_buf(),
+            Err(e) => {
+                log::trace!("  skipping entry with unreadable path: {e}");
+                continue;
+            }
+        };
+
+        // Only process .csv files
+        let is_csv = entry_path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("csv"));
+        if !is_csv {
+            continue;
+        }
+
+        csv_files_seen += 1;
+        match parse_csv_reader(entry, &mut on_record) {
+            Ok(count) => {
+                total += count;
+                if csv_files_seen.is_multiple_of(100) {
+                    log::info!("  processed {csv_files_seen} CSV files, {total} records so far...");
+                }
+            }
+            Err(e) => {
+                log::warn!("  skipping {}: {e}", entry_path.display());
+            }
+        }
+    }
+
+    log::info!("  archive complete: {csv_files_seen} CSV files, {total} records");
+
+    Ok(total)
+}
+
+/// Reads and parses `OpenAddresses` CSV files from a `.zip` archive.
+///
+/// Reads zip entries sequentially; no files are extracted to disk.
+/// Each `.csv` entry in the archive is parsed for address records.
+///
+/// # Errors
+///
+/// Returns an error if the archive cannot be read or a CSV entry
+/// cannot be parsed.
+pub fn parse_zip_archive(
+    archive_path: &Path,
+    mut on_record: impl FnMut(NormalizedAddress),
+) -> Result<u64, OaError> {
+    if !archive_path.exists() {
+        return Err(OaError::DirectoryNotFound(
+            archive_path.display().to_string(),
+        ));
+    }
+
+    log::info!(
+        "Streaming OpenAddresses data from zip archive: {}",
+        archive_path.display()
+    );
+
+    let file = std::fs::File::open(archive_path).map_err(|e| OaError::Io {
+        path: archive_path.display().to_string(),
+        source: e,
+    })?;
+
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| OaError::Io {
+        path: archive_path.display().to_string(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+    })?;
+
+    let mut total = 0u64;
+    let mut csv_files_seen = 0u64;
+
+    for i in 0..archive.len() {
+        let entry = match archive.by_index(i) {
+            Ok(e) => e,
+            Err(e) => {
+                log::warn!("  skipping corrupt zip entry {i}: {e}");
+                continue;
+            }
+        };
+
+        let entry_name = entry.name().to_string();
+
+        // Only process .csv files
+        if !entry_name.to_ascii_lowercase().ends_with(".csv") {
+            continue;
+        }
+
+        csv_files_seen += 1;
+        match parse_csv_reader(entry, &mut on_record) {
+            Ok(count) => {
+                total += count;
+                if csv_files_seen.is_multiple_of(100) {
+                    log::info!("  processed {csv_files_seen} CSV files, {total} records so far...");
+                }
+            }
+            Err(e) => {
+                log::warn!("  skipping {entry_name}: {e}");
+            }
+        }
+    }
+
+    log::info!("  zip complete: {csv_files_seen} CSV files, {total} records");
+
+    Ok(total)
+}
+
 /// Parses a single `OpenAddresses` CSV file.
 fn parse_single_file(
     path: &Path,
@@ -179,6 +339,32 @@ fn parse_single_file(
 
     let mut count = 0u64;
     for result in reader.deserialize::<OaRecord>() {
+        let record = match result {
+            Ok(r) => r,
+            Err(e) => {
+                log::trace!("  skipping malformed row: {e}");
+                continue;
+            }
+        };
+
+        if let Some(normalized) = record.to_normalized() {
+            on_record(normalized);
+            count += 1;
+        }
+    }
+
+    Ok(count)
+}
+
+/// Parses `OpenAddresses` CSV records from any `Read` source.
+fn parse_csv_reader(
+    reader: impl Read,
+    on_record: &mut impl FnMut(NormalizedAddress),
+) -> Result<u64, OaError> {
+    let mut csv_reader = csv::ReaderBuilder::new().flexible(true).from_reader(reader);
+
+    let mut count = 0u64;
+    for result in csv_reader.deserialize::<OaRecord>() {
         let record = match result {
             Ok(r) => r,
             Err(e) => {
@@ -317,5 +503,76 @@ mod tests {
             hash: None,
         };
         assert!(record.to_normalized().is_none());
+    }
+
+    #[test]
+    fn parses_zip_archive() {
+        use std::io::Write;
+
+        let tmp = std::env::temp_dir().join("oa_zip_test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let zip_path = tmp.join("test.zip");
+        let csv_data = b"LON,LAT,NUMBER,STREET,UNIT,CITY,DISTRICT,REGION,POSTCODE,ID,HASH\n\
+            -87.6278,41.8827,100,N STATE ST,,CHICAGO,,IL,60602,,\n\
+            -77.0364,38.8951,1600,PENNSYLVANIA AVE NW,,WASHINGTON,,DC,20500,,\n";
+
+        // Build a zip archive containing a single CSV
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut zip_writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        zip_writer.start_file("us/addresses.csv", options).unwrap();
+        zip_writer.write_all(csv_data).unwrap();
+        zip_writer.finish().unwrap();
+
+        let mut results = Vec::new();
+        let count = parse_zip_archive(&zip_path, |addr| results.push(addr)).unwrap();
+
+        assert_eq!(count, 2);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].street, "100 NORTH STATE STREET");
+        assert_eq!(results[0].city, "CHICAGO");
+        assert_eq!(results[1].city, "WASHINGTON");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn parses_tar_zst_archive() {
+        let tmp = std::env::temp_dir().join("oa_tar_zst_test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let csv_data = b"LON,LAT,NUMBER,STREET,UNIT,CITY,DISTRICT,REGION,POSTCODE,ID,HASH\n\
+            -87.6278,41.8827,200,W MADISON ST,,CHICAGO,,IL,60606,,\n";
+
+        // Build a tar.zst archive containing a single CSV
+        let archive_path = tmp.join("test.tar.zst");
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let encoder = zstd::Encoder::new(file, 1).unwrap();
+        let mut tar_builder = tar::Builder::new(encoder);
+
+        let mut header = tar::Header::new_gnu();
+        header.set_size(csv_data.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar_builder
+            .append_data(&mut header, "us/test.csv", &csv_data[..])
+            .unwrap();
+
+        let encoder = tar_builder.into_inner().unwrap();
+        encoder.finish().unwrap();
+
+        let mut results = Vec::new();
+        let count = parse_tar_zst_archive(&archive_path, |addr| results.push(addr)).unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(results[0].street, "200 WEST MADISON STREET");
+        assert_eq!(results[0].city, "CHICAGO");
+        assert_eq!(results[0].state, "IL");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
