@@ -2936,8 +2936,9 @@ fn export_boundary_layer(
     while let Some(row) = rows.next()? {
         let geojson_str: String = match layer {
             "states" => row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-            "counties" => row.get::<_, Option<String>>(8)?.unwrap_or_default(),
-            "places" | "tracts" => row.get::<_, Option<String>>(7)?.unwrap_or_default(),
+            "counties" | "places" | "tracts" => {
+                row.get::<_, Option<String>>(8)?.unwrap_or_default()
+            }
             "neighborhoods" => row.get::<_, Option<String>>(4)?.unwrap_or_default(),
             _ => String::new(),
         };
