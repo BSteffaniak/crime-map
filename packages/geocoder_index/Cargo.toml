@@ -1,0 +1,31 @@
+[package]
+authors = { workspace = true }
+description = "Tantivy-based geocoder index for US address lookup"
+edition = { workspace = true }
+license = { workspace = true }
+name = "crime_map_geocoder_index"
+repository = { workspace = true }
+version = "0.1.0"
+
+[dependencies]
+crime_map_geocoder_index_models = { workspace = true }
+crime_map_database = { workspace = true }
+
+tantivy = { workspace = true }
+osmpbf = { workspace = true }
+tar = { workspace = true }
+zstd = { workspace = true }
+csv = { workspace = true }
+flate2 = { workspace = true }
+regex = { workspace = true, features = ["std"] }
+reqwest = { workspace = true, features = ["stream"] }
+serde = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+futures = { workspace = true, features = ["std"] }
+indicatif = { workspace = true }
+
+[features]
+default = []
+fail-on-warnings = []

@@ -1,0 +1,7 @@
+id = "tantivy"
+name = "Tantivy Local Index"
+enabled = true
+priority = 2
+
+[provider]
+type = "tantivy_index"

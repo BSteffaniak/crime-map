@@ -181,6 +181,8 @@ impl R2Client {
     /// Pull shared databases (`boundaries.duckdb`, `geocode_cache.duckdb`)
     /// from R2.
     ///
+    /// Also pulls the geocoder index archive if it exists on R2.
+    ///
     /// # Errors
     ///
     /// Returns [`R2Error::Download`] on S3 failures, [`R2Error::Io`] on
@@ -207,10 +209,21 @@ impl R2Client {
             count += 1;
         }
 
+        // Pull geocoder index archive (optional — may not exist yet)
+        let archive_path = paths::shared_dir().join("geocoder_index.tar.zst");
+        if self
+            .download("shared/geocoder_index.tar.zst", &archive_path)
+            .await?
+        {
+            count += 1;
+        }
+
         Ok(count)
     }
 
     /// Push shared databases to R2.
+    ///
+    /// Also pushes the geocoder index archive if it exists locally.
     ///
     /// # Errors
     ///
@@ -231,6 +244,15 @@ impl R2Client {
                 "shared/geocode_cache.duckdb",
                 &paths::geocode_cache_db_path(),
             )
+            .await?
+        {
+            count += 1;
+        }
+
+        // Push geocoder index archive if it exists
+        let archive_path = paths::shared_dir().join("geocoder_index.tar.zst");
+        if self
+            .upload("shared/geocoder_index.tar.zst", &archive_path)
             .await?
         {
             count += 1;

@@ -14,6 +14,9 @@ use crate::DbError;
 /// A cached geocoding result: `(address_key, provider, lat, lng, matched_address)`.
 pub type CacheEntry = (String, String, Option<f64>, Option<f64>, Option<String>);
 
+/// A provider result row: `(address_key, lat, lng, matched_address)`.
+pub type ProviderResult = (String, Option<f64>, Option<f64>, Option<String>);
+
 /// Opens (or creates) the geocode cache `DuckDB`.
 ///
 /// # Errors
@@ -126,4 +129,51 @@ pub fn cache_insert(conn: &Connection, entries: &[CacheEntry]) -> Result<(), DbE
     }
 
     Ok(())
+}
+
+/// Retrieves all cached results for a specific provider.
+///
+/// Returns a list of `(address_key, lat, lng, matched_address)` tuples.
+/// If `limit` is `Some`, returns at most that many rows.
+///
+/// # Errors
+///
+/// Returns [`DbError`] if the query fails.
+pub fn get_by_provider(
+    conn: &Connection,
+    provider: &str,
+    limit: Option<u64>,
+) -> Result<Vec<ProviderResult>, DbError> {
+    let sql = limit.map_or_else(
+        || {
+            "SELECT address_key, lat, lng, matched_address
+             FROM geocode_cache
+             WHERE provider = ?"
+                .to_string()
+        },
+        |n| {
+            format!(
+                "SELECT address_key, lat, lng, matched_address
+                 FROM geocode_cache
+                 WHERE provider = ?
+                 LIMIT {n}"
+            )
+        },
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    stmt.raw_bind_parameter(1, provider)?;
+    stmt.raw_execute()?;
+
+    let mut results = Vec::new();
+    let mut rows = stmt.raw_query();
+    while let Some(row) = rows.next()? {
+        let key: String = row.get(0)?;
+        let lat: Option<f64> = row.get(1)?;
+        let lng: Option<f64> = row.get(2)?;
+        let matched: Option<String> = row.get(3)?;
+        results.push((key, lat, lng, matched));
+    }
+
+    Ok(results)
 }

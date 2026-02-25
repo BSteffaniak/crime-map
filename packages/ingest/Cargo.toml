@@ -21,6 +21,7 @@ crime_map_database = { workspace = true }
 crime_map_geography = { workspace = true }
 crime_map_geography_models = { workspace = true }
 crime_map_geocoder = { workspace = true }
+crime_map_geocoder_index = { workspace = true }
 crime_map_neighborhood = { workspace = true }
 crime_map_cli_utils = { workspace = true }
 crime_map_r2 = { workspace = true }
@@ -53,6 +54,7 @@ fail-on-warnings = [
   "crime_map_cli_utils/fail-on-warnings",
   "crime_map_database/fail-on-warnings",
   "crime_map_geocoder/fail-on-warnings",
+  "crime_map_geocoder_index/fail-on-warnings",
   "crime_map_geography/fail-on-warnings",
   "crime_map_neighborhood/fail-on-warnings",
   "crime_map_r2/fail-on-warnings",

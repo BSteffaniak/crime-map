@@ -8,6 +8,8 @@ repository = { workspace = true }
 version = "0.1.0"
 
 [dependencies]
+crime_map_geocoder_index = { workspace = true }
+
 futures = { workspace = true, features = ["std"] }
 log = { workspace = true }
 regex = { workspace = true, features = ["std"] }
@@ -20,4 +22,4 @@ toml = { workspace = true }
 
 [features]
 default = []
-fail-on-warnings = []
+fail-on-warnings = ["crime_map_geocoder_index/fail-on-warnings"]

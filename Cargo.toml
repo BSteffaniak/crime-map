@@ -25,6 +25,8 @@ members = [
   "packages/conversations",
   "packages/r2",
   "packages/spatial",
+  "packages/geocoder_index/models",
+  "packages/geocoder_index",
   "packages/cli",
   "packages/cli_utils",
 ]
@@ -74,6 +76,8 @@ crime_map_neighborhood = { default-features = false, path = "packages/neighborho
 crime_map_scraper = { default-features = false, path = "packages/scraper" }
 crime_map_pdf = { default-features = false, path = "packages/pdf" }
 crime_map_geocoder = { default-features = false, path = "packages/geocoder" }
+crime_map_geocoder_index = { default-features = false, path = "packages/geocoder_index" }
+crime_map_geocoder_index_models = { default-features = false, path = "packages/geocoder_index/models" }
 crime_map_cli = { default-features = false, path = "packages/cli" }
 crime_map_cli_utils = { default-features = false, path = "packages/cli_utils" }
 crime_map_r2 = { default-features = false, path = "packages/r2" }
@@ -154,6 +158,13 @@ dialoguer = { version = "0.12.0", default-features = false, features = [
   "password",
 ] }
 pdf-extract = { version = "0.10.0", default-features = false }
+tantivy = { version = "0.25.0", default-features = false, features = [
+  "mmap",
+  "lz4-compression",
+] }
+osmpbf = { version = "0.3.8", default-features = false }
+tar = { version = "0.4.44", default-features = false }
+zstd = { version = "0.13.3", default-features = false }
 
 # AWS SDK
 aws-sdk-bedrockruntime = { version = "1.124.0", default-features = false }

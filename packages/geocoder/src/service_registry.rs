@@ -45,6 +45,8 @@ pub enum ProviderConfig {
         #[serde(default = "default_concurrent")]
         concurrent_requests: usize,
     },
+    /// Tantivy local full-text search index.
+    TantivyIndex,
     /// Nominatim / `OpenStreetMap` geocoder.
     Nominatim {
         /// API base URL (e.g., `"https://nominatim.openstreetmap.org/search"`).
@@ -64,12 +66,16 @@ const fn default_concurrent() -> usize {
 
 impl GeocodingService {
     /// Returns the provider's base URL regardless of variant.
+    ///
+    /// Returns an empty string for providers without a base URL (e.g.,
+    /// `TantivyIndex`).
     #[must_use]
     pub fn base_url(&self) -> &str {
         match &self.provider {
             ProviderConfig::Census { base_url, .. }
             | ProviderConfig::Pelias { base_url, .. }
             | ProviderConfig::Nominatim { base_url, .. } => base_url,
+            ProviderConfig::TantivyIndex => "",
         }
     }
 }
@@ -79,11 +85,12 @@ impl GeocodingService {
 const SERVICE_TOMLS: &[(&str, &str)] = &[
     ("census", include_str!("../services/census.toml")),
     ("pelias", include_str!("../services/pelias.toml")),
+    ("tantivy", include_str!("../services/tantivy_index.toml")),
     ("nominatim", include_str!("../services/nominatim.toml")),
 ];
 
 #[cfg(test)]
-const EXPECTED_SERVICE_COUNT: usize = 3;
+const EXPECTED_SERVICE_COUNT: usize = 4;
 
 /// Returns all geocoding service configurations (enabled and disabled).
 ///
@@ -136,11 +143,14 @@ mod tests {
         for svc in &all_services() {
             assert!(!svc.id.is_empty(), "Service has empty id");
             assert!(!svc.name.is_empty(), "Service {} has empty name", svc.id);
-            assert!(
-                !svc.base_url().is_empty(),
-                "Service {} has empty base_url",
-                svc.id
-            );
+            // TantivyIndex has no base_url (it's a local index)
+            if !matches!(svc.provider, ProviderConfig::TantivyIndex) {
+                assert!(
+                    !svc.base_url().is_empty(),
+                    "Service {} has empty base_url",
+                    svc.id
+                );
+            }
         }
     }
 

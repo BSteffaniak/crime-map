@@ -125,6 +125,17 @@ enum Commands {
         #[arg(long)]
         max_time: Option<u64>,
     },
+    /// Compare geocoding results between Tantivy and Pelias providers.
+    ///
+    /// Queries the geocode cache for all Pelias results and runs the same
+    /// addresses through the Tantivy index. Reports hit rates, agreement
+    /// rates, and per-address differences.
+    GeocoderCompare {
+        /// Maximum number of addresses to compare. Defaults to all cached
+        /// Pelias results.
+        #[arg(long)]
+        limit: Option<u64>,
+    },
     /// Enrich incidents with spatial attribution data (census tract,
     /// place, county, state, neighborhood). Loads the boundaries spatial
     /// index and performs point-in-polygon lookups for each un-enriched
@@ -188,6 +199,31 @@ enum Commands {
     /// into the local `boundaries.duckdb`, and pushes the merged result to
     /// R2. Partition files are kept on R2 as cache for future runs.
     MergeBoundaries,
+    /// Download raw address data for building the geocoder index.
+    ///
+    /// Downloads US `OpenAddresses` CSV data and the US OpenStreetMap PBF
+    /// extract from Geofabrik into `data/shared/`.
+    GeocoderDownload {
+        /// Only download OpenStreetMap PBF data (skip `OpenAddresses`).
+        #[arg(long)]
+        osm_only: bool,
+        /// Only download `OpenAddresses` data (skip OSM PBF).
+        #[arg(long)]
+        oa_only: bool,
+    },
+    /// Build the Tantivy geocoder index from downloaded address data.
+    ///
+    /// Parses `OpenAddresses` CSV files and OSM PBF addresses, normalizes
+    /// them, and builds a full-text search index for local geocoding.
+    GeocoderBuild {
+        /// Writer heap size in MB (default: 256).
+        #[arg(long, default_value = "256")]
+        heap_mb: usize,
+    },
+    /// Pack the geocoder index into a `.tar.zst` archive for R2 upload.
+    GeocoderPack,
+    /// Unpack a geocoder index archive from R2.
+    GeocoderUnpack,
 }
 
 /// Resolves source IDs from `--sources` and/or `--states` flags to a
@@ -530,6 +566,111 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 elapsed.as_secs_f64()
             );
         }
+        Commands::GeocoderCompare { limit } => {
+            let start = Instant::now();
+
+            if !crime_map_geocoder::tantivy_index::is_available() {
+                return Err("Tantivy geocoder index not found. Run `geocoder-build` first.".into());
+            }
+
+            let geocoder = crime_map_geocoder::tantivy_index::TantivyGeocoder::open_default()
+                .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+
+            // Load Pelias results from the geocode cache
+            let cache_conn = crime_map_database::geocode_cache::open_default()?;
+            let pelias_results =
+                crime_map_database::geocode_cache::get_by_provider(&cache_conn, "pelias", limit)?;
+
+            if pelias_results.is_empty() {
+                log::info!("No Pelias results found in geocode cache. Nothing to compare.");
+                return Ok(());
+            }
+
+            log::info!(
+                "Comparing {} Pelias-cached addresses against Tantivy index...",
+                pelias_results.len()
+            );
+
+            let mut pelias_hits = 0u64;
+            let mut tantivy_hits = 0u64;
+            let mut both_hit = 0u64;
+            let mut pelias_only = 0u64;
+            let mut tantivy_only = 0u64;
+            let mut agreement_close = 0u64; // both hit and within 100m
+            let mut total = 0u64;
+
+            for (address_key, pelias_lat, pelias_lng, _matched) in &pelias_results {
+                total += 1;
+                let pelias_has_coords = pelias_lat.is_some() && pelias_lng.is_some();
+                if pelias_has_coords {
+                    pelias_hits += 1;
+                }
+
+                match crime_map_geocoder::tantivy_index::geocode_freeform(&geocoder, address_key)
+                    .await
+                {
+                    Ok(Some(tantivy_hit)) => {
+                        tantivy_hits += 1;
+                        if pelias_has_coords {
+                            both_hit += 1;
+                            // Check if coordinates are within ~100m
+                            if let (Some(p_lat), Some(p_lng)) = (pelias_lat, pelias_lng) {
+                                let dlat = (p_lat - tantivy_hit.latitude).abs();
+                                let dlng = (p_lng - tantivy_hit.longitude).abs();
+                                // Rough approximation: 0.001° ≈ 111m
+                                if dlat < 0.001 && dlng < 0.001 {
+                                    agreement_close += 1;
+                                }
+                            }
+                        } else {
+                            tantivy_only += 1;
+                        }
+                    }
+                    Ok(None) => {
+                        if pelias_has_coords {
+                            pelias_only += 1;
+                        }
+                    }
+                    Err(e) => {
+                        log::debug!("Tantivy error for '{address_key}': {e}");
+                    }
+                }
+
+                if total.is_multiple_of(1000) {
+                    log::info!("  compared {total}/{} addresses...", pelias_results.len());
+                }
+            }
+
+            let elapsed = start.elapsed();
+
+            #[allow(clippy::cast_precision_loss)]
+            let pct = |n: u64, d: u64| -> f64 {
+                if d > 0 {
+                    n as f64 / d as f64 * 100.0
+                } else {
+                    0.0
+                }
+            };
+
+            println!("\n=== Geocoder Comparison Report ===\n");
+            println!("Total addresses compared: {total}");
+            println!(
+                "Pelias hits:    {pelias_hits:>6} ({:.1}%)",
+                pct(pelias_hits, total)
+            );
+            println!(
+                "Tantivy hits:   {tantivy_hits:>6} ({:.1}%)",
+                pct(tantivy_hits, total)
+            );
+            println!("Both hit:       {both_hit:>6}");
+            println!(
+                "Agreement (<100m): {agreement_close:>3} ({:.1}% of both-hit)",
+                pct(agreement_close, both_hit)
+            );
+            println!("Pelias-only:    {pelias_only:>6}");
+            println!("Tantivy-only:   {tantivy_only:>6}");
+            println!("Time: {:.1}s", elapsed.as_secs_f64());
+        }
         Commands::Enrich { sources, force } => {
             let start = Instant::now();
             let enrich_bar = IndicatifProgress::batch_bar(&multi, "Enriching");
@@ -667,6 +808,111 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 keys.len(),
                 elapsed.as_secs_f64()
             );
+        }
+        Commands::GeocoderDownload { osm_only, oa_only } => {
+            let start = Instant::now();
+
+            if !osm_only {
+                log::info!("OpenAddresses download is not yet automated.");
+                log::info!(
+                    "Please download US data manually from https://batch.openaddresses.io/data"
+                );
+                log::info!(
+                    "and place CSV files in: {}",
+                    crime_map_geocoder_index::default_openaddresses_dir().display()
+                );
+            }
+
+            if !oa_only {
+                let osm_path = crime_map_geocoder_index::default_osm_pbf_path();
+                if osm_path.exists() {
+                    log::info!(
+                        "OSM PBF already exists at {}, skipping download",
+                        osm_path.display()
+                    );
+                } else {
+                    crime_map_geocoder_index::download::download_file(
+                        crime_map_geocoder_index::download::GEOFABRIK_US_PBF_URL,
+                        &osm_path,
+                    )
+                    .await?;
+                }
+            }
+
+            let elapsed = start.elapsed();
+            log::info!(
+                "Geocoder download complete in {:.1}s",
+                elapsed.as_secs_f64()
+            );
+        }
+        Commands::GeocoderBuild { heap_mb } => {
+            let start = Instant::now();
+
+            let index_dir = crime_map_geocoder_index::default_index_dir();
+            let oa_dir = crime_map_geocoder_index::default_openaddresses_dir();
+            let osm_path = crime_map_geocoder_index::default_osm_pbf_path();
+
+            let oa_ref = if oa_dir.exists() {
+                Some(oa_dir.as_path())
+            } else {
+                log::warn!("OpenAddresses directory not found: {}", oa_dir.display());
+                None
+            };
+
+            let osm_ref = if osm_path.exists() {
+                Some(osm_path.as_path())
+            } else {
+                log::warn!("OSM PBF not found: {}", osm_path.display());
+                None
+            };
+
+            if oa_ref.is_none() && osm_ref.is_none() {
+                return Err("No address data found. Run `geocoder-download` first.".into());
+            }
+
+            let heap_bytes = heap_mb * 1024 * 1024;
+            let stats =
+                crime_map_geocoder_index::build_index(&index_dir, oa_ref, osm_ref, heap_bytes)
+                    .await?;
+
+            let elapsed = start.elapsed();
+            #[allow(clippy::cast_precision_loss)]
+            let index_mb = stats.index_size_bytes as f64 / 1_048_576.0;
+            log::info!(
+                "Geocoder index built: {} total docs ({} OA + {} OSM), \
+                 {:.1} MB, {:.1}s",
+                stats.total_documents,
+                stats.openaddresses_count,
+                stats.osm_count,
+                index_mb,
+                elapsed.as_secs_f64()
+            );
+        }
+        Commands::GeocoderPack => {
+            let start = Instant::now();
+            let index_dir = crime_map_geocoder_index::default_index_dir();
+            let archive_path = crime_map_geocoder_index::default_archive_path();
+
+            tokio::task::spawn_blocking(move || {
+                crime_map_geocoder_index::archive::pack(&index_dir, &archive_path)
+            })
+            .await??;
+
+            let elapsed = start.elapsed();
+            log::info!("Geocoder index packed in {:.1}s", elapsed.as_secs_f64());
+        }
+        Commands::GeocoderUnpack => {
+            let start = Instant::now();
+            let index_dir = crime_map_geocoder_index::default_index_dir();
+            let archive_path = crime_map_geocoder_index::default_archive_path();
+
+            tokio::task::spawn_blocking(move || {
+                crime_map_geocoder_index::archive::unpack(&archive_path, &index_dir)
+            })
+            .await??;
+
+            let elapsed = start.elapsed();
+            log::info!("Geocoder index unpacked in {:.1}s", elapsed.as_secs_f64());
         }
     }
 

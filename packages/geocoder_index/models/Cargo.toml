@@ -1,0 +1,15 @@
+[package]
+authors = { workspace = true }
+description = "Shared types for the Tantivy-based geocoder index"
+edition = { workspace = true }
+license = { workspace = true }
+name = "crime_map_geocoder_index_models"
+repository = { workspace = true }
+version = "0.1.0"
+
+[dependencies]
+serde = { workspace = true }
+
+[features]
+default = []
+fail-on-warnings = []

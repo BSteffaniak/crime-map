@@ -977,6 +977,13 @@ pub async fn resolve_addresses(
                 )
                 .await?;
             }
+            ProviderConfig::TantivyIndex => {
+                if !crime_map_geocoder::tantivy_index::is_available() {
+                    log::info!("Tantivy geocoder index not found, skipping");
+                    continue;
+                }
+                resolve_via_tantivy(&unresolved, &mut state, progress.as_ref()).await?;
+            }
         }
     }
 
@@ -1169,6 +1176,75 @@ async fn resolve_via_pelias(
             }
             Err(e) => {
                 log::warn!("Pelias error for '{address_key}': {e}");
+            }
+        }
+
+        if let Some(p) = progress {
+            p.inc(ids.len() as u64);
+        }
+    }
+
+    Ok(())
+}
+
+/// Resolves addresses via the local Tantivy geocoder index.
+async fn resolve_via_tantivy(
+    unresolved: &[AddressGroup<'_>],
+    state: &mut ResolveState,
+    progress: Option<&Arc<dyn ProgressCallback>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use futures::stream::{self, StreamExt as _};
+
+    log::info!(
+        "Searching {} addresses against Tantivy index...",
+        unresolved.len()
+    );
+
+    let geocoder = crime_map_geocoder::tantivy_index::TantivyGeocoder::open_default()
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+
+    // Use a generous concurrency — Tantivy searches are in-process
+    // and CPU-bound, so we let tokio's blocking pool manage threads.
+    let concurrent_requests = 50;
+
+    let results: Vec<_> = stream::iter(unresolved.iter().map(|(address_key, _, ids)| {
+        let key = address_key.clone();
+        let ids_clone = (*ids).clone();
+        let geocoder = geocoder.clone();
+        async move {
+            let result = crime_map_geocoder::tantivy_index::geocode_freeform(&geocoder, &key).await;
+            (key, ids_clone, result)
+        }
+    }))
+    .buffer_unordered(concurrent_requests)
+    .collect()
+    .await;
+
+    for (address_key, ids, result) in results {
+        match result {
+            Ok(Some(hit)) => {
+                state.resolved_keys.insert(address_key.clone());
+                state.cache_writes.push((
+                    address_key,
+                    "tantivy".to_string(),
+                    Some(hit.latitude),
+                    Some(hit.longitude),
+                    hit.matched_address.clone(),
+                ));
+                for id in &ids {
+                    state
+                        .pending_updates
+                        .push((id.clone(), hit.longitude, hit.latitude));
+                }
+            }
+            Ok(None) => {
+                log::debug!("Tantivy: no match for '{address_key}'");
+                state
+                    .cache_writes
+                    .push((address_key, "tantivy".to_string(), None, None, None));
+            }
+            Err(e) => {
+                log::warn!("Tantivy error for '{address_key}': {e}");
             }
         }
 

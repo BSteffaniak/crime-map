@@ -26,6 +26,7 @@ pub mod census;
 pub mod nominatim;
 pub mod pelias;
 pub mod service_registry;
+pub mod tantivy_index;
 
 use thiserror::Error;
 
@@ -51,6 +52,8 @@ pub enum GeocodingProvider {
     Census,
     /// Self-hosted Pelias geocoder.
     Pelias,
+    /// Tantivy local geocoder index.
+    Tantivy,
     /// Nominatim / OpenStreetMap.
     Nominatim,
 }
