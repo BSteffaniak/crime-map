@@ -319,7 +319,7 @@ fn merge_count_db(
     }
 
     log::info!("Merging {} counts.duckdb files...", inputs.len());
-    let duck = duckdb::Connection::open(&output_path)?;
+    let duck = crate::open_output_duckdb(&output_path)?;
 
     // Attach all partitions and build UNION ALL
     let mut union_parts = Vec::with_capacity(inputs.len());
@@ -379,7 +379,7 @@ fn merge_h3_db(
     }
 
     log::info!("Merging {} h3.duckdb files...", inputs.len());
-    let duck = duckdb::Connection::open(&output_path)?;
+    let duck = crate::open_output_duckdb(&output_path)?;
 
     // Attach all partitions
     for (i, input) in inputs.iter().enumerate() {
@@ -472,7 +472,7 @@ fn merge_analytics_db(
     }
 
     log::info!("Merging {} analytics.duckdb files...", inputs.len());
-    let duck = duckdb::Connection::open(&output_path)?;
+    let duck = crate::open_output_duckdb(&output_path)?;
 
     // Attach all partitions
     for (i, input) in inputs.iter().enumerate() {

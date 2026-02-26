@@ -31,7 +31,7 @@ pub fn open(path: &Path) -> Result<Connection, DbError> {
     // Enable performance optimizations
     conn.execute_batch(
         "SET threads = 4;
-         SET memory_limit = '512MB';",
+         SET memory_limit = '2GB';",
     )?;
 
     create_schema(&conn)?;

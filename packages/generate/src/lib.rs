@@ -62,6 +62,22 @@ pub const OUTPUT_BOUNDARIES_DB: &str = "boundaries_db";
 /// Output name constant for the analytics `DuckDB` database.
 pub const OUTPUT_ANALYTICS_DB: &str = "analytics_duckdb";
 
+/// Opens an output `DuckDB` database with a `2GB` memory limit.
+///
+/// All generated `DuckDB` files (counts, H3, analytics) should use this
+/// helper instead of raw `duckdb::Connection::open()` so they get a
+/// consistent memory budget suitable for large sources like Philadelphia
+/// (~3.5M records).
+///
+/// # Errors
+///
+/// Returns `duckdb::Error` if the connection or configuration fails.
+fn open_output_duckdb(path: &Path) -> Result<duckdb::Connection, duckdb::Error> {
+    let duck = duckdb::Connection::open(path)?;
+    duck.execute_batch("SET memory_limit = '2GB'; SET threads = 4;")?;
+    Ok(duck)
+}
+
 /// Per-source fingerprint capturing the data state at generation time.
 ///
 /// Since source `DuckDB` files are insert-only (`ON CONFLICT DO NOTHING`),
@@ -1330,7 +1346,7 @@ fn generate_count_db(
     log::info!("Creating DuckDB count database...");
 
     {
-        let duck = duckdb::Connection::open(&db_path)?;
+        let duck = open_output_duckdb(&db_path)?;
 
         // Create raw incidents table for aggregation
         duck.execute_batch(
@@ -1355,7 +1371,7 @@ fn generate_count_db(
     let total_count = populate_duckdb_incidents(args, source_ids, &db_path, progress)?;
 
     // Reopen for aggregation
-    let duck = duckdb::Connection::open(&db_path)?;
+    let duck = open_output_duckdb(&db_path)?;
 
     // Create pre-aggregated count summary table
     log::info!("Creating count_summary aggregation table...");
@@ -1503,7 +1519,7 @@ fn populate_duckdb_incidents(
 
             // Open output DuckDB per batch (avoids holding non-Send across await points)
             {
-                let duck = duckdb::Connection::open(duck_path)?;
+                let duck = open_output_duckdb(duck_path)?;
                 duck.execute_batch("BEGIN TRANSACTION")?;
 
                 let mut insert_stmt = duck.prepare(
@@ -1618,7 +1634,7 @@ fn generate_h3_db(
         .collect();
 
     {
-        let duck = duckdb::Connection::open(&db_path)?;
+        let duck = open_output_duckdb(&db_path)?;
 
         // Create staging table: one row per incident with H3 indices as columns.
         duck.execute_batch(
@@ -1730,7 +1746,7 @@ fn generate_h3_db(
 
             // Insert into H3 staging in the output DuckDB
             {
-                let duck = duckdb::Connection::open(&db_path)?;
+                let duck = open_output_duckdb(&db_path)?;
                 duck.execute_batch("BEGIN TRANSACTION")?;
 
                 let mut insert_stmt = duck.prepare(
@@ -1820,7 +1836,7 @@ fn generate_h3_db(
 
     // Aggregate staging table into final h3_counts using UNION ALL
     // across the 6 resolution columns.
-    let duck = duckdb::Connection::open(&db_path)?;
+    let duck = open_output_duckdb(&db_path)?;
 
     log::info!("Aggregating H3 counts from staging table...");
     duck.execute_batch(
@@ -2111,7 +2127,7 @@ fn generate_analytics_db(
     log::info!("Creating analytics DuckDB database...");
 
     {
-        let duck = duckdb::Connection::open(&db_path)?;
+        let duck = open_output_duckdb(&db_path)?;
 
         // Create denormalized incidents table
         duck.execute_batch(
@@ -2216,7 +2232,7 @@ fn generate_analytics_db(
             let batch_len = batch.len() as u64;
 
             {
-                let duck = duckdb::Connection::open(&db_path)?;
+                let duck = open_output_duckdb(&db_path)?;
                 duck.execute_batch("BEGIN TRANSACTION")?;
 
                 let mut insert_stmt = duck.prepare(
@@ -2274,7 +2290,7 @@ fn generate_analytics_db(
     }
 
     // Now populate reference tables from the boundaries DuckDB
-    let duck = duckdb::Connection::open(&db_path)?;
+    let duck = open_output_duckdb(&db_path)?;
 
     // Create indexes on the incidents table
     log::info!("Creating analytics indexes...");
