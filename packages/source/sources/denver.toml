@@ -12,33 +12,34 @@ allows_redistribution = true
 restricted = false
 
 [fetcher]
-type = "socrata"
-api_url = "https://data.denvergov.org/resource/j6g8-fkyh.json"
-date_column = "first_occurrence_date"
-page_size = 10000
+type = "arcgis"
+query_urls = [
+  "https://services1.arcgis.com/zdB7qR0BtYrg0Xpl/ArcGIS/rest/services/ODC_CRIME_OFFENSES_P/FeatureServer/324/query",
+]
+page_size = 2000
+date_column = "FIRST_OCCURRENCE_DATE"
 
 [fields]
-incident_id = ["incident_id"]
-crime_type = ["offense_type_id"]
-reported_at = "reported_date"
-block_address = "incident_address"
-location_type = "neighborhood_id"
+incident_id = ["INCIDENT_ID"]
+crime_type = ["OFFENSE_TYPE_ID"]
+block_address = "INCIDENT_ADDRESS"
+location_type = "NEIGHBORHOOD_ID"
 
 [fields.occurred_at]
-type = "simple"
-field = "first_occurrence_date"
+type = "epoch_ms"
+field = "FIRST_OCCURRENCE_DATE"
 
 [fields.lat]
-field = "geo_lat"
+field = "GEO_LAT"
 type = "f64"
 
 [fields.lng]
-field = "geo_lon"
+field = "GEO_LON"
 type = "f64"
 
 [fields.description]
 type = "single"
-field = "offense_type_id"
+field = "OFFENSE_TYPE_ID"
 
 [fields.arrest]
 type = "none"
