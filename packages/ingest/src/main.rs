@@ -219,11 +219,11 @@ enum Commands {
         /// Writer heap size in MB (default: 256).
         #[arg(long, default_value = "256")]
         heap_mb: usize,
-        /// Path to an `OpenAddresses` `.tar.zst` archive. When set,
-        /// CSV files are streamed directly from the archive without
-        /// extracting to disk (saves ~30 GB on CI runners).
+        /// Paths to `OpenAddresses` archive files (`.zip` or `.tar.zst`).
+        /// CSV files are streamed directly from each archive without
+        /// extracting to disk. Can be specified multiple times.
         #[arg(long)]
-        oa_archive: Option<String>,
+        oa_archive: Vec<String>,
         /// Skip OSM PBF indexing. Useful for quick builds with only
         /// `OpenAddresses` data.
         #[arg(long)]
@@ -233,6 +233,18 @@ enum Commands {
     GeocoderPack,
     /// Unpack a geocoder index archive from R2.
     GeocoderUnpack,
+    /// Download a single file from R2 by key.
+    ///
+    /// Generic helper for pulling arbitrary files (e.g. pre-uploaded
+    /// `OpenAddresses` zips stored under `oa-data/`).
+    PullR2File {
+        /// R2 object key (e.g. `oa-data/us_south.zip`).
+        #[arg(long)]
+        key: String,
+        /// Local destination path.
+        #[arg(long)]
+        dest: String,
+    },
 }
 
 /// Resolves source IDs from `--sources` and/or `--states` flags to a
@@ -865,10 +877,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let oa_dir = crime_map_geocoder_index::default_openaddresses_dir();
             let osm_path = crime_map_geocoder_index::default_osm_pbf_path();
 
-            let oa_archive_path = oa_archive.map(std::path::PathBuf::from);
+            let oa_archive_paths: Vec<std::path::PathBuf> =
+                oa_archive.iter().map(std::path::PathBuf::from).collect();
 
-            let oa_dir_ref = if oa_archive_path.is_some() {
-                // When using an archive, skip the directory scan
+            let oa_dir_ref = if !oa_archive_paths.is_empty() {
+                // When using archives, skip the directory scan
                 None
             } else if oa_dir.exists() {
                 Some(oa_dir.as_path())
@@ -886,7 +899,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None
             };
 
-            if oa_dir_ref.is_none() && oa_archive_path.is_none() && osm_ref.is_none() {
+            if oa_dir_ref.is_none() && oa_archive_paths.is_empty() && osm_ref.is_none() {
                 return Err("No address data found. Run `geocoder-download` first.".into());
             }
 
@@ -895,7 +908,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &index_dir,
                 crime_map_geocoder_index::BuildConfig {
                     oa_dir: oa_dir_ref,
-                    oa_archive: oa_archive_path.as_deref(),
+                    oa_archives: &oa_archive_paths,
                     osm_pbf: osm_ref,
                     writer_heap_bytes: heap_bytes,
                 },
@@ -940,6 +953,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let elapsed = start.elapsed();
             log::info!("Geocoder index unpacked in {:.1}s", elapsed.as_secs_f64());
+        }
+        Commands::PullR2File { key, dest } => {
+            let dest_path = std::path::PathBuf::from(&dest);
+            if let Some(parent) = dest_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+
+            let r2 = crime_map_r2::R2Client::from_env()?;
+            let downloaded = r2.download(&key, &dest_path).await?;
+            if downloaded {
+                #[allow(clippy::cast_precision_loss)]
+                let mb = std::fs::metadata(&dest_path)
+                    .map(|m| m.len() as f64 / 1_048_576.0)
+                    .unwrap_or(0.0);
+                log::info!("Downloaded {key} -> {} ({mb:.1} MB)", dest_path.display());
+            } else {
+                return Err(format!("R2 object not found: {key}").into());
+            }
         }
     }
 

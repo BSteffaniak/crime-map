@@ -1,15 +1,21 @@
 name: Build Geocoder Index
 
-# Builds the Tantivy geocoder index from OpenAddresses (zip) + OSM PBF
-# data and uploads the packed index to R2.
+# Builds the Tantivy geocoder index from OSM PBF data (and optionally
+# OpenAddresses archives) and uploads the packed index to R2.
 #
-# Disk budget on GitHub Actions (14 GB RAM, ~60 GB free after cleanup):
+# By default, only the freely-available Geofabrik US OSM PBF is used.
+# This matches the data sources that the Pelias stack actually imports.
+#
+# If you have OpenAddresses zip files (requires account), you can
+# upload them to R2 under oa-data/ and list the filenames here.
+#
+# Disk budget on GitHub Actions (~60 GB free after cleanup):
 #   1. Build release binary          (~2 GB target/)
 #   2. Delete target/ after build    (reclaim 2 GB)
-#   3. Download OA zip               (~6-8 GB)
-#   4. Download OSM PBF              (~9 GB)
-#   5. Build index (streams OA zip)  (~4-6 GB index on disk)
-#   6. Delete source data            (reclaim ~15 GB)
+#   3. Download OSM PBF              (~9 GB)
+#   4. (Optional) Pull OA zips from R2, index one at a time
+#   5. Build index                   (~4-6 GB index on disk)
+#   6. Delete source data            (reclaim downloads)
 #   7. Pack index to .tar.zst        (~2-3 GB archive)
 #   8. Delete unpacked index         (reclaim ~4-6 GB)
 #   9. Upload archive to R2
@@ -17,15 +23,16 @@ name: Build Geocoder Index
 on:
   workflow_dispatch:
     inputs:
-      oa_url:
-        description: "OpenAddresses US zip URL (from batch.openaddresses.io)"
-        required: true
-        type: string
       skip_osm:
         description: "Skip OSM PBF download and indexing"
         required: false
         type: boolean
         default: false
+      oa_r2_files:
+        description: "Comma-separated OA zip filenames on R2 (under oa-data/ prefix), e.g. us_south.zip,us_west.zip"
+        required: false
+        type: string
+        default: ""
 
 concurrency:
   group: build-geocoder-index
@@ -76,16 +83,6 @@ jobs:
           echo "=== After deleting target/ ==="
           df -h /
 
-      - name: Download OpenAddresses data
-        run: |
-          OA_PATH="data/shared/openaddresses.zip"
-          mkdir -p data/shared
-          echo "Downloading OpenAddresses data..."
-          curl -L --retry 3 --retry-delay 10 -o "$OA_PATH" "${{ inputs.oa_url }}"
-          ls -lh "$OA_PATH"
-          echo "=== Disk after OA download ==="
-          df -h /
-
       - name: Download OSM PBF
         if: inputs.skip_osm != true
         run: |
@@ -98,13 +95,40 @@ jobs:
           echo "=== Disk after OSM download ==="
           df -h /
 
+      - name: Pull OpenAddresses zips from R2
+        if: inputs.oa_r2_files != ''
+        run: |
+          mkdir -p data/shared/oa
+          IFS=',' read -ra OA_FILES <<< "${{ inputs.oa_r2_files }}"
+          for file in "${OA_FILES[@]}"; do
+            file=$(echo "$file" | xargs)  # trim whitespace
+            echo "Pulling oa-data/$file from R2..."
+            staging/crime_map_ingest pull-r2-file \
+              --key "oa-data/$file" \
+              --dest "data/shared/oa/$file"
+            ls -lh "data/shared/oa/$file"
+          done
+          echo "=== Disk after OA download ==="
+          df -h /
+
       - name: Build geocoder index
         run: |
-          BUILD_ARGS="geocoder-build --heap-mb 512 --oa-archive data/shared/openaddresses.zip"
+          BUILD_ARGS="geocoder-build --heap-mb 512"
+
+          # Add each OA archive as a separate --oa-archive flag
+          if [ -d data/shared/oa ]; then
+            for zip in data/shared/oa/*.zip; do
+              [ -f "$zip" ] && BUILD_ARGS="$BUILD_ARGS --oa-archive $zip"
+            done
+          fi
+
           if [ "${{ inputs.skip_osm }}" = "true" ]; then
             BUILD_ARGS="$BUILD_ARGS --skip-osm"
           fi
+
+          echo "Running: staging/crime_map_ingest $BUILD_ARGS"
           staging/crime_map_ingest $BUILD_ARGS
+
           echo "=== Index directory ==="
           du -sh data/shared/geocoder_index/ 2>/dev/null || echo "No index dir"
           echo "=== Disk after index build ==="
@@ -112,7 +136,7 @@ jobs:
 
       - name: Delete source data to free disk
         run: |
-          rm -f data/shared/openaddresses.zip
+          rm -rf data/shared/oa/
           rm -rf data/shared/osm/
           echo "=== Disk after deleting source data ==="
           df -h /
@@ -142,6 +166,6 @@ jobs:
           ARCHIVE_SIZE=$(stat -c%s data/shared/geocoder_index.tar.zst 2>/dev/null || echo "0")
           ARCHIVE_MB=$((ARCHIVE_SIZE / 1048576))
           echo "- Archive size: ${ARCHIVE_MB} MB" >> "$GITHUB_STEP_SUMMARY"
-          echo "- OA URL: \`${{ inputs.oa_url }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Skip OSM: ${{ inputs.skip_osm }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- OSM: ${{ inputs.skip_osm == true && 'skipped' || 'included' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- OA files: ${{ inputs.oa_r2_files || 'none' }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- Uploaded to R2 as \`geocoder_index.tar.zst\`" >> "$GITHUB_STEP_SUMMARY"

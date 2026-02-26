@@ -294,13 +294,14 @@ fn search_sync(
 /// Configuration for building a geocoder index.
 ///
 /// Specifies the data sources to include. At least one of `oa_dir`,
-/// `oa_archive`, or `osm_pbf` must be provided.
+/// `oa_archives`, or `osm_pbf` must be provided.
 pub struct BuildConfig<'a> {
     /// Directory containing extracted `OpenAddresses` CSV files.
     pub oa_dir: Option<&'a Path>,
-    /// Path to an `OpenAddresses` `.tar.zst` archive (streamed
-    /// in-memory, no extraction to disk).
-    pub oa_archive: Option<&'a Path>,
+    /// Paths to `OpenAddresses` archive files (`.zip` or `.tar.zst`).
+    /// Each archive is streamed in-memory without extraction to disk.
+    /// Multiple archives are indexed sequentially into the same index.
+    pub oa_archives: &'a [PathBuf],
     /// Path to a US OSM PBF extract.
     pub osm_pbf: Option<&'a Path>,
     /// Tantivy writer heap size in bytes.
@@ -324,7 +325,7 @@ pub async fn build_index(
 ) -> Result<IndexStats, GeocoderIndexError> {
     let index_dir = index_dir.to_path_buf();
     let oa_dir = config.oa_dir.map(Path::to_path_buf);
-    let oa_archive = config.oa_archive.map(Path::to_path_buf);
+    let oa_archives = config.oa_archives.to_vec();
     let osm_pbf = config.osm_pbf.map(Path::to_path_buf);
     let writer_heap_bytes = config.writer_heap_bytes;
 
@@ -332,7 +333,7 @@ pub async fn build_index(
         build_index_sync(
             &index_dir,
             oa_dir.as_deref(),
-            oa_archive.as_deref(),
+            &oa_archives,
             osm_pbf.as_deref(),
             writer_heap_bytes,
         )
@@ -344,7 +345,7 @@ pub async fn build_index(
 fn build_index_sync(
     index_dir: &Path,
     oa_dir: Option<&Path>,
-    oa_archive: Option<&Path>,
+    oa_archives: &[PathBuf],
     osm_pbf: Option<&Path>,
     writer_heap_bytes: usize,
 ) -> Result<IndexStats, GeocoderIndexError> {
@@ -386,40 +387,43 @@ fn build_index_sync(
         }
     }
 
-    // Phase 1b: Index OpenAddresses data from archive (.tar.zst or .zip)
-    if let Some(archive) = oa_archive {
-        if archive.exists() {
-            log::info!(
-                "Indexing OpenAddresses data from archive: {}",
-                archive.display()
-            );
-
-            let archive_name = archive.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let is_zip = archive_name.to_ascii_lowercase().ends_with(".zip");
-
-            let count = if is_zip {
-                openaddresses::parse_zip_archive(archive, |addr| {
-                    add_document(&writer, &fields, &addr, AddressSource::OpenAddresses);
-                    total_count += 1;
-                    if total_count.is_multiple_of(1_000_000) {
-                        log::info!("  indexed {total_count} records...");
-                    }
-                })?
-            } else {
-                openaddresses::parse_tar_zst_archive(archive, |addr| {
-                    add_document(&writer, &fields, &addr, AddressSource::OpenAddresses);
-                    total_count += 1;
-                    if total_count.is_multiple_of(1_000_000) {
-                        log::info!("  indexed {total_count} records...");
-                    }
-                })?
-            };
-
-            oa_count += count;
-            log::info!("  OpenAddresses (archive): {count} records indexed");
-        } else {
+    // Phase 1b: Index OpenAddresses data from archives (.tar.zst or .zip)
+    for (i, archive) in oa_archives.iter().enumerate() {
+        if !archive.exists() {
             log::warn!("OpenAddresses archive not found: {}", archive.display());
+            continue;
         }
+
+        log::info!(
+            "Indexing OpenAddresses archive [{}/{}]: {}",
+            i + 1,
+            oa_archives.len(),
+            archive.display()
+        );
+
+        let archive_name = archive.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let is_zip = archive_name.to_ascii_lowercase().ends_with(".zip");
+
+        let count = if is_zip {
+            openaddresses::parse_zip_archive(archive, |addr| {
+                add_document(&writer, &fields, &addr, AddressSource::OpenAddresses);
+                total_count += 1;
+                if total_count.is_multiple_of(1_000_000) {
+                    log::info!("  indexed {total_count} records...");
+                }
+            })?
+        } else {
+            openaddresses::parse_tar_zst_archive(archive, |addr| {
+                add_document(&writer, &fields, &addr, AddressSource::OpenAddresses);
+                total_count += 1;
+                if total_count.is_multiple_of(1_000_000) {
+                    log::info!("  indexed {total_count} records...");
+                }
+            })?
+        };
+
+        oa_count += count;
+        log::info!("  OpenAddresses (archive): {count} records indexed");
     }
 
     // Phase 2: Index OSM data
@@ -523,7 +527,7 @@ mod tests {
             &tmp,
             BuildConfig {
                 oa_dir: None,
-                oa_archive: None,
+                oa_archives: &[],
                 osm_pbf: None,
                 writer_heap_bytes: 50_000_000,
             },
@@ -563,7 +567,7 @@ mod tests {
             &index_dir,
             BuildConfig {
                 oa_dir: Some(&oa_dir),
-                oa_archive: None,
+                oa_archives: &[],
                 osm_pbf: None,
                 writer_heap_bytes: 50_000_000,
             },
