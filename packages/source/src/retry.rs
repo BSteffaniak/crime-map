@@ -45,6 +45,9 @@ const MAX_RETRIES: u32 = 5;
 /// × `(1 + MAX_RETRIES)` = 36 HTTP requests for a single logical call.
 const MAX_BODY_RETRIES: u32 = 5;
 
+/// Maximum length of the response body preview included in error logs.
+const BODY_PREVIEW_LEN: usize = 500;
+
 /// Sends an HTTP request and parses the response body as JSON.
 ///
 /// The `build_request` closure is called on each attempt to construct a
@@ -71,7 +74,7 @@ const MAX_BODY_RETRIES: u32 = 5;
 /// Returns [`SourceError`] if the request fails after all retries, the
 /// server returns a non-retryable status code, or the response body
 /// cannot be parsed as JSON after all body-decode retries.
-#[allow(clippy::future_not_send)]
+#[allow(clippy::future_not_send, clippy::too_many_lines)]
 pub async fn send_json<F>(build_request: F) -> Result<serde_json::Value, SourceError>
 where
     F: Fn() -> reqwest::RequestBuilder,
@@ -79,19 +82,102 @@ where
     for body_attempt in 0..=MAX_BODY_RETRIES {
         let response = send_inner(&build_request, MAX_RETRIES).await?;
 
-        match response.json().await {
-            Ok(value) => return Ok(value),
+        // Capture response metadata before consuming the body.
+        let url = response.url().to_string();
+        let status = response.status();
+        let content_length = response
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        let content_encoding = response
+            .headers()
+            .get(reqwest::header::CONTENT_ENCODING)
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+
+        // Read the raw body as text first, then parse as JSON.
+        // This lets us log the actual response content on failure.
+        match response.text().await {
+            Ok(text) => match serde_json::from_str(&text) {
+                Ok(value) => return Ok(value),
+                Err(json_err) => {
+                    let preview = if text.len() > BODY_PREVIEW_LEN {
+                        format!("{}...", &text[..BODY_PREVIEW_LEN])
+                    } else {
+                        text.clone()
+                    };
+                    if body_attempt < MAX_BODY_RETRIES {
+                        let delay = Duration::from_secs(1u64 << (body_attempt + 1));
+                        log::warn!(
+                            "JSON parse failed (body retry {}/{MAX_BODY_RETRIES}), \
+                             re-fetching in {delay:?}...\n  \
+                             url: {url}\n  \
+                             status: {status}\n  \
+                             content-length: {content_length:?}\n  \
+                             content-type: {content_type:?}\n  \
+                             content-encoding: {content_encoding:?}\n  \
+                             received: {} bytes\n  \
+                             parse error: {json_err}\n  \
+                             body preview: {preview}",
+                            body_attempt + 1,
+                            text.len(),
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    log::error!(
+                        "JSON parse failed after {MAX_BODY_RETRIES} retries, giving up.\n  \
+                         url: {url}\n  \
+                         status: {status}\n  \
+                         content-length: {content_length:?}\n  \
+                         content-type: {content_type:?}\n  \
+                         content-encoding: {content_encoding:?}\n  \
+                         received: {} bytes\n  \
+                         parse error: {json_err}\n  \
+                         body preview: {preview}",
+                        text.len(),
+                    );
+                    return Err(SourceError::Normalization {
+                        message: format!(
+                            "JSON parse failed: {json_err} (status={status}, \
+                             received {} bytes, content-type={content_type:?})",
+                            text.len()
+                        ),
+                    });
+                }
+            },
             Err(e) => {
                 if body_attempt < MAX_BODY_RETRIES {
-                    let delay = Duration::from_secs(1u64 << (body_attempt + 1)); // 2s, 4s, 8s
+                    let delay = Duration::from_secs(1u64 << (body_attempt + 1));
                     log::warn!(
-                        "JSON decode failed ({e}), re-fetching in {delay:?} \
-                         (body retry {}/{MAX_BODY_RETRIES})...",
+                        "Response body read failed (body retry {}/{MAX_BODY_RETRIES}), \
+                         re-fetching in {delay:?}...\n  \
+                         url: {url}\n  \
+                         status: {status}\n  \
+                         content-length: {content_length:?}\n  \
+                         content-type: {content_type:?}\n  \
+                         content-encoding: {content_encoding:?}\n  \
+                         error: {e}",
                         body_attempt + 1,
                     );
                     tokio::time::sleep(delay).await;
                     continue;
                 }
+                log::error!(
+                    "Response body read failed after {MAX_BODY_RETRIES} retries, giving up.\n  \
+                     url: {url}\n  \
+                     status: {status}\n  \
+                     content-length: {content_length:?}\n  \
+                     content-type: {content_type:?}\n  \
+                     content-encoding: {content_encoding:?}\n  \
+                     error: {e}",
+                );
                 return Err(SourceError::Http(e));
             }
         }
@@ -119,19 +205,45 @@ where
     for body_attempt in 0..=MAX_BODY_RETRIES {
         let response = send_inner(&build_request, MAX_RETRIES).await?;
 
+        let url = response.url().to_string();
+        let status = response.status();
+        let content_length = response
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        let content_encoding = response
+            .headers()
+            .get(reqwest::header::CONTENT_ENCODING)
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+
         match response.text().await {
             Ok(text) => return Ok(text),
             Err(e) => {
                 if body_attempt < MAX_BODY_RETRIES {
-                    let delay = Duration::from_secs(1u64 << (body_attempt + 1)); // 2s, 4s, 8s
+                    let delay = Duration::from_secs(1u64 << (body_attempt + 1));
                     log::warn!(
-                        "Text decode failed ({e}), re-fetching in {delay:?} \
-                         (body retry {}/{MAX_BODY_RETRIES})...",
+                        "Text body read failed (body retry {}/{MAX_BODY_RETRIES}), \
+                         re-fetching in {delay:?}...\n  \
+                         url: {url}\n  \
+                         status: {status}\n  \
+                         content-length: {content_length:?}\n  \
+                         content-encoding: {content_encoding:?}\n  \
+                         error: {e}",
                         body_attempt + 1,
                     );
                     tokio::time::sleep(delay).await;
                     continue;
                 }
+                log::error!(
+                    "Text body read failed after {MAX_BODY_RETRIES} retries, giving up.\n  \
+                     url: {url}\n  \
+                     status: {status}\n  \
+                     content-length: {content_length:?}\n  \
+                     content-encoding: {content_encoding:?}\n  \
+                     error: {e}",
+                );
                 return Err(SourceError::Http(e));
             }
         }
