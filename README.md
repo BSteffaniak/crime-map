@@ -161,6 +161,17 @@ cargo ingest sync-all             Sync all sources
 cargo ingest geocode              Geocode incidents missing coordinates
   --sources <IDS>                 Comma-separated source IDs to geocode
   --limit <N>                     Max incidents to geocode
+cargo ingest geocoder-download    Download OSM PBF and OpenAddresses data for local index build
+cargo ingest geocoder-build       Build Tantivy geocoder index from downloaded data
+  --heap-mb <N>                   Writer heap size in MB (default: 256)
+  --oa-archive <PATH>             OpenAddresses archive (.zip or .tar.zst); repeatable
+  --skip-osm                      Skip OSM PBF indexing
+cargo ingest geocoder-pack        Pack geocoder index into .tar.zst for R2 upload
+cargo ingest geocoder-unpack      Unpack geocoder index archive from R2
+cargo ingest geocoder-compare     Compare Tantivy vs Pelias hit rates on cached addresses
+cargo ingest pull-r2-file         Download a single file from R2 by key
+  --key <KEY>                     R2 object key (e.g. oa-data/us_south.zip)
+  --dest <PATH>                   Local destination path
 cargo ingest tracts               Ingest census tract boundaries
 cargo ingest places               Ingest Census place boundaries
 cargo ingest counties             Ingest county boundaries
@@ -204,10 +215,13 @@ Addresses without coordinates are geocoded through a priority-based provider cha
 | Priority | Provider | Strategy | Speed |
 | -------- | -------- | -------- | ----- |
 | 1 | **Census Bureau** | Batch API (up to 10K addresses/request), exact match | ~10K/batch |
-| 2 | **Pelias** (self-hosted) | Concurrent fuzzy search against OpenAddresses + OSM | ~100 req/s |
+| 2 | **Tantivy** (local index) | In-process full-text search against OSM + OpenAddresses | ~10K/s |
+| 2 | **Pelias** (self-hosted, deprecated) | Concurrent fuzzy search via Elasticsearch | ~100 req/s |
 | 3 | **Nominatim** | Public OSM API, strict rate limit | ~0.9 req/s |
 
-Pelias is optional -- if unreachable, the pipeline skips it and falls through to Nominatim. See [`infra/pelias/README.md`](infra/pelias/README.md) for running Pelias locally with a Cloudflare Tunnel for CI access.
+**Tantivy** is a Rust-based local geocoder that replaces Pelias. It requires no Docker containers, no Elasticsearch, and no external services. The index is pre-built in CI from freely-available OpenStreetMap data and stored on R2. See [`GEOCODER.md`](GEOCODER.md) for setup, enhancement with OpenAddresses data, and CI workflow details.
+
+Pelias is deprecated but still functional. See [`infra/pelias/README.md`](infra/pelias/README.md) if you need to run the legacy setup.
 
 ### Adding a new geocoding provider
 
@@ -225,7 +239,9 @@ packages/
   source/             CrimeSource trait, shared fetchers (Socrata, ArcGIS, Carto, CKAN, OData), 42 TOML source configs
   database/models/    Query types (BoundingBox, IncidentQuery, IncidentRow)
   database/           DuckDB storage: per-source incidents, shared boundaries, geocode cache
-  geocoder/           Geocoding clients (Census Bureau, Pelias, Nominatim) and TOML service registry
+  geocoder/           Geocoding clients (Census Bureau, Pelias, Nominatim, Tantivy) and TOML service registry
+  geocoder_index/     Tantivy full-text geocoder index: schema, query engine, OA/OSM parsers, archive utilities
+  geocoder_index/models/  Shared types for geocoder index (SearchHit, IndexStats)
   geography/models/   Census tract and area statistics types
   geography/          Census boundary ingestion (TIGERweb API) into DuckDB
   analytics/models/   AI tool parameter/result types, JSON Schema tool definitions

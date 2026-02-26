@@ -1,4 +1,12 @@
-# Pelias Geocoder (Local)
+# Pelias Geocoder (Local) -- DEPRECATED
+
+> **This setup is being replaced by the Tantivy local geocoder.** The Tantivy
+> geocoder requires no Docker, no Elasticsearch, and no running services. It
+> uses the same OSM data that Pelias imports, built into a Tantivy full-text
+> index in CI. See [`GEOCODER.md`](../../GEOCODER.md) for the new setup.
+>
+> This Pelias stack remains functional for now. It will be removed once the
+> Tantivy geocoder is validated via `geocoder-compare`.
 
 Docker Compose setup for running a self-hosted [Pelias](https://pelias.io)
 geocoder locally, exposed to CI via a Cloudflare Tunnel.
