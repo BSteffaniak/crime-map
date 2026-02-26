@@ -196,7 +196,7 @@ async fn merge_sidebar_db(
             .await
             .map_err(|e| format!("Failed to attach partition: {e}"))?;
 
-        sqlite
+        let insert_result = sqlite
             .exec_raw(&format!(
                 "INSERT INTO incidents (
                     source_id, source_name, source_incident_id,
@@ -217,10 +217,28 @@ async fn merge_sidebar_db(
                     tract_geoid, neighborhood_id
                 FROM {alias}.incidents"
             ))
-            .await
-            .map_err(|e| format!("Failed to insert from partition: {e}"))?;
+            .await;
 
-        log::info!("  Partition {}: merged from {}", i + 1, input.display());
+        match insert_result {
+            Ok(()) => {
+                log::info!("  Partition {}: merged from {}", i + 1, input.display());
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("no such table") {
+                    // The partition .db was likely transferred without its WAL
+                    // sidecar file, so the incidents table was never committed
+                    // to the main database file. Skip this partition.
+                    log::warn!(
+                        "  Partition {}: skipping {} (no incidents table — possible WAL issue)",
+                        i + 1,
+                        input.display()
+                    );
+                } else {
+                    return Err(format!("Failed to insert from partition: {e}").into());
+                }
+            }
+        }
 
         sqlite
             .exec_raw(&format!("DETACH {alias}"))
@@ -280,6 +298,14 @@ async fn merge_sidebar_db(
         .exec_raw("ANALYZE")
         .await
         .map_err(|e| format!("Failed to run ANALYZE: {e}"))?;
+
+    // Checkpoint the WAL to ensure all data is in the main .db file.
+    // Without this, uploaded/transferred .db files may be missing data
+    // that lives only in the -wal sidecar file.
+    sqlite
+        .exec_raw("PRAGMA wal_checkpoint(TRUNCATE)")
+        .await
+        .map_err(|e| format!("Failed to checkpoint WAL: {e}"))?;
 
     log::info!("Sidebar merge complete: {}", output_path.display());
     Ok(())

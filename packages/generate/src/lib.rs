@@ -1299,6 +1299,14 @@ async fn generate_sidebar_db(
         .await
         .map_err(|e| format!("Failed to run ANALYZE: {e}"))?;
 
+    // Checkpoint the WAL to ensure all data is flushed to the main .db file.
+    // Without this, data lives only in the -wal sidecar file, which is not
+    // uploaded by CI artifact steps — causing "no such table" errors during merge.
+    sqlite
+        .exec_raw("PRAGMA wal_checkpoint(TRUNCATE)")
+        .await
+        .map_err(|e| format!("Failed to checkpoint WAL: {e}"))?;
+
     log::info!(
         "Sidebar SQLite database generated: {} ({total_count} rows)",
         db_path.display()
@@ -2762,6 +2770,12 @@ async fn generate_boundaries_db(
         .exec_raw("ANALYZE")
         .await
         .map_err(|e| format!("Failed to run ANALYZE: {e}"))?;
+
+    // Checkpoint the WAL to ensure all data is in the main .db file
+    sqlite
+        .exec_raw("PRAGMA wal_checkpoint(TRUNCATE)")
+        .await
+        .map_err(|e| format!("Failed to checkpoint WAL: {e}"))?;
 
     log::info!(
         "Boundaries search database generated: {}",
