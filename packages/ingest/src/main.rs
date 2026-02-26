@@ -15,7 +15,11 @@ use crime_map_ingest::{
 use crime_map_source::source_def::SourceDefinition;
 
 #[derive(Parser)]
-#[command(name = "crime_map_ingest", about = "Crime data ingestion tool")]
+#[command(
+    name = "crime_map_ingest",
+    about = "Crime data ingestion tool",
+    version
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,

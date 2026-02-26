@@ -18,7 +18,7 @@ use crime_map_generate::{
 };
 
 #[derive(Parser)]
-#[command(name = "crime_map_generate", about = "Tile generation tool")]
+#[command(name = "crime_map_generate", about = "Tile generation tool", version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,

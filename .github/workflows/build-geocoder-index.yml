@@ -71,14 +71,24 @@ jobs:
           install-rust: 'true'
           rust-cache-key: geocoder-index
 
-      - name: Build release binary
-        run: cargo build --release -p crime_map_ingest
+      - name: Build ingest binary
+        id: build-binary
+        uses: BSteffaniak/cache-artifact@master
+        with:
+          directory: ./packages
+          command: |
+            cargo build --release -p crime_map_ingest
+            mkdir -p staging
+            cp target/release/crime_map_ingest staging/crime_map_ingest
+          output-path: staging/crime_map_ingest
+          artifact-name: crime-map-ingest-binary
+          cache-key-prefix: wt-crime
+          make-executable: true
+          verify-command: --version
 
-      - name: Stage binary and delete build artifacts
+      - name: Delete build artifacts to free disk
+        if: steps.build-binary.outputs.cache-hit != 'true'
         run: |
-          mkdir -p staging
-          cp target/release/crime_map_ingest staging/
-          # Reclaim ~2+ GB from build artifacts
           rm -rf target/
           echo "=== After deleting target/ ==="
           df -h /

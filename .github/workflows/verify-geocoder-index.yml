@@ -35,14 +35,19 @@ jobs:
           install-rust: 'true'
           rust-cache-key: geocoder-verify
 
-      - name: Build release binary
-        run: cargo build --release -p crime_map_ingest
-
-      - name: Stage binary and delete build artifacts
-        run: |
-          mkdir -p staging
-          cp target/release/crime_map_ingest staging/
-          rm -rf target/
+      - name: Build ingest binary
+        uses: BSteffaniak/cache-artifact@master
+        with:
+          directory: ./packages
+          command: |
+            cargo build --release -p crime_map_ingest
+            mkdir -p staging
+            cp target/release/crime_map_ingest staging/crime_map_ingest
+          output-path: staging/crime_map_ingest
+          artifact-name: crime-map-ingest-binary
+          cache-key-prefix: wt-crime
+          make-executable: true
+          verify-command: --version
 
       - name: Pull geocoder index from R2
         run: staging/crime_map_ingest pull --shared-only
