@@ -1,19 +1,19 @@
 # Geocoder Index
 
-Tantivy-based local geocoder that replaces the Pelias (Elasticsearch + Docker) stack.
+Tantivy-based local geocoder for the crime map pipeline.
 Resolves US street addresses to coordinates using an in-process full-text search
 index built from freely-available OpenStreetMap data.
 
-**Key advantages over Pelias:**
+**Key properties:**
 
-- No Docker containers, no Elasticsearch, no external services
-- ~10K lookups/second (vs ~100 req/s over HTTP to Pelias)
+- No Docker containers, no external services -- runs entirely in-process
+- ~10K lookups/second
 - Index is pre-built in CI and stored on R2 (~2-3 GB compressed)
 - Zero-config for CI -- partition jobs pull and unpack the index automatically
 
 ## Quick Start (OSM-only, zero-config)
 
-This gives you the same address coverage that Pelias was actually using.
+This builds an index with the same freely-available OpenStreetMap address data.
 
 1. Go to **GitHub Actions > Build Geocoder Index**
 2. Click **Run workflow** with the defaults (no inputs needed)
@@ -105,7 +105,7 @@ Each partition job automatically:
 3. `geocode --sources ...` -- Tantivy provider resolves addresses at priority 2
 
 If the index archive doesn't exist on R2 yet, the unpack step is silently
-skipped and geocoding falls through to Pelias/Nominatim.
+skipped and geocoding falls through to Nominatim.
 
 ## CLI Commands
 
@@ -166,8 +166,8 @@ cargo ingest geocoder-unpack
 
 ### `geocoder-compare`
 
-Compares Tantivy hit rates against Pelias using addresses already in the geocode cache.
-Useful for validating the Tantivy index before removing Pelias.
+Compares Tantivy hit rates against other providers using addresses already in the geocode cache.
+Useful for validating the Tantivy index coverage.
 
 ```bash
 cargo ingest geocoder-compare

@@ -216,12 +216,9 @@ Addresses without coordinates are geocoded through a priority-based provider cha
 | -------- | -------- | -------- | ----- |
 | 1 | **Census Bureau** | Batch API (up to 10K addresses/request), exact match | ~10K/batch |
 | 2 | **Tantivy** (local index) | In-process full-text search against OSM + OpenAddresses | ~10K/s |
-| 2 | **Pelias** (self-hosted, deprecated) | Concurrent fuzzy search via Elasticsearch | ~100 req/s |
 | 3 | **Nominatim** | Public OSM API, strict rate limit | ~0.9 req/s |
 
-**Tantivy** is a Rust-based local geocoder that replaces Pelias. It requires no Docker containers, no Elasticsearch, and no external services. The index is pre-built in CI from freely-available OpenStreetMap data and stored on R2. See [`GEOCODER.md`](GEOCODER.md) for setup, enhancement with OpenAddresses data, and CI workflow details.
-
-Pelias is deprecated but still functional. See [`infra/pelias/README.md`](infra/pelias/README.md) if you need to run the legacy setup.
+**Tantivy** is a Rust-based local geocoder that uses an in-process full-text search index. It requires no Docker containers, no external services, and runs entirely in-process. The index is pre-built in CI from freely-available OpenStreetMap data and stored on R2. See [`GEOCODER.md`](GEOCODER.md) for setup, enhancement with OpenAddresses data, and CI workflow details.
 
 ### Adding a new geocoding provider
 
@@ -239,7 +236,7 @@ packages/
   source/             CrimeSource trait, shared fetchers (Socrata, ArcGIS, Carto, CKAN, OData), 42 TOML source configs
   database/models/    Query types (BoundingBox, IncidentQuery, IncidentRow)
   database/           DuckDB storage: per-source incidents, shared boundaries, geocode cache
-  geocoder/           Geocoding clients (Census Bureau, Pelias, Nominatim, Tantivy) and TOML service registry
+  geocoder/           Geocoding clients (Census Bureau, Nominatim, Tantivy) and TOML service registry
   geocoder_index/     Tantivy full-text geocoder index: schema, query engine, OA/OSM parsers, archive utilities
   geocoder_index/models/  Shared types for geocoder index (SearchHit, IndexStats)
   geography/models/   Census tract and area statistics types
@@ -254,7 +251,7 @@ packages/
   server/             Actix-Web HTTP server
   scraper/            HTML table scraping and CSV download utilities
 app/                  Vite + React + TypeScript + TailwindCSS + MapLibre GL JS frontend
-infra/                OpenTofu configs for self-hosted Pelias on Oracle Cloud Always Free
+infra/                OpenTofu infrastructure configs
 ```
 
 ## Environment Variables
