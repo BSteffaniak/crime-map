@@ -110,6 +110,14 @@ impl JsonPaginatedScraper {
         self
     }
 
+    /// Updates the page size for subsequent requests. Unlike
+    /// [`with_page_size`](Self::with_page_size), this takes `&mut self`
+    /// so it can be called after construction (e.g., to reduce page size
+    /// after a fetch failure).
+    pub const fn set_page_size(&mut self, size: u32) {
+        self.config.page_size = Some(size);
+    }
+
     /// Sets the URL to query for the total record count.
     #[must_use]
     pub fn with_count_url(mut self, url: &str) -> Self {

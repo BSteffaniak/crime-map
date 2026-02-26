@@ -15,7 +15,7 @@ restricted = false
 type = "socrata"
 api_url = "https://data.denvergov.org/resource/j6g8-fkyh.json"
 date_column = "first_occurrence_date"
-page_size = 50000
+page_size = 10000
 
 [fields]
 incident_id = ["incident_id"]

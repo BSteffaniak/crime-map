@@ -159,6 +159,7 @@ pub async fn fetch_arcgis(
     // ── Paginated fetch ──────────────────────────────────────────────
     let will_fetch = total_available.map(|t| fetch_limit.min(t));
     let mut skipped: u64 = 0;
+    let mut current_page_size = config.page_size;
 
     for (layer_idx, query_url) in config.query_urls.iter().enumerate() {
         if total_fetched >= fetch_limit {
@@ -192,7 +193,7 @@ pub async fn fetch_arcgis(
             if remaining == 0 {
                 break;
             }
-            let page_limit = remaining.min(config.page_size);
+            let page_limit = remaining.min(current_page_size);
 
             let url = format!(
                 "{query_url}?where={where_clause}&outFields=*&f=json&outSR=4326&resultRecordCount={page_limit}&resultOffset={offset}"
@@ -213,7 +214,21 @@ pub async fn fetch_arcgis(
                 log::info!("{}: offset={offset}, limit={page_limit}", config.label);
             }
 
-            let body = crate::retry::send_json(|| client.get(&url)).await?;
+            let body = match crate::retry::send_json(|| client.get(&url)).await {
+                Ok(body) => body,
+                Err(e)
+                    if crate::is_page_size_reducible(&e)
+                        && current_page_size > crate::MIN_PAGE_SIZE =>
+                {
+                    current_page_size = (current_page_size / 2).max(crate::MIN_PAGE_SIZE);
+                    log::warn!(
+                        "{}: reducing page size to {current_page_size} after fetch failure, retrying same offset",
+                        config.label,
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
 
             let features = body
                 .get("features")

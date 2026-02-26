@@ -31,19 +31,19 @@ use crate::SourceError;
 /// Maximum number of retry attempts for transient HTTP errors
 /// (connection failures, timeouts, server errors).
 ///
-/// With exponential backoff (2s, 4s, 8s) the total wait before giving
-/// up is 14 seconds. Combined with the per-request timeout of 120s
-/// this means a worst-case latency of ~8 minutes for a single request
-/// (4 attempts × 120s timeout + 14s backoff).
-const MAX_RETRIES: u32 = 3;
+/// With exponential backoff (2s, 4s, 8s, 16s, 32s) the total wait
+/// before giving up is 62 seconds. Combined with the per-request
+/// timeout of 120s this means a worst-case latency of ~12 minutes for
+/// a single request (6 attempts × 120s timeout + 62s backoff).
+const MAX_RETRIES: u32 = 5;
 
 /// Maximum number of full re-fetch attempts when the response body
 /// cannot be decoded (truncated JSON, garbled response, etc.).
 ///
 /// Each body-decode retry goes through [`send_inner`] again, so
 /// connection-level retries still apply. Worst case: `(1 + MAX_BODY_RETRIES)`
-/// × `(1 + MAX_RETRIES)` = 16 HTTP requests for a single logical call.
-const MAX_BODY_RETRIES: u32 = 3;
+/// × `(1 + MAX_RETRIES)` = 36 HTTP requests for a single logical call.
+const MAX_BODY_RETRIES: u32 = 5;
 
 /// Sends an HTTP request and parses the response body as JSON.
 ///

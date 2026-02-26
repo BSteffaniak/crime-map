@@ -179,7 +179,7 @@ pub async fn fetch_city_protect(
         .build()?;
 
     let fetch_limit = options.limit.unwrap_or(u64::MAX);
-    let page_size = if config.page_size == 0 {
+    let mut current_page_size = if config.page_size == 0 {
         DEFAULT_PAGE_SIZE
     } else {
         config.page_size
@@ -239,7 +239,7 @@ pub async fn fetch_city_protect(
 
             let body = build_request_body(
                 &CityProtectConfig {
-                    page_size: page_size.min(remaining),
+                    page_size: current_page_size.min(remaining),
                     ..*config
                 },
                 &window_start,
@@ -252,14 +252,29 @@ pub async fn fetch_city_protect(
                 config.label,
             );
 
-            let resp_body = crate::retry::send_json(|| {
+            let resp_body = match crate::retry::send_json(|| {
                 client
                     .post(config.api_url)
                     .header("Origin", "https://cityprotect.com")
                     .header("Referer", "https://cityprotect.com/")
                     .json(&body)
             })
-            .await?;
+            .await
+            {
+                Ok(body) => body,
+                Err(e)
+                    if crate::is_page_size_reducible(&e)
+                        && current_page_size > crate::MIN_PAGE_SIZE =>
+                {
+                    current_page_size = (current_page_size / 2).max(crate::MIN_PAGE_SIZE);
+                    log::warn!(
+                        "{}: reducing page size to {current_page_size} after fetch failure, retrying same offset",
+                        config.label,
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
 
             // Extract incidents from result.list.incidents
             let incidents = resp_body
@@ -288,8 +303,8 @@ pub async fn fetch_city_protect(
                     message: format!("channel send failed: {e}"),
                 })?;
 
-            // If we got fewer than page_size, no more records in this window
-            if count < page_size {
+            // If we got fewer than current_page_size, no more records in this window
+            if count < current_page_size {
                 break;
             }
         }

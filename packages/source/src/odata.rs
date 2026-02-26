@@ -88,13 +88,14 @@ pub async fn fetch_odata(
 
     // ── Paginated fetch ──────────────────────────────────────────────
     let will_fetch = total_available.map(|t| fetch_limit.min(t));
+    let mut current_page_size = config.page_size;
 
     loop {
         let remaining = fetch_limit.saturating_sub(offset);
         if remaining == 0 {
             break;
         }
-        let page_limit = remaining.min(config.page_size);
+        let page_limit = remaining.min(current_page_size);
 
         let mut url = format!(
             "{}?$top={page_limit}&$skip={offset}&$orderby={} asc",
@@ -110,13 +111,27 @@ pub async fn fetch_odata(
             log::info!(
                 "{}: page {} — {offset} / {target} fetched",
                 config.label,
-                (offset / config.page_size) + 1,
+                (offset / current_page_size) + 1,
             );
         } else {
             log::info!("{}: offset={offset}, limit={page_limit}", config.label);
         }
 
-        let body = crate::retry::send_json(|| client.get(&url)).await?;
+        let body = match crate::retry::send_json(|| client.get(&url)).await {
+            Ok(body) => body,
+            Err(e)
+                if crate::is_page_size_reducible(&e)
+                    && current_page_size > crate::MIN_PAGE_SIZE =>
+            {
+                current_page_size = (current_page_size / 2).max(crate::MIN_PAGE_SIZE);
+                log::warn!(
+                    "{}: reducing page size to {current_page_size} after fetch failure, retrying same offset",
+                    config.label,
+                );
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         let records: Vec<serde_json::Value> = serde_json::from_value(body)?;
 
         let count = records.len() as u64;

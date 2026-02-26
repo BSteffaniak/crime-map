@@ -159,6 +159,7 @@ async fn fetch_ckan_standard(
             idx + 1,
         );
 
+        let mut current_page_size = config.page_size;
         let mut offset: u64 = resource_resume;
 
         loop {
@@ -166,24 +167,39 @@ async fn fetch_ckan_standard(
             if remaining == 0 {
                 break;
             }
-            let page_limit = remaining.min(config.page_size);
+            let page_limit = remaining.min(current_page_size);
 
             log::info!(
                 "{}: resource {}/{num_resources}, page {} — {offset} / {} fetched",
                 config.label,
                 idx + 1,
-                (offset / config.page_size) + 1,
+                (offset / current_page_size) + 1,
                 remaining_global.min(resource_count),
             );
 
-            let body = crate::retry::send_json(|| {
+            let body = match crate::retry::send_json(|| {
                 client.get(config.api_url).query(&[
                     ("resource_id", resource_id.as_str()),
                     ("limit", &page_limit.to_string()),
                     ("offset", &offset.to_string()),
                 ])
             })
-            .await?;
+            .await
+            {
+                Ok(body) => body,
+                Err(e)
+                    if crate::is_page_size_reducible(&e)
+                        && current_page_size > crate::MIN_PAGE_SIZE =>
+                {
+                    current_page_size = (current_page_size / 2).max(crate::MIN_PAGE_SIZE);
+                    log::warn!(
+                        "{}: reducing page size to {current_page_size} after fetch failure, retrying same offset",
+                        config.label,
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
 
             let records = body
                 .get("result")
@@ -331,6 +347,7 @@ async fn fetch_ckan_sql(
             idx + 1,
         );
 
+        let mut current_page_size = config.page_size;
         let mut offset: u64 = resource_resume;
 
         loop {
@@ -338,13 +355,13 @@ async fn fetch_ckan_sql(
             if remaining == 0 {
                 break;
             }
-            let page_limit = remaining.min(config.page_size);
+            let page_limit = remaining.min(current_page_size);
 
             log::info!(
                 "{}: resource {}/{num_resources}, page {} — {offset} / {} fetched",
                 config.label,
                 idx + 1,
-                (offset / config.page_size) + 1,
+                (offset / current_page_size) + 1,
                 remaining_global.min(resource_count),
             );
 
@@ -354,9 +371,25 @@ async fn fetch_ckan_sql(
                 "SELECT * FROM \"{resource_id}\" WHERE \"{date_column}\" >= '{since_str}' ORDER BY \"{date_column}\" DESC LIMIT {page_limit} OFFSET {offset}"
             ).unwrap();
 
-            let body =
-                crate::retry::send_json(|| client.get(&sql_url).query(&[("sql", sql.as_str())]))
-                    .await?;
+            let body = match crate::retry::send_json(|| {
+                client.get(&sql_url).query(&[("sql", sql.as_str())])
+            })
+            .await
+            {
+                Ok(body) => body,
+                Err(e)
+                    if crate::is_page_size_reducible(&e)
+                        && current_page_size > crate::MIN_PAGE_SIZE =>
+                {
+                    current_page_size = (current_page_size / 2).max(crate::MIN_PAGE_SIZE);
+                    log::warn!(
+                        "{}: reducing page size to {current_page_size} after fetch failure, retrying same offset",
+                        config.label,
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
 
             let records = body
                 .get("result")

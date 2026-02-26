@@ -106,8 +106,25 @@ pub async fn fetch_json_paginated(
     let mut total: u64 = 0;
     let mut page_num: u32 = 0;
 
+    let min_page_size_u32 = u32::try_from(crate::MIN_PAGE_SIZE).unwrap_or(1000);
+
     loop {
-        let page = scraper.fetch_page(page_num).await?;
+        let page = match scraper.fetch_page(page_num).await {
+            Ok(page) => page,
+            Err(e) => {
+                let current_size = scraper.config().page_size.unwrap_or(100);
+                if current_size > min_page_size_u32 {
+                    let new_size = (current_size / 2).max(min_page_size_u32);
+                    scraper.set_page_size(new_size);
+                    log::warn!(
+                        "[{}] Reducing page size to {new_size} after fetch failure, retrying",
+                        config.label,
+                    );
+                    continue;
+                }
+                return Err(SourceError::Scrape(e));
+            }
+        };
         let count = page.records.len() as u64;
         total += count;
         progress.inc(count);

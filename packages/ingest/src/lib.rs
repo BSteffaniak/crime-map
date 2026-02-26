@@ -161,11 +161,31 @@ pub async fn run_sync(args: &SyncArgs, progress: Option<&Arc<dyn ProgressCallbac
 
         match source_db::open_by_id(src.id()) {
             Ok(conn) => {
-                if let Err(e) = sync_source(&conn, src, args.limit, args.force, None).await {
-                    log::error!("Failed to sync {}: {e}", src.id());
-                    result.failed.push(src.id().to_string());
-                } else {
+                let mut sync_succeeded = false;
+                for attempt in 1..=3u32 {
+                    match sync_source(&conn, src, args.limit, args.force, None).await {
+                        Ok(()) => {
+                            sync_succeeded = true;
+                            break;
+                        }
+                        Err(e) => {
+                            if attempt < 3 {
+                                log::warn!(
+                                    "Source '{}' sync failed (attempt {attempt}/3): {e}. \
+                                     Retrying in 30s...",
+                                    src.id()
+                                );
+                                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                            } else {
+                                log::error!("Failed to sync {} after 3 attempts: {e}", src.id());
+                            }
+                        }
+                    }
+                }
+                if sync_succeeded {
                     result.succeeded += 1;
+                } else {
+                    result.failed.push(src.id().to_string());
                 }
             }
             Err(e) => {

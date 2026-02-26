@@ -90,3 +90,21 @@ pub fn build_http_client() -> Result<reqwest::Client, SourceError> {
         .connect_timeout(std::time::Duration::from_secs(30))
         .build()?)
 }
+
+/// Floor for automatic page-size reduction. Fetchers will not reduce
+/// below this value.
+pub const MIN_PAGE_SIZE: u64 = 1000;
+
+/// Returns `true` if the error is likely caused by a response that is too
+/// large to be delivered reliably (truncated body, decode failure) and
+/// might succeed with a smaller page size.
+#[must_use]
+pub fn is_page_size_reducible(err: &SourceError) -> bool {
+    match err {
+        SourceError::Http(e) => e.is_body() || e.is_decode(),
+        SourceError::Normalization { message } => {
+            message.contains("HTTP 5") || message.contains("server error")
+        }
+        _ => false,
+    }
+}

@@ -60,6 +60,7 @@ async fn query_carto_count(
 /// # Errors
 ///
 /// Returns [`SourceError`] if HTTP requests fail.
+#[allow(clippy::too_many_lines)]
 pub async fn fetch_carto(
     config: &CartoConfig<'_>,
     options: &FetchOptions,
@@ -98,13 +99,14 @@ pub async fn fetch_carto(
 
     // ── Paginated fetch ──────────────────────────────────────────────
     let will_fetch = total_available.map(|t| fetch_limit.min(t));
+    let mut current_page_size = config.page_size;
 
     loop {
         let remaining = fetch_limit.saturating_sub(offset);
         if remaining == 0 {
             break;
         }
-        let page_limit = remaining.min(config.page_size);
+        let page_limit = remaining.min(current_page_size);
 
         let query = options.since.as_ref().map_or_else(
             || {
@@ -133,14 +135,31 @@ pub async fn fetch_carto(
             log::info!(
                 "{}: page {} — {offset} / {target} fetched",
                 config.label,
-                (offset / config.page_size) + 1,
+                (offset / current_page_size) + 1,
             );
         } else {
             log::info!("{}: offset={offset}, limit={page_limit}", config.label);
         }
 
-        let body =
-            crate::retry::send_json(|| client.get(config.api_url).query(&[("q", &query)])).await?;
+        let body = match crate::retry::send_json(|| {
+            client.get(config.api_url).query(&[("q", &query)])
+        })
+        .await
+        {
+            Ok(body) => body,
+            Err(e)
+                if crate::is_page_size_reducible(&e)
+                    && current_page_size > crate::MIN_PAGE_SIZE =>
+            {
+                current_page_size = (current_page_size / 2).max(crate::MIN_PAGE_SIZE);
+                log::warn!(
+                    "{}: reducing page size to {current_page_size} after fetch failure, retrying same offset",
+                    config.label,
+                );
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
 
         let rows = body
             .get("rows")
