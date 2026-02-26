@@ -1,0 +1,61 @@
+# Geocoder index smoke tests.
+#
+# Each test searches the index for an address and verifies that the
+# returned coordinates are within `tolerance` degrees of the expected
+# values. The default tolerance (~0.01 degrees ~ 1.1 km) can be
+# overridden per test.
+#
+# All tests must pass. If a test fails because the address is not in
+# the current data set, update or remove the entry.
+
+default_tolerance = 0.01
+
+[[tests]]
+address = "100 N State St, Chicago, IL"
+lat = 41.8827
+lon = -87.6278
+
+[[tests]]
+address = "1600 Pennsylvania Ave NW, Washington, DC"
+lat = 38.8977
+lon = -77.0365
+
+[[tests]]
+address = "350 5th Ave, New York, NY"
+lat = 40.7484
+lon = -73.9856
+
+[[tests]]
+address = "200 E Colfax Ave, Denver, CO"
+lat = 39.7392
+lon = -104.9847
+
+[[tests]]
+address = "100 Boylston St, Boston, MA"
+lat = 42.3519
+lon = -71.0643
+
+[[tests]]
+address = "600 E Locust St, Des Moines, IA"
+lat = 41.5868
+lon = -93.6050
+
+[[tests]]
+address = "3700 Wilshire Blvd, Los Angeles, CA"
+lat = 34.0622
+lon = -118.3085
+
+[[tests]]
+address = "200 E Main St, Durham, NC"
+lat = 35.9940
+lon = -78.8986
+
+[[tests]]
+address = "600 4th Ave, Seattle, WA"
+lat = 47.6038
+lon = -122.3301
+
+[[tests]]
+address = "700 Lavaca St, Austin, TX"
+lat = 30.2700
+lon = -97.7443

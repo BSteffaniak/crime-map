@@ -1685,6 +1685,7 @@ dependencies = [
  "tar",
  "thiserror 2.0.18",
  "tokio",
+ "toml",
  "zip 8.1.0",
  "zstd",
 ]

@@ -168,7 +168,10 @@ cargo ingest geocoder-build       Build Tantivy geocoder index from downloaded d
   --skip-osm                      Skip OSM PBF indexing
 cargo ingest geocoder-pack        Pack geocoder index into .tar.zst for R2 upload
 cargo ingest geocoder-unpack      Unpack geocoder index archive from R2
-cargo ingest geocoder-compare     Compare Tantivy vs Pelias hit rates on cached addresses
+cargo ingest geocoder-verify      Run smoke tests against the geocoder index
+cargo ingest geocoder-search      Search the geocoder index for addresses
+  <ADDRESSES>...                  One or more addresses (format: "street, city, state")
+cargo ingest geocoder-compare     Compare Tantivy hit rates against cached geocode results
 cargo ingest pull-r2-file         Download a single file from R2 by key
   --key <KEY>                     R2 object key (e.g. oa-data/us_south.zip)
   --dest <PATH>                   Local destination path

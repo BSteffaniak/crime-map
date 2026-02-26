@@ -125,7 +125,7 @@ enum Commands {
         #[arg(long)]
         max_time: Option<u64>,
     },
-    /// Compare geocoding results between Tantivy and Pelias providers.
+    /// Compare geocoding results between Tantivy and other providers.
     ///
     /// Queries the geocode cache for all Pelias results and runs the same
     /// addresses through the Tantivy index. Reports hit rates, agreement
@@ -233,6 +233,21 @@ enum Commands {
     GeocoderPack,
     /// Unpack a geocoder index archive from R2.
     GeocoderUnpack,
+    /// Run smoke tests against the geocoder index.
+    ///
+    /// Searches a set of known US addresses (defined in `smoke_tests.toml`)
+    /// and verifies that returned coordinates are within tolerance.
+    /// Exits with an error if any test fails.
+    GeocoderVerify,
+    /// Search the geocoder index for one or more addresses.
+    ///
+    /// Prints the matched address, coordinates, score, and source for
+    /// each query. Useful for ad-hoc lookups and debugging.
+    GeocoderSearch {
+        /// Addresses to search (format: `"street, city, state"`).
+        #[arg(required = true)]
+        addresses: Vec<String>,
+    },
     /// Download a single file from R2 by key.
     ///
     /// Generic helper for pulling arbitrary files (e.g. pre-uploaded
@@ -953,6 +968,84 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let elapsed = start.elapsed();
             log::info!("Geocoder index unpacked in {:.1}s", elapsed.as_secs_f64());
+        }
+        Commands::GeocoderVerify => {
+            if !crime_map_geocoder::tantivy_index::is_available() {
+                return Err("Tantivy geocoder index not found. Run `geocoder-build` first.".into());
+            }
+
+            let index_dir = crime_map_geocoder_index::default_index_dir();
+            let index = crime_map_geocoder_index::GeocoderIndex::open(&index_dir)?;
+
+            let doc_count = crime_map_geocoder_index::verify::document_count(&index)?;
+            println!("Index documents: {doc_count}");
+            println!();
+
+            let report = crime_map_geocoder_index::verify::run_smoke_tests(&index)?;
+
+            for result in &report.results {
+                let status = if result.passed { "PASS" } else { "FAIL" };
+                println!("[{status}] {}", result.address);
+
+                if let (Some(lat), Some(lon)) = (result.actual_lat, result.actual_lon) {
+                    println!(
+                        "       expected: ({:.4}, {:.4})",
+                        result.expected_lat, result.expected_lon
+                    );
+                    println!("       actual:   ({lat:.4}, {lon:.4})");
+                    if let Some(matched) = &result.matched_address {
+                        println!("       matched:  {matched}");
+                    }
+                    if let Some(score) = result.score {
+                        println!("       score:    {score:.2}");
+                    }
+                } else if let Some(reason) = &result.failure_reason {
+                    println!("       {reason}");
+                }
+                println!();
+            }
+
+            println!(
+                "=== {}/{} smoke tests passed ===",
+                report.passed, report.total
+            );
+
+            if !report.all_passed() {
+                return Err(
+                    format!("{} smoke test(s) failed", report.total - report.passed).into(),
+                );
+            }
+        }
+        Commands::GeocoderSearch { addresses } => {
+            if !crime_map_geocoder::tantivy_index::is_available() {
+                return Err("Tantivy geocoder index not found. Run `geocoder-build` first.".into());
+            }
+
+            let geocoder = crime_map_geocoder::tantivy_index::TantivyGeocoder::open_default()
+                .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+
+            for address in &addresses {
+                println!("Query: {address}");
+
+                match crime_map_geocoder::tantivy_index::geocode_freeform(&geocoder, address).await
+                {
+                    Ok(Some(hit)) => {
+                        println!("  lat:     {:.6}", hit.latitude);
+                        println!("  lon:     {:.6}", hit.longitude);
+                        if let Some(matched) = &hit.matched_address {
+                            println!("  matched: {matched}");
+                        }
+                        println!("  quality: {:?}", hit.match_quality);
+                    }
+                    Ok(None) => {
+                        println!("  no match");
+                    }
+                    Err(e) => {
+                        println!("  error: {e}");
+                    }
+                }
+                println!();
+            }
         }
         Commands::PullR2File { key, dest } => {
             let dest_path = std::path::PathBuf::from(&dest);

@@ -4,9 +4,8 @@
 
 //! Tantivy-based geocoder index for US address lookup.
 //!
-//! Replaces the Pelias (Elasticsearch) geocoder with a single-binary,
-//! in-process Tantivy full-text search index. The index is built from
-//! `OpenAddresses` CSV data and OpenStreetMap PBF extracts.
+//! In-process Tantivy full-text search index built from `OpenAddresses`
+//! CSV data and OpenStreetMap PBF extracts.
 //!
 //! # Architecture
 //!
@@ -42,6 +41,7 @@ pub mod osm;
 pub mod query;
 pub mod schema;
 pub mod synonyms;
+pub mod verify;
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -121,6 +121,10 @@ pub enum GeocoderIndexError {
     /// Async task join error.
     #[error("Task join error: {0}")]
     Join(#[from] tokio::task::JoinError),
+
+    /// Generic error.
+    #[error("{0}")]
+    Other(String),
 }
 
 /// A handle to an opened geocoder index for searching.
@@ -227,6 +231,13 @@ impl GeocoderIndex {
             city,
             state,
         )
+    }
+
+    /// Returns the total number of documents in the index.
+    #[must_use]
+    pub fn num_docs(&self) -> u64 {
+        let searcher = self.reader.searcher();
+        searcher.num_docs()
     }
 }
 

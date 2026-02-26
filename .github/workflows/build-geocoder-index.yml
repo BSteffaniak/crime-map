@@ -134,6 +134,9 @@ jobs:
           echo "=== Disk after index build ==="
           df -h /
 
+      - name: Verify geocoder index
+        run: staging/crime_map_ingest geocoder-verify
+
       - name: Delete source data to free disk
         run: |
           rm -rf data/shared/oa/

@@ -1,0 +1,90 @@
+name: Verify Geocoder Index
+
+# Pulls the geocoder index from R2 and runs verification tests.
+# Always runs the hardcoded smoke tests. Optionally searches for
+# user-provided addresses and prints the results.
+
+on:
+  workflow_dispatch:
+    inputs:
+      addresses:
+        description: "Semicolon-separated addresses to search (e.g. 100 N State St, Chicago, IL; 350 5th Ave, New York, NY)"
+        required: false
+        type: string
+        default: ""
+
+env:
+  RUST_LOG: crime_map=info
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+  R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+
+jobs:
+  verify:
+    name: Verify Geocoder Index
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pipeline tools (with Rust)
+        uses: ./.github/actions/setup-pipeline
+        with:
+          install-rust: 'true'
+          rust-cache-key: geocoder-verify
+
+      - name: Build release binary
+        run: cargo build --release -p crime_map_ingest
+
+      - name: Stage binary and delete build artifacts
+        run: |
+          mkdir -p staging
+          cp target/release/crime_map_ingest staging/
+          rm -rf target/
+
+      - name: Pull geocoder index from R2
+        run: staging/crime_map_ingest pull --shared-only
+
+      - name: Unpack geocoder index
+        run: |
+          if [ ! -f data/shared/geocoder_index.tar.zst ]; then
+            echo "::error::geocoder_index.tar.zst not found on R2. Run the Build Geocoder Index workflow first."
+            exit 1
+          fi
+          staging/crime_map_ingest geocoder-unpack
+
+      - name: Run smoke tests
+        id: smoke
+        run: staging/crime_map_ingest geocoder-verify
+
+      - name: Search custom addresses
+        if: inputs.addresses != ''
+        id: search
+        run: |
+          IFS=';' read -ra ADDRS <<< "${{ inputs.addresses }}"
+          ARGS=()
+          for addr in "${ADDRS[@]}"; do
+            trimmed=$(echo "$addr" | xargs)
+            [ -n "$trimmed" ] && ARGS+=("$trimmed")
+          done
+          if [ ${#ARGS[@]} -gt 0 ]; then
+            staging/crime_map_ingest geocoder-search "${ARGS[@]}"
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Geocoder Index Verification" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${{ steps.smoke.outcome }}" = "success" ]; then
+            echo "- Smoke tests: **passed**" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Smoke tests: **FAILED**" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ -n "${{ inputs.addresses }}" ]; then
+            echo "- Custom addresses searched: \`${{ inputs.addresses }}\`" >> "$GITHUB_STEP_SUMMARY"
+          fi

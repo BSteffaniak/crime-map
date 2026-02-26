@@ -91,8 +91,9 @@ Manually triggered. Builds the Tantivy index and uploads it to R2.
 3. Downloads the US OSM PBF from Geofabrik (~9 GB, free, no auth)
 4. (If `oa_r2_files` is set) Pulls each OA zip from R2
 5. Runs `geocoder-build` with all archives + OSM
-6. Packs the index to `geocoder_index.tar.zst`
-7. Uploads to R2 via `push --shared-only`
+6. Runs `geocoder-verify` smoke tests (fails the build if any test fails)
+7. Packs the index to `geocoder_index.tar.zst`
+8. Uploads to R2 via `push --shared-only`
 
 **Disk budget:** ~60 GB available after cleanup. Peak usage ~26 GB (OSM PBF + OA zips + index).
 
@@ -106,6 +107,24 @@ Each partition job automatically:
 
 If the index archive doesn't exist on R2 yet, the unpack step is silently
 skipped and geocoding falls through to Nominatim.
+
+### Verify Geocoder Index (`verify-geocoder-index.yml`)
+
+Manually triggered. Pulls the index from R2 and runs verification tests.
+Optionally searches for user-provided addresses.
+
+| Input | Default | Description |
+|-------|---------|-------------|
+| `addresses` | (empty) | Semicolon-separated addresses to search (e.g. `100 N State St, Chicago, IL; 350 5th Ave, New York, NY`) |
+
+**What it does:**
+
+1. Builds the `crime_map_ingest` binary
+2. Pulls `geocoder_index.tar.zst` from R2
+3. Unpacks the index
+4. Runs `geocoder-verify` (hardcoded smoke tests -- always runs)
+5. (If `addresses` is set) Runs `geocoder-search` for each address and prints results
+6. Writes results to the GitHub Actions step summary
 
 ## CLI Commands
 
@@ -162,6 +181,67 @@ Extracts `data/shared/geocoder_index.tar.zst` to `data/shared/geocoder_index/`.
 
 ```bash
 cargo ingest geocoder-unpack
+```
+
+### `geocoder-verify`
+
+Runs smoke tests against the local geocoder index. Searches a set of known
+US addresses (defined in `packages/geocoder_index/smoke_tests.toml`) and
+verifies that returned coordinates are within the configured tolerance.
+
+Exits with a non-zero status if any test fails.
+
+```bash
+cargo ingest geocoder-verify
+```
+
+Output:
+
+```
+Index documents: 31456789
+
+[PASS] 100 N State St, Chicago, IL
+       expected: (41.8827, -87.6278)
+       actual:   (41.8825, -87.6280)
+       matched:  100 NORTH STATE STREET, CHICAGO, IL
+       score:    12.34
+
+[FAIL] 350 5th Ave, New York, NY
+       no match found
+
+=== 9/10 smoke tests passed ===
+```
+
+To update the test addresses, edit `packages/geocoder_index/smoke_tests.toml`:
+
+```toml
+default_tolerance = 0.01  # ~1.1 km
+
+[[tests]]
+address = "100 N State St, Chicago, IL"
+lat = 41.8827
+lon = -87.6278
+
+[[tests]]
+address = "350 5th Ave, New York, NY"
+lat = 40.7484
+lon = -73.9856
+tolerance = 0.02  # per-test override
+```
+
+### `geocoder-search`
+
+Searches the geocoder index for one or more addresses. Useful for ad-hoc
+lookups and debugging.
+
+```bash
+# Single address
+cargo ingest geocoder-search "100 N State St, Chicago, IL"
+
+# Multiple addresses
+cargo ingest geocoder-search \
+  "100 N State St, Chicago, IL" \
+  "1600 Pennsylvania Ave NW, Washington, DC"
 ```
 
 ### `geocoder-compare`
@@ -267,6 +347,9 @@ doesn't exist), the provider is silently skipped.
 | `packages/geocoder_index/src/osm.rs` | OSM PBF address extractor |
 | `packages/geocoder_index/src/archive.rs` | tar+zstd pack/unpack utilities |
 | `packages/geocoder_index/src/download.rs` | HTTP download helper |
+| `packages/geocoder_index/src/verify.rs` | Smoke test runner (loads `smoke_tests.toml`) |
+| `packages/geocoder_index/smoke_tests.toml` | Smoke test addresses with expected coordinates |
 | `packages/geocoder/src/tantivy_index.rs` | Tantivy provider (wraps `GeocoderIndex` for the geocode pipeline) |
 | `packages/geocoder/services/tantivy_index.toml` | Provider config (priority 2, enabled) |
 | `.github/workflows/build-geocoder-index.yml` | CI workflow to build and upload the index |
+| `.github/workflows/verify-geocoder-index.yml` | CI workflow to verify the index (smoke tests + ad-hoc search) |
