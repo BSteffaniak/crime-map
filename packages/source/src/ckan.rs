@@ -59,7 +59,21 @@ pub async fn fetch_ckan(
     let use_sql = config.date_column.is_some() && options.since.is_some();
 
     if use_sql {
-        fetch_ckan_sql(config, options, tx, progress).await
+        match fetch_ckan_sql(config, options, tx, progress).await {
+            Ok(count) => Ok(count),
+            Err(e) => {
+                // Some CKAN instances have a broken datastore_search_sql
+                // endpoint (returns HTTP 500). Fall back to the standard
+                // datastore_search endpoint which fetches all records and
+                // relies on the database's ON CONFLICT DO NOTHING for dedup.
+                log::warn!(
+                    "{}: datastore_search_sql failed ({e}), \
+                     falling back to standard datastore_search (full fetch)",
+                    config.label,
+                );
+                fetch_ckan_standard(config, options, tx, progress).await
+            }
+        }
     } else {
         fetch_ckan_standard(config, options, tx, progress).await
     }
