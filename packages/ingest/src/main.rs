@@ -252,17 +252,23 @@ enum Commands {
         #[arg(required = true)]
         addresses: Vec<String>,
     },
-    /// Download a single file from R2 by key.
+    /// Download one or more files from R2 by key.
     ///
     /// Generic helper for pulling arbitrary files (e.g. pre-uploaded
-    /// `OpenAddresses` zips stored under `oa-data/`).
+    /// `OpenAddresses` zips stored under `oa-data/`). Specify `--key`
+    /// and `--dest` in pairs; can be repeated for multiple files.
+    ///
+    /// Examples:
+    ///   pull-r2-file --key shared/geocoder_index.tar.zst --dest data/shared/geocoder_index.tar.zst
+    ///   pull-r2-file --key oa-data/us_south.zip --dest data/oa/us_south.zip \
+    ///                --key oa-data/us_west.zip --dest data/oa/us_west.zip
     PullR2File {
-        /// R2 object key (e.g. `oa-data/us_south.zip`).
-        #[arg(long)]
-        key: String,
-        /// Local destination path.
-        #[arg(long)]
-        dest: String,
+        /// R2 object key(s) (e.g. `shared/geocoder_index.tar.zst`). Repeatable.
+        #[arg(long, required = true)]
+        key: Vec<String>,
+        /// Local destination path(s). Must match the number of `--key` args.
+        #[arg(long, required = true)]
+        dest: Vec<String>,
     },
 }
 
@@ -1052,21 +1058,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::PullR2File { key, dest } => {
-            let dest_path = std::path::PathBuf::from(&dest);
-            if let Some(parent) = dest_path.parent() {
-                std::fs::create_dir_all(parent)?;
+            if key.len() != dest.len() {
+                return Err(format!(
+                    "--key and --dest must be specified the same number of times \
+                     (got {} keys, {} dests)",
+                    key.len(),
+                    dest.len()
+                )
+                .into());
             }
 
             let r2 = crime_map_r2::R2Client::from_env()?;
-            let downloaded = r2.download(&key, &dest_path).await?;
-            if downloaded {
-                #[allow(clippy::cast_precision_loss)]
-                let mb = std::fs::metadata(&dest_path)
-                    .map(|m| m.len() as f64 / 1_048_576.0)
-                    .unwrap_or(0.0);
-                log::info!("Downloaded {key} -> {} ({mb:.1} MB)", dest_path.display());
-            } else {
-                return Err(format!("R2 object not found: {key}").into());
+
+            for (k, d) in key.iter().zip(dest.iter()) {
+                let dest_path = std::path::PathBuf::from(d);
+                if let Some(parent) = dest_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+
+                let downloaded = r2.download(k, &dest_path).await?;
+                if downloaded {
+                    #[allow(clippy::cast_precision_loss)]
+                    let mb = std::fs::metadata(&dest_path)
+                        .map(|m| m.len() as f64 / 1_048_576.0)
+                        .unwrap_or(0.0);
+                    log::info!("Downloaded {k} -> {} ({mb:.1} MB)", dest_path.display());
+                } else {
+                    return Err(format!("R2 object not found: {k}").into());
+                }
             }
         }
     }

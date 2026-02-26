@@ -50,7 +50,10 @@ jobs:
           verify-command: --version
 
       - name: Pull geocoder index from R2
-        run: staging/crime_map_ingest pull --shared-only
+        run: |
+          staging/crime_map_ingest pull-r2-file \
+            --key shared/geocoder_index.tar.zst \
+            --dest data/shared/geocoder_index.tar.zst
 
       - name: Unpack geocoder index
         run: |
