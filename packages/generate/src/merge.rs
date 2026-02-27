@@ -186,17 +186,29 @@ async fn merge_sidebar_db(
         .await
         .map_err(|e| format!("Failed to create incidents table: {e}"))?;
 
-    // Import from each partition
+    // Import from each partition.
+    //
+    // ATTACH DATABASE is per-connection state in SQLite, but
+    // `switchy_database` uses a 5-connection round-robin pool. Without
+    // pinning, ATTACH may run on connection A while the subsequent INSERT
+    // runs on connection B (which doesn't see the attached database).
+    //
+    // `begin_transaction()` grabs one connection from the pool and pins
+    // all operations on the returned transaction to that single connection.
     for (i, input) in inputs.iter().enumerate() {
         let alias = format!("p{i}");
         let path_str = input.to_string_lossy();
 
-        sqlite
-            .exec_raw(&format!("ATTACH DATABASE '{path_str}' AS {alias}"))
+        let tx = sqlite
+            .begin_transaction()
+            .await
+            .map_err(|e| format!("Failed to begin transaction for partition {i}: {e}"))?;
+
+        tx.exec_raw(&format!("ATTACH DATABASE '{path_str}' AS {alias}"))
             .await
             .map_err(|e| format!("Failed to attach partition: {e}"))?;
 
-        let insert_result = sqlite
+        let insert_result = tx
             .exec_raw(&format!(
                 "INSERT INTO incidents (
                     source_id, source_name, source_incident_id,
@@ -228,22 +240,30 @@ async fn merge_sidebar_db(
                 if msg.contains("no such table") {
                     // The partition .db was likely transferred without its WAL
                     // sidecar file, so the incidents table was never committed
-                    // to the main database file. Skip this partition.
+                    // to the main database file. Detach and skip this partition.
                     log::warn!(
                         "  Partition {}: skipping {} (no incidents table — possible WAL issue)",
                         i + 1,
                         input.display()
                     );
-                } else {
-                    return Err(format!("Failed to insert from partition: {e}").into());
+                    // Best-effort detach before moving to the next partition
+                    let _ignore = tx.exec_raw(&format!("DETACH {alias}")).await;
+                    tx.commit()
+                        .await
+                        .map_err(|e| format!("Failed to commit after skip: {e}"))?;
+                    continue;
                 }
+                return Err(format!("Failed to insert from partition: {e}").into());
             }
         }
 
-        sqlite
-            .exec_raw(&format!("DETACH {alias}"))
+        tx.exec_raw(&format!("DETACH {alias}"))
             .await
             .map_err(|e| format!("Failed to detach partition: {e}"))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| format!("Failed to commit partition {i}: {e}"))?;
     }
 
     // Build R-tree spatial index
