@@ -1418,6 +1418,10 @@ fn generate_count_db(
         "CREATE INDEX idx_count_summary_cells ON count_summary (cell_lng, cell_lat)",
     )?;
 
+    // Reclaim disk space freed by DROP TABLE incidents above.
+    log::info!("Running VACUUM on counts DuckDB...");
+    duck.execute_batch("VACUUM")?;
+
     log::info!(
         "DuckDB count database generated: {} ({total_count} rows aggregated)",
         db_path.display()
@@ -1954,6 +1958,10 @@ fn generate_h3_db(
 
         log::info!("Pre-computed boundaries for {boundary_count} distinct H3 cells");
     }
+
+    // Reclaim disk space freed by DROP TABLE h3_staging above.
+    log::info!("Running VACUUM on H3 DuckDB...");
+    duck.execute_batch("VACUUM")?;
 
     log::info!(
         "H3 DuckDB database generated: {} ({total_count} incidents indexed)",
@@ -2496,6 +2504,10 @@ fn generate_analytics_db(
          UNION ALL
          SELECT id, name, parent_id, severity FROM numbered_children",
     )?;
+
+    // Compact the file before upload/serving.
+    log::info!("Running VACUUM on analytics DuckDB...");
+    duck.execute_batch("VACUUM")?;
 
     log::info!(
         "Analytics DuckDB database generated: {} ({total_count} incident rows + reference tables)",

@@ -371,6 +371,9 @@ fn merge_count_db(
         duck.execute_batch(&format!("DETACH p{i}"))?;
     }
 
+    // Compact the merged file before upload.
+    duck.execute_batch("VACUUM")?;
+
     log::info!("Count merge complete: {}", output_path.display());
     Ok(())
 }
@@ -448,6 +451,9 @@ fn merge_h3_db(
     for i in 0..inputs.len() {
         duck.execute_batch(&format!("DETACH p{i}"))?;
     }
+
+    // Compact the merged file before upload.
+    duck.execute_batch("VACUUM")?;
 
     log::info!("H3 merge complete: {}", output_path.display());
     Ok(())
@@ -544,6 +550,9 @@ fn merge_analytics_db(
     for i in 0..inputs.len() {
         duck.execute_batch(&format!("DETACH p{i}"))?;
     }
+
+    // Compact the merged file before upload.
+    duck.execute_batch("VACUUM")?;
 
     log::info!("Analytics merge complete: {}", output_path.display());
     Ok(())
