@@ -538,6 +538,9 @@ impl R2Client {
     }
 
     /// Single download attempt (always transfers, no smart-sync check).
+    ///
+    /// Streams the response body directly to disk to keep memory usage
+    /// bounded regardless of file size.
     async fn download_once(&self, key: &str, local_path: &Path) -> Result<(), R2Error> {
         let output = self
             .client
@@ -552,13 +555,19 @@ impl R2Client {
                 source: Box::new(e),
             })?;
 
-        let bytes = output.body.collect().await.map_err(|e| R2Error::Download {
-            bucket: BUCKET.to_string(),
-            key: key.to_string(),
-            source: Box::new(e),
-        })?;
+        // Stream body to disk instead of buffering the entire response in
+        // memory. For large files (10+ GB), collecting into memory would
+        // OOM the CI runner.
+        let mut body_reader = output.body.into_async_read();
+        let mut file = tokio::fs::File::create(local_path).await?;
+        tokio::io::copy(&mut body_reader, &mut file)
+            .await
+            .map_err(|e| R2Error::Download {
+                bucket: BUCKET.to_string(),
+                key: key.to_string(),
+                source: Box::new(e),
+            })?;
 
-        tokio::fs::write(local_path, bytes.into_bytes()).await?;
         let size = tokio::fs::metadata(local_path).await?.len();
         #[allow(clippy::cast_precision_loss)] // display-only MB value
         let mb = size as f64 / 1_048_576.0;
