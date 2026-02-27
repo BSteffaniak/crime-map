@@ -29,6 +29,7 @@ use std::path::Path;
 
 use aws_config::Region;
 use aws_sdk_s3::config::{Credentials, StalledStreamProtectionConfig};
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use crime_map_database::paths;
 use crime_map_source::registry;
 
@@ -124,6 +125,12 @@ const MAX_DOWNLOAD_ATTEMPTS: u32 = 3;
 
 /// Base delay between download retries (doubles each attempt).
 const RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Files larger than this use multipart upload (S3 `PutObject` limit is 5 GB).
+const MULTIPART_THRESHOLD: u64 = 500 * 1024 * 1024; // 500 MB
+
+/// Size of each part in a multipart upload.
+const MULTIPART_PART_SIZE: u64 = 100 * 1024 * 1024; // 100 MB
 
 /// Result of a sync batch: how many files were transferred vs skipped.
 #[derive(Debug, Default, Clone, Copy)]
@@ -598,22 +605,63 @@ impl R2Client {
             });
         }
 
-        let data = tokio::fs::read(local_path).await?;
-        let size = data.len();
+        let file_size = tokio::fs::metadata(local_path).await?.len();
         #[allow(clippy::cast_precision_loss)] // display-only MB value
-        let mb = size as f64 / 1_048_576.0;
-        log::info!(
-            "Pushing {} -> s3://{BUCKET}/{key} ({mb:.1} MB)",
-            local_path.display(),
-        );
+        let mb = file_size as f64 / 1_048_576.0;
 
-        let body = aws_sdk_s3::primitives::ByteStream::from(data);
+        if file_size > MULTIPART_THRESHOLD {
+            log::info!(
+                "Pushing {} -> s3://{BUCKET}/{key} ({mb:.1} MB, multipart)",
+                local_path.display(),
+            );
+            self.upload_multipart(key, local_path, file_size).await?;
+        } else {
+            log::info!(
+                "Pushing {} -> s3://{BUCKET}/{key} ({mb:.1} MB)",
+                local_path.display(),
+            );
+            let data = tokio::fs::read(local_path).await?;
+            let body = aws_sdk_s3::primitives::ByteStream::from(data);
 
-        self.client
-            .put_object()
+            self.client
+                .put_object()
+                .bucket(BUCKET)
+                .key(key)
+                .body(body)
+                .content_type("application/octet-stream")
+                .send()
+                .await
+                .map_err(|e| R2Error::Upload {
+                    bucket: BUCKET.to_string(),
+                    key: key.to_string(),
+                    source: Box::new(e),
+                })?;
+        }
+
+        log::info!("  uploaded {key}");
+        Ok(SyncStats {
+            transferred: 1,
+            ..SyncStats::default()
+        })
+    }
+
+    /// Uploads a large file using S3 multipart upload.
+    ///
+    /// Reads the file in [`MULTIPART_PART_SIZE`] chunks to avoid loading
+    /// the entire file into memory. Aborts the multipart upload on any
+    /// error to avoid leaving orphaned parts on R2.
+    async fn upload_multipart(
+        &self,
+        key: &str,
+        local_path: &Path,
+        file_size: u64,
+    ) -> Result<(), R2Error> {
+        // Initiate multipart upload
+        let create = self
+            .client
+            .create_multipart_upload()
             .bucket(BUCKET)
             .key(key)
-            .body(body)
             .content_type("application/octet-stream")
             .send()
             .await
@@ -623,11 +671,124 @@ impl R2Client {
                 source: Box::new(e),
             })?;
 
-        log::info!("  uploaded {key}");
-        Ok(SyncStats {
-            transferred: 1,
-            ..SyncStats::default()
-        })
+        let upload_id = create
+            .upload_id()
+            .ok_or_else(|| R2Error::Upload {
+                bucket: BUCKET.to_string(),
+                key: key.to_string(),
+                source: "CreateMultipartUpload returned no upload_id".into(),
+            })?
+            .to_string();
+
+        // Upload parts, aborting on any error
+        match self
+            .upload_multipart_parts(key, local_path, file_size, &upload_id)
+            .await
+        {
+            Ok(parts) => {
+                // Complete the multipart upload
+                let completed = CompletedMultipartUpload::builder()
+                    .set_parts(Some(parts))
+                    .build();
+
+                self.client
+                    .complete_multipart_upload()
+                    .bucket(BUCKET)
+                    .key(key)
+                    .upload_id(&upload_id)
+                    .multipart_upload(completed)
+                    .send()
+                    .await
+                    .map_err(|e| R2Error::Upload {
+                        bucket: BUCKET.to_string(),
+                        key: key.to_string(),
+                        source: Box::new(e),
+                    })?;
+
+                Ok(())
+            }
+            Err(e) => {
+                // Abort the multipart upload to clean up orphaned parts
+                log::warn!("  multipart upload failed, aborting: {e}");
+                let _ignore = self
+                    .client
+                    .abort_multipart_upload()
+                    .bucket(BUCKET)
+                    .key(key)
+                    .upload_id(&upload_id)
+                    .send()
+                    .await;
+                Err(e)
+            }
+        }
+    }
+
+    /// Uploads individual parts for a multipart upload, reading from disk
+    /// in chunks to keep memory usage bounded.
+    async fn upload_multipart_parts(
+        &self,
+        key: &str,
+        local_path: &Path,
+        file_size: u64,
+        upload_id: &str,
+    ) -> Result<Vec<CompletedPart>, R2Error> {
+        use tokio::io::AsyncReadExt;
+
+        let mut file = tokio::fs::File::open(local_path).await?;
+        let mut parts = Vec::new();
+        let mut part_number: i32 = 1;
+        let mut uploaded: u64 = 0;
+
+        loop {
+            // Determine how much to read for this part
+            let remaining = file_size - uploaded;
+            if remaining == 0 {
+                break;
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let chunk_size = remaining.min(MULTIPART_PART_SIZE) as usize;
+
+            // Read chunk from disk
+            let mut buf = vec![0u8; chunk_size];
+            file.read_exact(&mut buf).await?;
+
+            let body = aws_sdk_s3::primitives::ByteStream::from(buf);
+
+            let upload_part = self
+                .client
+                .upload_part()
+                .bucket(BUCKET)
+                .key(key)
+                .upload_id(upload_id)
+                .part_number(part_number)
+                .body(body)
+                .send()
+                .await
+                .map_err(|e| R2Error::Upload {
+                    bucket: BUCKET.to_string(),
+                    key: key.to_string(),
+                    source: Box::new(e),
+                })?;
+
+            let etag = upload_part.e_tag().unwrap_or_default().to_string();
+            parts.push(
+                CompletedPart::builder()
+                    .e_tag(etag)
+                    .part_number(part_number)
+                    .build(),
+            );
+
+            uploaded += chunk_size as u64;
+            #[allow(clippy::cast_precision_loss)] // display-only values
+            let pct = (uploaded as f64 / file_size as f64) * 100.0;
+            #[allow(clippy::cast_precision_loss)] // display-only MB value
+            let uploaded_mb = uploaded as f64 / 1_048_576.0;
+            log::info!("  part {part_number}: {uploaded_mb:.1} MB uploaded ({pct:.0}%)");
+
+            part_number += 1;
+        }
+
+        Ok(parts)
     }
 
     /// Deletes an object from R2.
