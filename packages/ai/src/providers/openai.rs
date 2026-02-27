@@ -1,23 +1,52 @@
-//! `OpenAI` GPT provider implementation.
+//! `OpenAI`-compatible provider implementation.
+//!
+//! Works with the `OpenAI` API directly, as well as any `OpenAI`-compatible
+//! inference server (Ollama, vLLM, llama.cpp, LM Studio, etc.) by setting
+//! a custom base URL via `AI_BASE_URL`.
 
 use serde::{Deserialize, Serialize};
 
 use super::{ContentBlock, LlmProvider, LlmResponse, Message, MessageContent, StopReason};
 use crate::AiError;
 
-/// `OpenAI` API provider.
+/// Default `OpenAI` API base URL.
+const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+
+/// `OpenAI`-compatible API provider.
+///
+/// Supports the standard `OpenAI` API and any compatible server (Ollama,
+/// vLLM, llama.cpp, LM Studio, etc.) by configuring a custom base URL.
 pub struct OpenAiProvider {
-    api_key: String,
+    api_key: Option<String>,
+    base_url: String,
     model: String,
     client: reqwest::Client,
 }
 
 impl OpenAiProvider {
-    /// Creates a new `OpenAI` provider.
+    /// Creates a new `OpenAI` provider with the standard API endpoint.
     #[must_use]
     pub fn new(api_key: String, model: String) -> Self {
         Self {
+            api_key: Some(api_key),
+            base_url: DEFAULT_BASE_URL.to_string(),
+            model,
+            client: reqwest::Client::new(),
+        }
+    }
+
+    /// Creates a new provider pointing at a custom `OpenAI`-compatible endpoint.
+    ///
+    /// The `base_url` should be the base path (e.g. `http://localhost:11434/v1`);
+    /// `/chat/completions` is appended automatically.
+    /// The API key is optional — local servers typically don't require one.
+    #[must_use]
+    pub fn with_base_url(base_url: &str, model: String, api_key: Option<String>) -> Self {
+        // Strip trailing slash for consistent URL construction
+        let base_url = base_url.trim_end_matches('/').to_string();
+        Self {
             api_key,
+            base_url,
             model,
             client: reqwest::Client::new(),
         }
@@ -209,14 +238,18 @@ impl LlmProvider for OpenAiProvider {
             max_tokens: 4096,
         };
 
-        let resp = self
+        let url = format!("{}/chat/completions", self.base_url);
+
+        let mut req = self
             .client
-            .post("https://api.openai.com/v1/chat/completions")
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await?;
+            .post(&url)
+            .header("Content-Type", "application/json");
+
+        if let Some(ref api_key) = self.api_key {
+            req = req.header("Authorization", format!("Bearer {api_key}"));
+        }
+
+        let resp = req.json(&request).send().await?;
 
         let status = resp.status();
         let body = resp.text().await?;

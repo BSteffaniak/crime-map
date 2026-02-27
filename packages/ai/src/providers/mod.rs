@@ -1,6 +1,8 @@
 //! LLM provider abstraction and implementations.
 //!
-//! Supports Anthropic Claude, `OpenAI`, and AWS Bedrock via a common trait.
+//! Supports Anthropic Claude, `OpenAI`, AWS Bedrock, and any
+//! `OpenAI`-compatible local/self-hosted server (Ollama, vLLM,
+//! llama.cpp, LM Studio) via a common trait.
 
 pub mod anthropic;
 #[cfg(feature = "bedrock")]
@@ -95,8 +97,13 @@ pub trait LlmProvider: Send + Sync {
 
 /// Creates an LLM provider based on environment variables.
 ///
-/// If `AI_PROVIDER` is explicitly set, uses that provider. Otherwise
-/// auto-detects from available credentials:
+/// If `AI_BASE_URL` is set, creates an `OpenAI`-compatible provider
+/// pointing at that URL (for local/self-hosted servers like Ollama,
+/// vLLM, llama.cpp, or LM Studio). No API key is required for local
+/// servers.
+///
+/// Otherwise, if `AI_PROVIDER` is explicitly set, uses that provider.
+/// Otherwise auto-detects from available credentials:
 ///
 /// 1. `ANTHROPIC_API_KEY` set -> Anthropic Claude
 /// 2. `OPENAI_API_KEY` set -> `OpenAI` GPT-4
@@ -109,6 +116,30 @@ pub trait LlmProvider: Send + Sync {
 /// explicitly requested provider is not configured.
 #[allow(clippy::unused_async)] // async is needed when bedrock feature is enabled
 pub async fn create_provider_from_env() -> Result<Box<dyn LlmProvider>, AiError> {
+    // If AI_BASE_URL is set, always use the OpenAI-compatible provider
+    // pointed at that URL. This is the primary path for local/self-hosted LLMs.
+    if let Ok(base_url) = std::env::var("AI_BASE_URL") {
+        let model = std::env::var("AI_MODEL").map_err(|_| AiError::Config {
+            message: "AI_MODEL must be set when using AI_BASE_URL \
+                      (e.g. AI_MODEL=qwen2.5:7b for Ollama)"
+                .to_string(),
+        })?;
+        let api_key = std::env::var("AI_API_KEY")
+            .or_else(|_| std::env::var("OPENAI_API_KEY"))
+            .ok();
+        log::info!(
+            "Using OpenAI-compatible provider at {base_url} with model {model}{}",
+            if api_key.is_some() {
+                " (with API key)"
+            } else {
+                " (no API key)"
+            }
+        );
+        return Ok(Box::new(openai::OpenAiProvider::with_base_url(
+            &base_url, model, api_key,
+        )));
+    }
+
     let provider = std::env::var("AI_PROVIDER").unwrap_or_else(|_| detect_provider());
 
     match provider.to_lowercase().as_str() {
@@ -155,7 +186,8 @@ pub async fn create_provider_from_env() -> Result<Box<dyn LlmProvider>, AiError>
         }),
         other => Err(AiError::Config {
             message: format!(
-                "Unknown AI provider: {other}. Use 'anthropic', 'openai', or 'bedrock'."
+                "Unknown AI provider: {other}. Use 'anthropic', 'openai', or 'bedrock', \
+                 or set AI_BASE_URL for a local/self-hosted OpenAI-compatible server."
             ),
         }),
     }
@@ -197,8 +229,8 @@ fn detect_provider() -> String {
     }
 
     log::warn!(
-        "No AI credentials detected. Set one of: AWS_BEARER_TOKEN_BEDROCK, \
-         ANTHROPIC_API_KEY, OPENAI_API_KEY, or AWS credentials \
+        "No AI credentials detected. Set one of: AI_BASE_URL (for local LLMs like Ollama), \
+         AWS_BEARER_TOKEN_BEDROCK, ANTHROPIC_API_KEY, OPENAI_API_KEY, or AWS credentials \
          (AWS_ACCESS_KEY_ID/AWS_PROFILE). You can also set AI_PROVIDER explicitly."
     );
 

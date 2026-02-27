@@ -127,9 +127,16 @@ The frontend includes a natural language chat interface for querying crime data.
 
 ### Provider setup
 
-Set one of the following API keys in your `.env` file or environment to enable AI chat:
+Set one of the following in your `.env` file or environment to enable AI chat:
 
 ```sh
+# --- Local / Self-hosted (free, no API key needed) ---
+# Works with Ollama, vLLM, llama.cpp, LM Studio, or any OpenAI-compatible server.
+AI_BASE_URL=http://localhost:11434/v1   # Ollama default
+AI_MODEL=qwen2.5:7b                    # Required when using AI_BASE_URL
+
+# --- Cloud providers ---
+
 # Anthropic Claude (default: claude-sonnet-4-20250514)
 ANTHROPIC_API_KEY=sk-ant-...
 
@@ -141,7 +148,18 @@ OPENAI_API_KEY=sk-...
 # Or set AWS_BEARER_TOKEN_BEDROCK for temporary console tokens
 ```
 
-The provider is auto-detected from whichever key is set. To override, set `AI_PROVIDER` (`anthropic`, `openai`, or `bedrock`) and optionally `AI_MODEL`.
+When `AI_BASE_URL` is set it takes priority over all other providers. For cloud providers, the provider is auto-detected from whichever key is set. To override, set `AI_PROVIDER` (`anthropic`, `openai`, or `bedrock`) and optionally `AI_MODEL`.
+
+#### Quick start with Ollama
+
+```sh
+brew install ollama
+ollama serve &
+ollama pull qwen2.5:7b          # ~4.5 GB, fast on Apple Silicon
+AI_BASE_URL=http://localhost:11434/v1 AI_MODEL=qwen2.5:7b cargo server
+```
+
+For better tool-use quality, use a larger model (`qwen2.5:14b`, `qwen2.5:32b`, or `llama3.3:70b`).
 
 ## CLI Reference
 
@@ -246,7 +264,7 @@ packages/
   geography/          Census boundary ingestion (TIGERweb API) into DuckDB
   analytics/models/   AI tool parameter/result types, JSON Schema tool definitions
   analytics/          Analytical query engine (count, rank, compare, trend, top types, list cities)
-  ai/                 LLM agent loop with provider abstraction (Anthropic, OpenAI, Bedrock)
+  ai/                 LLM agent loop with provider abstraction (Anthropic, OpenAI, Bedrock, local/self-hosted)
   ingest/models/      Ingestion types (FetchConfig, ImportResult)
   ingest/             CLI binary for data ingestion (sync, sync-all, geocode, boundaries)
   generate/           Tile and database generation via tippecanoe (PMTiles, SQLite, DuckDB)
@@ -265,8 +283,10 @@ infra/                OpenTofu infrastructure configs
 | `BIND_ADDR`              | `127.0.0.1`                                             | Server bind address                                               |
 | `PORT`                   | `8080`                                                  | Server port                                                       |
 | `RUST_LOG`               | (none)                                                  | Log level (`info`, `debug`, `crime_map_ingest=debug`, etc.)       |
+| `AI_BASE_URL`            | (none)                                                  | OpenAI-compatible endpoint for local/self-hosted LLMs (e.g. Ollama) |
 | `AI_PROVIDER`            | (auto-detect)                                           | AI provider: `anthropic`, `openai`, or `bedrock`                  |
-| `AI_MODEL`               | (per-provider default)                                  | Override the default model for the selected AI provider            |
+| `AI_MODEL`               | (per-provider default)                                  | Override the default model (`AI_MODEL` is required with `AI_BASE_URL`) |
+| `AI_API_KEY`             | (none)                                                  | API key for custom endpoints (falls back to `OPENAI_API_KEY`)     |
 | `ANTHROPIC_API_KEY`      | (none)                                                  | Anthropic API key (enables AI chat with Claude)                    |
 | `OPENAI_API_KEY`         | (none)                                                  | OpenAI API key (enables AI chat with GPT)                         |
 | `AWS_BEARER_TOKEN_BEDROCK` | (none)                                                | Bedrock temporary bearer token (highest auto-detection priority)   |
