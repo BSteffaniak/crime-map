@@ -49,14 +49,33 @@ jobs:
           install-rust: 'true'
           rust-cache-key: deploy-build
 
-      - name: Build release binaries
-        run: cargo build --release -p crime_map_ingest -p crime_map_generate
+      - name: Build ingest binary
+        uses: BSteffaniak/cache-artifact@master
+        with:
+          directory: ./packages
+          command: |
+            cargo build --release -p crime_map_ingest
+            mkdir -p staging
+            cp target/release/crime_map_ingest staging/crime_map_ingest
+          output-path: staging/crime_map_ingest
+          artifact-name: crime-map-ingest-binary
+          cache-key-prefix: wt-crime-pipeline
+          make-executable: true
+          verify-command: --version
 
-      - name: Stage binaries for upload
-        run: |
-          mkdir -p staging
-          cp target/release/crime_map_ingest staging/
-          cp target/release/crime_map_generate staging/
+      - name: Build generate binary
+        uses: BSteffaniak/cache-artifact@master
+        with:
+          directory: ./packages
+          command: |
+            cargo build --release -p crime_map_generate
+            mkdir -p staging
+            cp target/release/crime_map_generate staging/crime_map_generate
+          output-path: staging/crime_map_generate
+          artifact-name: crime-map-generate-binary
+          cache-key-prefix: wt-crime-pipeline
+          make-executable: true
+          verify-command: --version
 
       - name: Upload pipeline binaries
         uses: actions/upload-artifact@v4
