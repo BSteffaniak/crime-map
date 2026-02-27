@@ -620,8 +620,13 @@ impl R2Client {
                 "Pushing {} -> s3://{BUCKET}/{key} ({mb:.1} MB)",
                 local_path.display(),
             );
-            let data = tokio::fs::read(local_path).await?;
-            let body = aws_sdk_s3::primitives::ByteStream::from(data);
+            let body = aws_sdk_s3::primitives::ByteStream::from_path(local_path)
+                .await
+                .map_err(|e| R2Error::Upload {
+                    bucket: BUCKET.to_string(),
+                    key: key.to_string(),
+                    source: Box::new(e),
+                })?;
 
             self.client
                 .put_object()
@@ -902,10 +907,14 @@ impl R2Client {
 ///
 /// 1. If the local file doesn't exist, returns `false`.
 /// 2. Compares file sizes — if they differ, returns `false` immediately.
-/// 3. If sizes match AND the remote `ETag` looks like an MD5 hex digest
-///    (non-multipart upload), computes the local file's MD5 and compares.
-/// 4. If the `ETag` is a multipart `ETag` (contains `-`), falls back to
-///    size-only comparison.
+/// 3. If sizes match AND the remote `ETag` looks like a single-part MD5
+///    hex digest (32 hex chars, no `-`), computes the local file's MD5
+///    and compares.
+/// 4. If the `ETag` is a multipart `ETag` (format `{hex}-{part_count}`),
+///    recomputes the composite multipart MD5 using
+///    [`MULTIPART_PART_SIZE`] boundaries and compares. This only
+///    produces a match if the file was uploaded with the same part size
+///    we use, which is always the case for files we uploaded.
 async fn is_local_match(local_path: &Path, remote: &RemoteMeta) -> bool {
     let Ok(meta) = tokio::fs::metadata(local_path).await else {
         return false;
@@ -916,12 +925,21 @@ async fn is_local_match(local_path: &Path, remote: &RemoteMeta) -> bool {
         return false;
     }
 
-    // Sizes match — try MD5/ETag comparison for stronger guarantee
+    // Sizes match — try ETag comparison for stronger guarantee
     if let Some(etag) = &remote.etag {
         let clean = etag.trim_matches('"');
-        // Multipart ETags contain a `-` (e.g. "abc123-5") — skip MD5 check
-        if !clean.contains('-') && clean.len() == 32 {
-            // Looks like an MD5 hex digest — compute local MD5
+
+        if let Some((hex, count_str)) = clean.rsplit_once('-') {
+            // Multipart ETag: "{md5_of_concatenated_part_md5s}-{part_count}"
+            if let Ok(expected_parts) = count_str.parse::<u64>()
+                && hex.len() == 32
+                && let Ok(local_etag) =
+                    compute_multipart_etag(local_path, local_size, expected_parts).await
+            {
+                return local_etag == clean;
+            }
+        } else if clean.len() == 32 {
+            // Single-part ETag: plain MD5 hex digest
             if let Ok(local_md5) = compute_md5(local_path).await {
                 return local_md5 == clean;
             }
@@ -955,6 +973,82 @@ fn compute_md5_sync(path: &Path) -> Result<String, std::io::Error> {
         context.consume(&buffer[..n]);
     }
     Ok(format!("{:x}", context.finalize()))
+}
+
+/// Compute the composite `ETag` that S3/R2 produces for multipart uploads.
+///
+/// The algorithm:
+/// 1. Split the file into parts at [`MULTIPART_PART_SIZE`] boundaries.
+/// 2. Compute the MD5 digest of each part (raw 16 bytes).
+/// 3. Concatenate all raw part digests.
+/// 4. Compute the MD5 of the concatenation.
+/// 5. Format as `"{hex_digest}-{part_count}"`.
+///
+/// This only produces a correct match when the original upload used the
+/// same part size. We verify the expected part count matches what we'd
+/// compute for the file size, and bail if not (safe fallback to size-only).
+async fn compute_multipart_etag(
+    path: &Path,
+    file_size: u64,
+    expected_parts: u64,
+) -> Result<String, std::io::Error> {
+    // Verify the part count is consistent with our part size
+    let our_parts = file_size.div_ceil(MULTIPART_PART_SIZE);
+    if our_parts != expected_parts {
+        return Err(std::io::Error::other(
+            "part count mismatch — file was uploaded with a different part size",
+        ));
+    }
+
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || compute_multipart_etag_sync(&path, file_size))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
+/// Synchronous multipart `ETag` computation (runs in blocking thread).
+fn compute_multipart_etag_sync(path: &Path, file_size: u64) -> Result<String, std::io::Error> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)?;
+    let mut part_digests: Vec<[u8; 16]> = Vec::new();
+    let mut remaining = file_size;
+
+    while remaining > 0 {
+        #[allow(clippy::cast_possible_truncation)]
+        let part_size = remaining.min(MULTIPART_PART_SIZE) as usize;
+
+        // Compute MD5 for this part by reading in 256 KB chunks
+        let mut context = md5::Context::new();
+        let mut part_remaining = part_size;
+        let mut buffer = vec![0u8; 256 * 1024];
+
+        while part_remaining > 0 {
+            let to_read = part_remaining.min(buffer.len());
+            let n = file.read(&mut buffer[..to_read])?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "file shorter than expected",
+                ));
+            }
+            context.consume(&buffer[..n]);
+            part_remaining -= n;
+        }
+
+        let digest: [u8; 16] = *context.finalize();
+        part_digests.push(digest);
+        remaining -= part_size as u64;
+    }
+
+    // Concatenate all raw part digests and compute MD5 of the concatenation
+    let mut final_context = md5::Context::new();
+    for digest in &part_digests {
+        final_context.consume(digest);
+    }
+    let final_hash = format!("{:x}", final_context.finalize());
+
+    Ok(format!("{final_hash}-{}", part_digests.len()))
 }
 
 /// Resolves source IDs: if `source_ids` is empty, returns all known source
