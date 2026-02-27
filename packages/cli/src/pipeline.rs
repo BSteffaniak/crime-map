@@ -262,12 +262,12 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
 
         match crime_map_r2::R2Client::from_env() {
             Ok(r2) => {
-                let mut pulled = 0u64;
-                pulled += r2.pull_sources(&source_ids).await?;
+                let mut stats = crime_map_r2::SyncStats::default();
+                stats.merge(r2.pull_sources(&source_ids).await?);
                 if r2_pull_shared {
-                    pulled += r2.pull_shared().await?;
+                    stats.merge(r2.pull_shared().await?);
                 }
-                log::info!("[{current_step}/{total_steps}] R2 pull complete: {pulled} file(s)");
+                log::info!("[{current_step}/{total_steps}] R2 pull complete: {stats}");
             }
             Err(e) => {
                 log::warn!("R2 not configured: {e}");
@@ -477,12 +477,12 @@ pub async fn run(multi: &MultiProgress) -> Result<(), Box<dyn std::error::Error>
 
         match crime_map_r2::R2Client::from_env() {
             Ok(r2) => {
-                let mut pushed = 0u64;
-                pushed += r2.push_sources(&source_ids).await?;
+                let mut stats = crime_map_r2::SyncStats::default();
+                stats.merge(r2.push_sources(&source_ids).await?);
                 if r2_push_shared {
-                    pushed += r2.push_shared().await?;
+                    stats.merge(r2.push_shared().await?);
                 }
-                log::info!("[{current_step}/{total_steps}] R2 push complete: {pushed} file(s)");
+                log::info!("[{current_step}/{total_steps}] R2 push complete: {stats}");
             }
             Err(e) => {
                 log::warn!("R2 not configured: {e}");

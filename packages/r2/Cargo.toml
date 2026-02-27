@@ -23,6 +23,7 @@ aws-config = { workspace = true, features = [
 ] }
 
 log = { workspace = true }
+md5 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs"] }
 

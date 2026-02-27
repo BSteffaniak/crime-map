@@ -17,6 +17,11 @@ on:
         required: false
         type: boolean
         default: false
+      skip_generate:
+        description: "Skip ingest+generate — pull merged outputs from R2 and deploy directly"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: deploy-data
@@ -32,6 +37,7 @@ jobs:
   build:
     name: Build Binaries
     runs-on: ubuntu-latest
+    # Always build — we need at least crime_map_ingest for R2 pull even in skip_generate mode
 
     steps:
       - name: Checkout
@@ -94,12 +100,22 @@ jobs:
           sudo ln -sf "$(which flyctl)" /usr/local/bin/fly
           fly version
 
+      # ── skip_generate path: pull merged outputs from R2 ──────────────
+      - name: Pull merged outputs from R2
+        if: ${{ inputs.skip_generate }}
+        run: |
+          mkdir -p data/generated
+          crime_map_ingest pull-generated-merged --dir data/generated
+
+      # ── Normal path: ingest, generate, push ──────────────────────────
       - name: Pull data from R2
+        if: ${{ !inputs.skip_generate }}
         run: |
           SOURCES="${{ inputs.sources || 'dc_mpd' }}"
           crime_map_ingest pull --sources "${SOURCES}"
 
       - name: Ingest data
+        if: ${{ !inputs.skip_generate }}
         run: |
           SOURCES="${{ inputs.sources || 'dc_mpd' }}"
           echo "Ingesting sources: ${SOURCES}"
@@ -115,6 +131,7 @@ jobs:
           crime_map_ingest ${INGEST_ARGS}
 
       - name: Generate all outputs
+        if: ${{ !inputs.skip_generate }}
         run: |
           GENERATE_ARGS="all"
           if [ "${{ inputs.force }}" = "true" ]; then
@@ -127,10 +144,12 @@ jobs:
         run: ls -lah data/generated/
 
       - name: Push data to R2
+        if: ${{ !inputs.skip_generate }}
         run: |
           SOURCES="${{ inputs.sources || 'dc_mpd' }}"
           crime_map_ingest push --sources "${SOURCES}"
 
+      # ── Deploy (both paths) ──────────────────────────────────────────
       - name: Upload tiles to R2
         run: ./scripts/deploy.sh tiles
         env:

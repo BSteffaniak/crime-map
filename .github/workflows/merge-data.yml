@@ -4,9 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: "Workflow run ID to download partition artifacts from"
-        required: true
+        description: "Workflow run ID to download partition artifacts from (uses GitHub artifacts)"
+        required: false
         type: string
+      from_r2:
+        description: "Pull partition outputs from R2 instead of GitHub artifacts"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: merge-data
@@ -14,6 +19,9 @@ concurrency:
 
 env:
   RUST_LOG: crime_map=debug
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+  R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
 jobs:
   build:
@@ -31,12 +39,13 @@ jobs:
           rust-cache-key: merge-build
 
       - name: Build release binaries
-        run: cargo build --release -p crime_map_generate
+        run: cargo build --release -p crime_map_generate -p crime_map_ingest
 
       - name: Stage binaries for upload
         run: |
           mkdir -p staging
           cp target/release/crime_map_generate staging/
+          cp target/release/crime_map_ingest staging/
 
       - name: Upload pipeline binaries
         uses: actions/upload-artifact@v4
@@ -66,9 +75,27 @@ jobs:
           path: /usr/local/bin
 
       - name: Make binaries executable
-        run: chmod +x /usr/local/bin/crime_map_generate
+        run: chmod +x /usr/local/bin/crime_map_generate /usr/local/bin/crime_map_ingest
 
+      # ── From R2 path ─────────────────────────────────────────────────
+      - name: Pull boundary outputs from R2
+        if: ${{ inputs.from_r2 }}
+        run: |
+          mkdir -p data/boundaries
+          crime_map_ingest pull-generated-boundaries --dir data/boundaries
+
+      - name: Pull partition outputs from R2
+        if: ${{ inputs.from_r2 }}
+        run: |
+          PARTITIONS=$(crime_map_ingest list-generated-partitions 2>/dev/null | grep "^  " | tr -d ' ')
+          for name in $PARTITIONS; do
+            mkdir -p "data/partitions/$name"
+            crime_map_ingest pull-generated-partition --name "$name" --dir "data/partitions/$name"
+          done
+
+      # ── From GitHub artifacts path ───────────────────────────────────
       - name: Download boundary artifacts
+        if: ${{ !inputs.from_r2 }}
         uses: actions/download-artifact@v4
         with:
           name: boundaries
@@ -77,6 +104,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download all partition artifacts
+        if: ${{ !inputs.from_r2 }}
         uses: actions/download-artifact@v4
         with:
           pattern: partition-*
@@ -84,6 +112,7 @@ jobs:
           run-id: ${{ inputs.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # ── Merge (both paths) ──────────────────────────────────────────
       - name: List downloaded artifacts
         run: |
           echo "=== Boundaries ==="
@@ -105,9 +134,6 @@ jobs:
       - name: List merged files
         run: ls -lah data/generated/
 
-      - name: Upload merged artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: merged-data
-          path: data/generated/
-          retention-days: 14
+      # Push merged outputs to R2
+      - name: Push merged outputs to R2
+        run: crime_map_ingest push-generated-merged --dir data/generated

@@ -165,6 +165,9 @@ enum Commands {
         /// per-source files.
         #[arg(long)]
         shared_only: bool,
+        /// Only pull per-source files, skip shared databases.
+        #[arg(long)]
+        sources_only: bool,
     },
     /// Push local `DuckDB` files to Cloudflare R2
     Push {
@@ -176,6 +179,9 @@ enum Commands {
         /// per-source files.
         #[arg(long)]
         shared_only: bool,
+        /// Only push per-source files, skip shared databases.
+        #[arg(long)]
+        sources_only: bool,
     },
     /// Pull a cached boundary partition from R2 into the local
     /// `boundaries.duckdb` (used by CI boundary ingestion jobs to reuse
@@ -259,9 +265,9 @@ enum Commands {
     /// and `--dest` in pairs; can be repeated for multiple files.
     ///
     /// Examples:
-    ///   pull-r2-file --key shared/geocoder_index.tar.zst --dest data/shared/geocoder_index.tar.zst
-    ///   pull-r2-file --key oa-data/us_south.zip --dest data/oa/us_south.zip \
-    ///                --key oa-data/us_west.zip --dest data/oa/us_west.zip
+    ///   `pull-r2-file --key shared/geocoder_index.tar.zst --dest data/shared/geocoder_index.tar.zst`
+    ///   `pull-r2-file --key oa-data/us_south.zip --dest data/oa/us_south.zip`
+    ///   `--key oa-data/us_west.zip --dest data/oa/us_west.zip`
     PullR2File {
         /// R2 object key(s) (e.g. `shared/geocoder_index.tar.zst`). Repeatable.
         #[arg(long, required = true)]
@@ -270,6 +276,54 @@ enum Commands {
         #[arg(long, required = true)]
         dest: Vec<String>,
     },
+    /// Push generated partition outputs to R2 under `generated/partitions/{name}/`.
+    ///
+    /// Uploads `incidents.pmtiles`, `incidents.db`, `counts.duckdb`, `h3.duckdb`,
+    /// `analytics.duckdb`, `metadata.json`, and `manifest.json` from the given
+    /// directory to R2.
+    PushGeneratedPartition {
+        /// Partition name (e.g. "`chicago_pd`").
+        #[arg(long)]
+        name: String,
+        /// Local directory containing the generated partition files.
+        #[arg(long)]
+        dir: String,
+    },
+    /// Pull generated partition outputs from R2 `generated/partitions/{name}/`.
+    PullGeneratedPartition {
+        /// Partition name (e.g. "`chicago_pd`").
+        #[arg(long)]
+        name: String,
+        /// Local directory to write files to.
+        #[arg(long)]
+        dir: String,
+    },
+    /// Push boundary outputs to R2 under `generated/boundaries/`.
+    PushGeneratedBoundaries {
+        /// Local directory containing `boundaries.pmtiles` and `boundaries.db`.
+        #[arg(long)]
+        dir: String,
+    },
+    /// Pull boundary outputs from R2 `generated/boundaries/`.
+    PullGeneratedBoundaries {
+        /// Local directory to write files to.
+        #[arg(long)]
+        dir: String,
+    },
+    /// Push final merged outputs to R2 under `generated/merged/`.
+    PushGeneratedMerged {
+        /// Local directory containing the merged generated files.
+        #[arg(long)]
+        dir: String,
+    },
+    /// Pull final merged outputs from R2 `generated/merged/`.
+    PullGeneratedMerged {
+        /// Local directory to write files to.
+        #[arg(long)]
+        dir: String,
+    },
+    /// List all partition names that have generated outputs on R2.
+    ListGeneratedPartitions,
 }
 
 /// Resolves source IDs from `--sources` and/or `--states` flags to a
@@ -740,44 +794,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Pull {
             sources,
             shared_only,
+            sources_only,
         } => {
             let r2 = crime_map_r2::R2Client::from_env()?;
             let start = Instant::now();
-            let mut total = 0u64;
+            let mut stats = crime_map_r2::SyncStats::default();
 
             if !shared_only {
                 let ids = parse_source_csv(sources.as_deref());
-                total += r2.pull_sources(&ids).await?;
+                stats.merge(r2.pull_sources(&ids).await?);
             }
 
-            total += r2.pull_shared().await?;
+            if !sources_only {
+                stats.merge(r2.pull_shared().await?);
+            }
 
             let elapsed = start.elapsed();
-            log::info!(
-                "Pull complete: {total} file(s) downloaded in {:.1}s",
-                elapsed.as_secs_f64()
-            );
+            log::info!("Pull complete: {stats} in {:.1}s", elapsed.as_secs_f64());
         }
         Commands::Push {
             sources,
             shared_only,
+            sources_only,
         } => {
             let r2 = crime_map_r2::R2Client::from_env()?;
             let start = Instant::now();
-            let mut total = 0u64;
+            let mut stats = crime_map_r2::SyncStats::default();
 
             if !shared_only {
                 let ids = parse_source_csv(sources.as_deref());
-                total += r2.push_sources(&ids).await?;
+                stats.merge(r2.push_sources(&ids).await?);
             }
 
-            total += r2.push_shared().await?;
+            if !sources_only {
+                stats.merge(r2.push_shared().await?);
+            }
 
             let elapsed = start.elapsed();
-            log::info!(
-                "Push complete: {total} file(s) uploaded in {:.1}s",
-                elapsed.as_secs_f64()
-            );
+            log::info!("Push complete: {stats} in {:.1}s", elapsed.as_secs_f64());
         }
         Commands::PullBoundaryPart { name } => {
             let r2 = crime_map_r2::R2Client::from_env()?;
@@ -786,20 +840,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 local.parent().expect("boundaries path has parent"),
             )?;
             let key = format!("boundaries-part/{name}.duckdb");
-            if r2.download(&key, &local).await? {
+            let stats = r2.download(&key, &local).await?;
+            if stats.transferred > 0 {
                 log::info!("Pulled boundary partition '{name}' from R2");
-            } else {
+            } else if stats.not_found > 0 {
                 log::info!(
                     "No cached boundary partition '{name}' on R2 (first run), starting fresh"
                 );
+            } else {
+                log::info!("Boundary partition '{name}' unchanged, skipped");
             }
         }
         Commands::PushBoundaryPart { name } => {
             let r2 = crime_map_r2::R2Client::from_env()?;
             let local = crime_map_database::paths::boundaries_db_path();
             let key = format!("boundaries-part/{name}.duckdb");
-            r2.upload(&key, &local).await?;
-            log::info!("Pushed boundary partition '{name}' to R2");
+            let stats = r2.upload(&key, &local).await?;
+            if stats.transferred > 0 {
+                log::info!("Pushed boundary partition '{name}' to R2");
+            } else {
+                log::info!("Boundary partition '{name}' unchanged on R2, skipped upload");
+            }
         }
         Commands::MergeBoundaries => {
             let r2 = crime_map_r2::R2Client::from_env()?;
@@ -836,7 +897,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             drop(target);
 
-            // Push merged boundaries.duckdb to R2
+            // Push merged boundaries.duckdb to R2 (only shared, not source DBs)
             r2.push_shared().await?;
 
             // Partition files are intentionally kept on R2 as cache —
@@ -1076,15 +1137,95 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::fs::create_dir_all(parent)?;
                 }
 
-                let downloaded = r2.download(k, &dest_path).await?;
-                if downloaded {
+                let stats = r2.download(k, &dest_path).await?;
+                if stats.transferred > 0 {
                     #[allow(clippy::cast_precision_loss)]
                     let mb = std::fs::metadata(&dest_path)
                         .map(|m| m.len() as f64 / 1_048_576.0)
                         .unwrap_or(0.0);
                     log::info!("Downloaded {k} -> {} ({mb:.1} MB)", dest_path.display());
-                } else {
+                } else if stats.not_found > 0 {
                     return Err(format!("R2 object not found: {k}").into());
+                } else {
+                    log::info!("Skipped {k} (unchanged)");
+                }
+            }
+        }
+        Commands::PushGeneratedPartition { name, dir } => {
+            let r2 = crime_map_r2::R2Client::from_env()?;
+            let start = Instant::now();
+            let dir = std::path::PathBuf::from(dir);
+            let stats = r2.push_generated_partition(&name, &dir).await?;
+            let elapsed = start.elapsed();
+            log::info!(
+                "Push generated partition '{name}': {stats} in {:.1}s",
+                elapsed.as_secs_f64()
+            );
+        }
+        Commands::PullGeneratedPartition { name, dir } => {
+            let r2 = crime_map_r2::R2Client::from_env()?;
+            let start = Instant::now();
+            let dir = std::path::PathBuf::from(dir);
+            let stats = r2.pull_generated_partition(&name, &dir).await?;
+            let elapsed = start.elapsed();
+            log::info!(
+                "Pull generated partition '{name}': {stats} in {:.1}s",
+                elapsed.as_secs_f64()
+            );
+        }
+        Commands::PushGeneratedBoundaries { dir } => {
+            let r2 = crime_map_r2::R2Client::from_env()?;
+            let start = Instant::now();
+            let dir = std::path::PathBuf::from(dir);
+            let stats = r2.push_generated_boundaries(&dir).await?;
+            let elapsed = start.elapsed();
+            log::info!(
+                "Push generated boundaries: {stats} in {:.1}s",
+                elapsed.as_secs_f64()
+            );
+        }
+        Commands::PullGeneratedBoundaries { dir } => {
+            let r2 = crime_map_r2::R2Client::from_env()?;
+            let start = Instant::now();
+            let dir = std::path::PathBuf::from(dir);
+            let stats = r2.pull_generated_boundaries(&dir).await?;
+            let elapsed = start.elapsed();
+            log::info!(
+                "Pull generated boundaries: {stats} in {:.1}s",
+                elapsed.as_secs_f64()
+            );
+        }
+        Commands::PushGeneratedMerged { dir } => {
+            let r2 = crime_map_r2::R2Client::from_env()?;
+            let start = Instant::now();
+            let dir = std::path::PathBuf::from(dir);
+            let stats = r2.push_generated_merged(&dir).await?;
+            let elapsed = start.elapsed();
+            log::info!(
+                "Push generated merged: {stats} in {:.1}s",
+                elapsed.as_secs_f64()
+            );
+        }
+        Commands::PullGeneratedMerged { dir } => {
+            let r2 = crime_map_r2::R2Client::from_env()?;
+            let start = Instant::now();
+            let dir = std::path::PathBuf::from(dir);
+            let stats = r2.pull_generated_merged(&dir).await?;
+            let elapsed = start.elapsed();
+            log::info!(
+                "Pull generated merged: {stats} in {:.1}s",
+                elapsed.as_secs_f64()
+            );
+        }
+        Commands::ListGeneratedPartitions => {
+            let r2 = crime_map_r2::R2Client::from_env()?;
+            let partitions = r2.list_generated_partitions().await?;
+            if partitions.is_empty() {
+                println!("No generated partitions found on R2.");
+            } else {
+                println!("Generated partitions on R2 ({}):", partitions.len());
+                for name in &partitions {
+                    println!("  {name}");
                 }
             }
         }

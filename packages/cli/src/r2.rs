@@ -93,32 +93,29 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Execute
     let start = Instant::now();
-    let mut total = 0u64;
+    let mut stats = crime_map_r2::SyncStats::default();
     let verb = if is_pull { "Pull" } else { "Push" };
 
     if scope.include_sources() {
         log::info!("{verb}: syncing {} source(s)...", source_ids.len());
-        total += if is_pull {
+        stats.merge(if is_pull {
             r2.pull_sources(&source_ids).await?
         } else {
             r2.push_sources(&source_ids).await?
-        };
+        });
     }
 
     if scope.include_shared() {
         log::info!("{verb}: syncing shared databases...");
-        total += if is_pull {
+        stats.merge(if is_pull {
             r2.pull_shared().await?
         } else {
             r2.push_shared().await?
-        };
+        });
     }
 
     let elapsed = start.elapsed();
-    log::info!(
-        "{verb} complete: {total} file(s) in {:.1}s",
-        elapsed.as_secs_f64()
-    );
+    log::info!("{verb} complete: {stats} in {:.1}s", elapsed.as_secs_f64());
 
     Ok(())
 }

@@ -3,8 +3,8 @@ name: Data Pipeline
 on:
   workflow_dispatch:
     inputs:
-      partitions:
-        description: "Comma-separated partition names to run (empty = all)"
+      sources:
+        description: "Comma-separated source IDs to run (empty = all)"
         required: false
         type: string
         default: ""
@@ -28,6 +28,16 @@ on:
         required: false
         type: string
         default: 'false'
+      skip_ingest:
+        description: "Skip ingest (sync/geocode/enrich) — only regenerate from existing R2 data"
+        required: false
+        type: boolean
+        default: false
+      merge_only:
+        description: "Skip ingest + generation — pull existing partition outputs from R2 and just re-merge"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: data-pipeline
@@ -44,6 +54,8 @@ jobs:
   setup:
     name: Compute Partitions
     runs-on: ubuntu-latest
+    # Skip partition discovery entirely in merge_only mode
+    if: ${{ !inputs.merge_only }}
     outputs:
       matrix: ${{ steps.partitions.outputs.matrix }}
       partition_count: ${{ steps.partitions.outputs.count }}
@@ -93,12 +105,12 @@ jobs:
           # Merge grouped + solo entries
           FULL_MATRIX=$(echo "$MATRIX_ENTRIES" "$SOLO_ENTRIES" | jq -sc '.[0] + .[1]')
 
-          # Apply partition filter if specified
-          FILTER="${{ inputs.partitions }}"
+          # Apply source filter if specified (accepts both partition names and source IDs)
+          FILTER="${{ inputs.sources }}"
           if [ -n "$FILTER" ]; then
             IFS=',' read -ra FILTER_NAMES <<< "$FILTER"
             FILTER_JSON=$(printf '%s\n' "${FILTER_NAMES[@]}" | jq -R . | jq -sc .)
-            FULL_MATRIX=$(echo "$FULL_MATRIX" | jq -c --argjson filter "$FILTER_JSON" '[.[] | select(.name as $n | $filter | index($n))]')
+            FULL_MATRIX=$(echo "$FULL_MATRIX" | jq -c --argjson filter "$FILTER_JSON" '[.[] | select((.name as $n | $filter | index($n)) or (.sources | split(",") | map(. as $s | $filter | index($s) // empty) | length > 0))]')
           fi
 
           COUNT=$(echo "$FULL_MATRIX" | jq 'length')
@@ -163,10 +175,12 @@ jobs:
   #
   # Each job writes to its own local boundaries.duckdb and pushes it to
   # R2 as boundaries-part/{type}.duckdb. No shared state between jobs.
+  # Skipped in skip_ingest and merge_only modes.
   boundaries-ingest:
     name: "Boundaries (${{ matrix.type }})"
     runs-on: ubuntu-latest
     needs: build
+    if: ${{ !inputs.skip_ingest && !inputs.merge_only }}
     strategy:
       fail-fast: false
       matrix:
@@ -233,10 +247,19 @@ jobs:
         run: crime_map_ingest push-boundary-part --name ${{ matrix.type }}
 
   # ── Step 1b: Merge boundary partitions from R2 ──────────────────────
+  # Skipped in merge_only mode (boundaries already on R2).
+  # Runs even when skip_ingest=true (boundaries-ingest was skipped) since
+  # the merge reads from R2 partitions that were already cached.
   boundaries-merge:
     name: Merge Boundaries
     runs-on: ubuntu-latest
     needs: [build, boundaries-ingest]
+    if: >-
+      ${{
+        !inputs.merge_only &&
+        (needs.boundaries-ingest.result == 'success' ||
+         needs.boundaries-ingest.result == 'skipped')
+      }}
 
     steps:
       - name: Checkout
@@ -260,10 +283,16 @@ jobs:
         run: crime_map_ingest merge-boundaries
 
   # ── Step 1c: Generate boundary artifacts after merge ────────────────
+  # Skipped in merge_only mode (boundary outputs already on R2).
   boundaries-generate:
     name: Generate Boundaries
     runs-on: ubuntu-latest
     needs: [build, boundaries-merge]
+    if: >-
+      ${{
+        !inputs.merge_only &&
+        needs.boundaries-merge.result == 'success'
+      }}
 
     steps:
       - name: Checkout
@@ -291,20 +320,23 @@ jobs:
           mkdir -p data/boundaries
           crime_map_generate boundaries --output-dir data/boundaries --force
 
-      - name: Upload boundary artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: boundaries
-          path: |
-            data/boundaries/boundaries.pmtiles
-            data/boundaries/boundaries.db
-          retention-days: 7
+      - name: Push boundary outputs to R2
+        run: crime_map_ingest push-generated-boundaries --dir data/boundaries
 
   # ── Step 2: Per-partition ingest + generate ─────────────────────────
+  # In skip_ingest mode: pulls source DBs from R2, skips sync/geocode/enrich,
+  # only regenerates outputs.
+  # Skipped entirely in merge_only mode.
   partition:
     name: "${{ matrix.name }}"
     runs-on: ubuntu-latest
     needs: [setup, build, boundaries-merge]
+    if: >-
+      ${{
+        !inputs.merge_only &&
+        (needs.boundaries-merge.result == 'success' ||
+         needs.boundaries-merge.result == 'skipped')
+      }}
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJSON(inputs.max_parallel || '20') }}
@@ -328,12 +360,16 @@ jobs:
       - name: Make binaries executable
         run: chmod +x /usr/local/bin/crime_map_ingest /usr/local/bin/crime_map_generate
 
-      - name: Pull data from R2
-        run: |
-          crime_map_ingest pull --sources ${{ matrix.sources }}
-          crime_map_ingest pull --shared-only
+      # Pull source DuckDBs (--sources-only to skip shared on first pull)
+      - name: Pull source data from R2
+        run: crime_map_ingest pull --sources ${{ matrix.sources }} --sources-only
+
+      # Pull shared databases once (boundaries, geocode cache, geocoder index)
+      - name: Pull shared databases from R2
+        run: crime_map_ingest pull --shared-only
 
       - name: Unpack geocoder index (if available)
+        if: ${{ !inputs.skip_ingest }}
         run: |
           if [ -f data/shared/geocoder_index.tar.zst ]; then
             crime_map_ingest geocoder-unpack
@@ -342,6 +378,7 @@ jobs:
           fi
 
       - name: Ingest sources
+        if: ${{ !inputs.skip_ingest }}
         run: |
           INGEST_ARGS="sync-all --sources ${{ matrix.sources }}"
           if [ "${{ inputs.limit }}" != "0" ] && [ -n "${{ inputs.limit }}" ]; then
@@ -352,11 +389,13 @@ jobs:
           fi
           crime_map_ingest $INGEST_ARGS
 
+      # Push source DuckDB only (--sources-only avoids re-pushing shared DBs)
       - name: Push sync progress to R2
-        run: crime_map_ingest push --sources ${{ matrix.sources }}
+        if: ${{ !inputs.skip_ingest }}
+        run: crime_map_ingest push --sources ${{ matrix.sources }} --sources-only
 
       - name: Geocode missing coordinates
-        if: inputs.skip_geocode != 'true'
+        if: ${{ !inputs.skip_ingest && inputs.skip_geocode != 'true' }}
         run: crime_map_ingest geocode --sources ${{ matrix.sources }} --max-time 240
         env:
           PELIAS_URL: ${{ secrets.PELIAS_URL }}
@@ -364,16 +403,19 @@ jobs:
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
 
       - name: Push geocode progress to R2
-        if: inputs.skip_geocode != 'true'
+        if: ${{ !inputs.skip_ingest && inputs.skip_geocode != 'true' }}
         run: |
-          crime_map_ingest push --sources ${{ matrix.sources }}
+          crime_map_ingest push --sources ${{ matrix.sources }} --sources-only
           crime_map_ingest push --shared-only
 
       - name: Enrich spatial attribution
+        if: ${{ !inputs.skip_ingest }}
         run: crime_map_ingest enrich --sources ${{ matrix.sources }}
 
+      # Push source DuckDB after enrichment (--sources-only)
       - name: Push enriched data to R2
-        run: crime_map_ingest push --sources ${{ matrix.sources }}
+        if: ${{ !inputs.skip_ingest }}
+        run: crime_map_ingest push --sources ${{ matrix.sources }} --sources-only
 
       - name: Generate artifacts
         run: |
@@ -383,30 +425,29 @@ jobs:
           fi
           crime_map_generate $GENERATE_ARGS
 
+      # Final push of source DuckDB (--sources-only)
       - name: Push final state to R2
-        run: crime_map_ingest push --sources ${{ matrix.sources }}
+        if: ${{ !inputs.skip_ingest }}
+        run: crime_map_ingest push --sources ${{ matrix.sources }} --sources-only
 
       - name: List generated files
         run: ls -lah data/partitions/${{ matrix.name }}/ 2>/dev/null || echo "No files generated"
 
-      - name: Upload partition artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: partition-${{ matrix.name }}
-          path: |
-            data/partitions/${{ matrix.name }}/incidents.pmtiles
-            data/partitions/${{ matrix.name }}/incidents.db
-            data/partitions/${{ matrix.name }}/counts.duckdb
-            data/partitions/${{ matrix.name }}/h3.duckdb
-            data/partitions/${{ matrix.name }}/analytics.duckdb
-            data/partitions/${{ matrix.name }}/metadata.json
-          retention-days: 7
+      # Upload partition outputs to R2 (replaces GitHub Actions artifacts)
+      - name: Push partition outputs to R2
+        run: crime_map_ingest push-generated-partition --name ${{ matrix.name }} --dir data/partitions/${{ matrix.name }}
 
   # ── Step 3: Merge all partitions ────────────────────────────────────
   merge:
     name: Merge Artifacts
     runs-on: ubuntu-latest
     needs: [build, boundaries-generate, partition]
+    if: >-
+      ${{
+        !inputs.merge_only &&
+        needs.boundaries-generate.result == 'success' &&
+        needs.partition.result == 'success'
+      }}
 
     steps:
       - name: Checkout
@@ -426,17 +467,21 @@ jobs:
       - name: Make binaries executable
         run: chmod +x /usr/local/bin/crime_map_ingest /usr/local/bin/crime_map_generate
 
-      - name: Download boundary artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: boundaries
-          path: data/boundaries
+      # Pull boundary outputs from R2 (uploaded by boundaries-generate job)
+      - name: Pull boundary outputs from R2
+        run: |
+          mkdir -p data/boundaries
+          crime_map_ingest pull-generated-boundaries --dir data/boundaries
 
-      - name: Download all partition artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: partition-*
-          path: data/partitions
+      # Pull all partition outputs from R2 (uploaded by partition jobs)
+      - name: Pull partition outputs from R2
+        run: |
+          # List all partitions on R2 and pull each one
+          PARTITIONS=$(crime_map_ingest list-generated-partitions 2>/dev/null | grep "^  " | tr -d ' ')
+          for name in $PARTITIONS; do
+            mkdir -p "data/partitions/$name"
+            crime_map_ingest pull-generated-partition --name "$name" --dir "data/partitions/$name"
+          done
 
       - name: List downloaded artifacts
         run: |
@@ -460,9 +505,84 @@ jobs:
       - name: List merged files
         run: ls -lah data/generated/
 
-      - name: Upload merged artifacts
-        uses: actions/upload-artifact@v4
+      # Upload final merged outputs to R2
+      - name: Push merged outputs to R2
+        run: crime_map_ingest push-generated-merged --dir data/generated
+
+  # ── Step 3 (merge_only): Pull existing outputs from R2 and re-merge ─
+  merge-from-r2:
+    name: Merge from R2
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: ${{ inputs.merge_only }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pipeline tools (no Rust)
+        uses: ./.github/actions/setup-pipeline
         with:
-          name: merged-data
-          path: data/generated/
-          retention-days: 14
+          install-rust: 'false'
+
+      - name: Download pipeline binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: pipeline-binaries
+          path: /usr/local/bin
+
+      - name: Make binaries executable
+        run: chmod +x /usr/local/bin/crime_map_ingest /usr/local/bin/crime_map_generate
+
+      # Pull boundary outputs from R2
+      - name: Pull boundary outputs from R2
+        run: |
+          mkdir -p data/boundaries
+          crime_map_ingest pull-generated-boundaries --dir data/boundaries
+
+      # Pull partition outputs from R2 (optionally filtered by sources input)
+      - name: Pull partition outputs from R2
+        run: |
+          FILTER="${{ inputs.sources }}"
+          if [ -n "$FILTER" ]; then
+            # Pull only the specified partitions
+            IFS=',' read -ra NAMES <<< "$FILTER"
+            for name in "${NAMES[@]}"; do
+              name=$(echo "$name" | tr -d ' ')
+              mkdir -p "data/partitions/$name"
+              crime_map_ingest pull-generated-partition --name "$name" --dir "data/partitions/$name"
+            done
+          else
+            # Pull all partitions from R2
+            PARTITIONS=$(crime_map_ingest list-generated-partitions 2>/dev/null | grep "^  " | tr -d ' ')
+            for name in $PARTITIONS; do
+              mkdir -p "data/partitions/$name"
+              crime_map_ingest pull-generated-partition --name "$name" --dir "data/partitions/$name"
+            done
+          fi
+
+      - name: List downloaded artifacts
+        run: |
+          echo "=== Boundaries ==="
+          ls -lah data/boundaries/ 2>/dev/null || echo "none"
+          echo "=== Partitions ==="
+          find data/partitions -type f | head -100
+
+      - name: Merge artifacts
+        run: |
+          # Build comma-separated list of partition dirs
+          PARTITION_DIRS=$(find data/partitions -mindepth 1 -maxdepth 1 -type d | sort | tr '\n' ',' | sed 's/,$//')
+          echo "Merging partition dirs: $PARTITION_DIRS"
+
+          mkdir -p data/generated
+          crime_map_generate merge \
+            --partition-dirs "$PARTITION_DIRS" \
+            --boundaries-dir data/boundaries \
+            --output-dir data/generated
+
+      - name: List merged files
+        run: ls -lah data/generated/
+
+      # Upload final merged outputs to R2
+      - name: Push merged outputs to R2
+        run: crime_map_ingest push-generated-merged --dir data/generated
