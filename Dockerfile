@@ -15,7 +15,6 @@ COPY Cargo.toml Cargo.lock ./
 COPY .cargo .cargo
 COPY packages packages
 COPY config config
-COPY migrations migrations
 
 # Build release binary with bundled DuckDB (no system libduckdb needed)
 RUN cargo build --release --bin crime_map_server --features duckdb-bundled
