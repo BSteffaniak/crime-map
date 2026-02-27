@@ -193,45 +193,40 @@ async fn merge_sidebar_db(
     // pinning, ATTACH may run on connection A while the subsequent INSERT
     // runs on connection B (which doesn't see the attached database).
     //
-    // `begin_transaction()` grabs one connection from the pool and pins
-    // all operations on the returned transaction to that single connection.
+    // We batch ATTACH + INSERT + DETACH into a single `exec_raw()` call.
+    // Under the hood this calls `execute_batch()`, which runs all
+    // semicolon-separated statements on the same pooled connection in one
+    // shot — no transaction needed, no lock conflicts with DETACH.
     for (i, input) in inputs.iter().enumerate() {
         let alias = format!("p{i}");
         let path_str = input.to_string_lossy();
 
-        let tx = sqlite
-            .begin_transaction()
-            .await
-            .map_err(|e| format!("Failed to begin transaction for partition {i}: {e}"))?;
-
-        tx.exec_raw(&format!("ATTACH DATABASE '{path_str}' AS {alias}"))
-            .await
-            .map_err(|e| format!("Failed to attach partition: {e}"))?;
-
-        let insert_result = tx
+        let result = sqlite
             .exec_raw(&format!(
-                "INSERT INTO incidents (
-                    source_id, source_name, source_incident_id,
-                    subcategory, category, severity,
-                    longitude, latitude, occurred_at,
-                    description, block_address, city, state,
-                    arrest_made, location_type,
-                    state_fips, county_geoid, place_geoid,
-                    tract_geoid, neighborhood_id
-                )
-                SELECT
-                    source_id, source_name, source_incident_id,
-                    subcategory, category, severity,
-                    longitude, latitude, occurred_at,
-                    description, block_address, city, state,
-                    arrest_made, location_type,
-                    state_fips, county_geoid, place_geoid,
-                    tract_geoid, neighborhood_id
-                FROM {alias}.incidents"
+                "ATTACH DATABASE '{path_str}' AS {alias};
+                 INSERT INTO incidents (
+                     source_id, source_name, source_incident_id,
+                     subcategory, category, severity,
+                     longitude, latitude, occurred_at,
+                     description, block_address, city, state,
+                     arrest_made, location_type,
+                     state_fips, county_geoid, place_geoid,
+                     tract_geoid, neighborhood_id
+                 )
+                 SELECT
+                     source_id, source_name, source_incident_id,
+                     subcategory, category, severity,
+                     longitude, latitude, occurred_at,
+                     description, block_address, city, state,
+                     arrest_made, location_type,
+                     state_fips, county_geoid, place_geoid,
+                     tract_geoid, neighborhood_id
+                 FROM {alias}.incidents;
+                 DETACH {alias};"
             ))
             .await;
 
-        match insert_result {
+        match result {
             Ok(()) => {
                 log::info!("  Partition {}: merged from {}", i + 1, input.display());
             }
@@ -240,30 +235,19 @@ async fn merge_sidebar_db(
                 if msg.contains("no such table") {
                     // The partition .db was likely transferred without its WAL
                     // sidecar file, so the incidents table was never committed
-                    // to the main database file. Detach and skip this partition.
+                    // to the main database file. Skip this partition.
+                    // The attached DB will be cleaned up automatically when
+                    // the connection pool drops at the end of this function.
                     log::warn!(
                         "  Partition {}: skipping {} (no incidents table — possible WAL issue)",
                         i + 1,
                         input.display()
                     );
-                    // Best-effort detach before moving to the next partition
-                    let _ignore = tx.exec_raw(&format!("DETACH {alias}")).await;
-                    tx.commit()
-                        .await
-                        .map_err(|e| format!("Failed to commit after skip: {e}"))?;
                     continue;
                 }
-                return Err(format!("Failed to insert from partition: {e}").into());
+                return Err(format!("Failed to merge partition {}: {e}", input.display()).into());
             }
         }
-
-        tx.exec_raw(&format!("DETACH {alias}"))
-            .await
-            .map_err(|e| format!("Failed to detach partition: {e}"))?;
-
-        tx.commit()
-            .await
-            .map_err(|e| format!("Failed to commit partition {i}: {e}"))?;
     }
 
     // Build R-tree spatial index
