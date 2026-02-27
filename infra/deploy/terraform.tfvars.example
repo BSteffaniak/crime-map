@@ -2,7 +2,7 @@ fly_api_token        = "fo1_your-fly-api-token"
 fly_app_name         = "crime-map"
 fly_org              = "personal"
 fly_region           = "iad"
-fly_volume_size_gb   = 5
+fly_volume_size_gb   = 25
 
 cloudflare_api_token  = "your-cloudflare-api-token"
 cloudflare_account_id = "your-cloudflare-account-id"

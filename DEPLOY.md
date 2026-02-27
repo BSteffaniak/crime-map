@@ -15,7 +15,7 @@ Browser
                                              auto_stop = "suspend"
                                              min_machines = 0
 
-                                             Volume (5 GB):
+                                             Volume (25 GB):
                                              ├── incidents.db     (SQLite sidebar)
                                              ├── counts.duckdb    (count aggregates)
                                              ├── h3.duckdb        (H3 hexbin data)
@@ -41,7 +41,7 @@ Browser
 | Resource | Cost |
 |---|---|
 | Fly.io compute (mostly suspended) | ~$1-4 |
-| Fly Volume 5 GB | ~$0.75 |
+| Fly Volume 25 GB | ~$3.75 |
 | Cloudflare R2 (within free tier) | $0 |
 | Cloudflare DNS/TLS/proxy | $0 |
 | **Total** | **~$2-5/mo** |
@@ -106,7 +106,7 @@ tofu apply
 
 This creates:
 
-- Fly.io app (`crime-map`) with shared IPv4, IPv6, volume (5 GB), and TLS
+- Fly.io app (`crime-map`) with shared IPv4, IPv6, volume (25 GB), and TLS
   cert
 - Cloudflare R2 bucket (`crime-map-tiles`)
 - Cloudflare DNS CNAME records (root + www -> `crime-map.fly.dev`)
@@ -264,7 +264,7 @@ Set via `fly.toml` `[env]` section or `fly secrets set`:
 | `fly_app_name` | `crime-map` | Fly.io app name (globally unique) |
 | `fly_org` | `personal` | Fly.io organization |
 | `fly_region` | `iad` | Fly.io region |
-| `fly_volume_size_gb` | `5` | Persistent volume size |
+| `fly_volume_size_gb` | `25` | Persistent volume size |
 | `cloudflare_api_token` | (required) | Cloudflare API token |
 | `cloudflare_account_id` | (required) | Cloudflare account ID |
 | `domain` | `opencrimemap.com` | Primary domain |

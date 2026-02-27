@@ -26,7 +26,7 @@ variable "fly_region" {
 
 variable "fly_volume_size_gb" {
   type        = number
-  default     = 5
+  default     = 25
   description = "Size of persistent volume in GB"
 }
 
