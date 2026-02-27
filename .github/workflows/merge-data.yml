@@ -137,7 +137,7 @@ jobs:
           echo "=== Boundaries ==="
           ls -lah data/boundaries/ 2>/dev/null || echo "none"
           echo "=== Partitions ==="
-          find data/partitions -type f | head -100
+          find data/partitions -type f 2>/dev/null | head -100 || true
 
       - name: Merge artifacts
         run: |
