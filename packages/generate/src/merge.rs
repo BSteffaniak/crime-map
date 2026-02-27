@@ -438,9 +438,9 @@ fn merge_h3_db(
 
     duck.execute_batch(&format!(
         "CREATE TABLE h3_boundaries AS
-         SELECT DISTINCT ON (h3_index, resolution) *
+         SELECT DISTINCT ON (h3_index) *
          FROM ({})
-         ORDER BY h3_index, resolution",
+         ORDER BY h3_index",
         boundaries_union.join(" UNION ALL ")
     ))?;
 
