@@ -34,7 +34,10 @@ use crime_map_database::paths;
 use crime_map_source::registry;
 
 /// R2 bucket name for pipeline data.
-const BUCKET: &str = "crime-map-data";
+const DATA_BUCKET: &str = "crime-map-data";
+
+/// R2 bucket name for public `PMTiles` served via CDN.
+const TILES_BUCKET: &str = "crime-map-tiles";
 
 /// Files produced per partition/merged output.
 const GENERATED_FILES: &[&str] = &[
@@ -181,10 +184,12 @@ struct RemoteMeta {
 /// Client for syncing `DuckDB` files with Cloudflare R2.
 pub struct R2Client {
     client: aws_sdk_s3::Client,
+    bucket: String,
 }
 
 impl R2Client {
-    /// Creates a new R2 client from environment variables.
+    /// Creates a new R2 client targeting the default data bucket
+    /// (`crime-map-data`) from environment variables.
     ///
     /// Reads `CLOUDFLARE_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, and
     /// `R2_SECRET_ACCESS_KEY` from the environment.
@@ -193,6 +198,25 @@ impl R2Client {
     ///
     /// Returns [`R2Error::MissingEnv`] if any required variable is unset.
     pub fn from_env() -> Result<Self, R2Error> {
+        Self::from_env_with_bucket(DATA_BUCKET)
+    }
+
+    /// Creates a new R2 client targeting the tiles CDN bucket
+    /// (`crime-map-tiles`) from environment variables.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`R2Error::MissingEnv`] if any required variable is unset.
+    pub fn tiles_from_env() -> Result<Self, R2Error> {
+        Self::from_env_with_bucket(TILES_BUCKET)
+    }
+
+    /// Creates a new R2 client targeting a specific bucket.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`R2Error::MissingEnv`] if any required variable is unset.
+    pub fn from_env_with_bucket(bucket: &str) -> Result<Self, R2Error> {
         let account_id = require_env("CLOUDFLARE_ACCOUNT_ID")?;
         let access_key = require_env("R2_ACCESS_KEY_ID")?;
         let secret_key = require_env("R2_SECRET_ACCESS_KEY")?;
@@ -210,6 +234,7 @@ impl R2Client {
 
         Ok(Self {
             client: aws_sdk_s3::Client::from_conf(config),
+            bucket: bucket.to_string(),
         })
     }
 
@@ -471,6 +496,34 @@ impl R2Client {
         Ok(names.into_iter().collect())
     }
 
+    // ── Tiles (CDN bucket) ──────────────────────────────────────────
+
+    /// Push `incidents.pmtiles` to the current bucket.
+    ///
+    /// Intended for use with a client targeting the `crime-map-tiles`
+    /// CDN bucket (created via [`R2Client::tiles_from_env`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`R2Error::Upload`] on S3 failures, [`R2Error::Io`] on
+    /// local filesystem errors.
+    pub async fn push_tiles(&self, dir: &Path) -> Result<SyncStats, R2Error> {
+        let local = dir.join("incidents.pmtiles");
+        self.upload("incidents.pmtiles", &local).await
+    }
+
+    /// Pull `incidents.pmtiles` from the current bucket to `dir`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`R2Error::Download`] on S3 failures, [`R2Error::Io`] on
+    /// local filesystem errors.
+    pub async fn pull_tiles(&self, dir: &Path) -> Result<SyncStats, R2Error> {
+        paths::ensure_dir(dir)?;
+        let local = dir.join("incidents.pmtiles");
+        self.download("incidents.pmtiles", &local).await
+    }
+
     // ── Low-level operations ────────────────────────────────────────
 
     /// Downloads an object from R2 to a local file.
@@ -487,7 +540,11 @@ impl R2Client {
     /// Returns [`R2Error::Download`] on S3 failures after all retries are
     /// exhausted, [`R2Error::Io`] on local filesystem errors.
     pub async fn download(&self, key: &str, local_path: &Path) -> Result<SyncStats, R2Error> {
-        log::info!("Pulling s3://{BUCKET}/{key} -> {}", local_path.display());
+        log::info!(
+            "Pulling s3://{}/{key} -> {}",
+            self.bucket,
+            local_path.display()
+        );
 
         // Check if we can skip via smart sync
         if let Some(remote) = self.head(key).await? {
@@ -531,7 +588,7 @@ impl R2Client {
         }
 
         Err(last_err.unwrap_or_else(|| R2Error::Download {
-            bucket: BUCKET.to_string(),
+            bucket: self.bucket.clone(),
             key: key.to_string(),
             source: "all download attempts exhausted".into(),
         }))
@@ -545,12 +602,12 @@ impl R2Client {
         let output = self
             .client
             .get_object()
-            .bucket(BUCKET)
+            .bucket(&self.bucket)
             .key(key)
             .send()
             .await
             .map_err(|e| R2Error::Download {
-                bucket: BUCKET.to_string(),
+                bucket: self.bucket.clone(),
                 key: key.to_string(),
                 source: Box::new(e),
             })?;
@@ -563,7 +620,7 @@ impl R2Client {
         tokio::io::copy(&mut body_reader, &mut file)
             .await
             .map_err(|e| R2Error::Download {
-                bucket: BUCKET.to_string(),
+                bucket: self.bucket.clone(),
                 key: key.to_string(),
                 source: Box::new(e),
             })?;
@@ -605,8 +662,9 @@ impl R2Client {
             && is_local_match(local_path, &remote).await
         {
             log::info!(
-                "  {} -> s3://{BUCKET}/{key}: skipped (unchanged)",
-                local_path.display()
+                "  {} -> s3://{}/{key}: skipped (unchanged)",
+                local_path.display(),
+                self.bucket,
             );
             return Ok(SyncStats {
                 skipped: 1,
@@ -620,33 +678,35 @@ impl R2Client {
 
         if file_size > MULTIPART_THRESHOLD {
             log::info!(
-                "Pushing {} -> s3://{BUCKET}/{key} ({mb:.1} MB, multipart)",
+                "Pushing {} -> s3://{}/{key} ({mb:.1} MB, multipart)",
                 local_path.display(),
+                self.bucket,
             );
             self.upload_multipart(key, local_path, file_size).await?;
         } else {
             log::info!(
-                "Pushing {} -> s3://{BUCKET}/{key} ({mb:.1} MB)",
+                "Pushing {} -> s3://{}/{key} ({mb:.1} MB)",
                 local_path.display(),
+                self.bucket,
             );
             let body = aws_sdk_s3::primitives::ByteStream::from_path(local_path)
                 .await
                 .map_err(|e| R2Error::Upload {
-                    bucket: BUCKET.to_string(),
+                    bucket: self.bucket.clone(),
                     key: key.to_string(),
                     source: Box::new(e),
                 })?;
 
             self.client
                 .put_object()
-                .bucket(BUCKET)
+                .bucket(&self.bucket)
                 .key(key)
                 .body(body)
                 .content_type("application/octet-stream")
                 .send()
                 .await
                 .map_err(|e| R2Error::Upload {
-                    bucket: BUCKET.to_string(),
+                    bucket: self.bucket.clone(),
                     key: key.to_string(),
                     source: Box::new(e),
                 })?;
@@ -674,13 +734,13 @@ impl R2Client {
         let create = self
             .client
             .create_multipart_upload()
-            .bucket(BUCKET)
+            .bucket(&self.bucket)
             .key(key)
             .content_type("application/octet-stream")
             .send()
             .await
             .map_err(|e| R2Error::Upload {
-                bucket: BUCKET.to_string(),
+                bucket: self.bucket.clone(),
                 key: key.to_string(),
                 source: Box::new(e),
             })?;
@@ -688,7 +748,7 @@ impl R2Client {
         let upload_id = create
             .upload_id()
             .ok_or_else(|| R2Error::Upload {
-                bucket: BUCKET.to_string(),
+                bucket: self.bucket.clone(),
                 key: key.to_string(),
                 source: "CreateMultipartUpload returned no upload_id".into(),
             })?
@@ -707,14 +767,14 @@ impl R2Client {
 
                 self.client
                     .complete_multipart_upload()
-                    .bucket(BUCKET)
+                    .bucket(&self.bucket)
                     .key(key)
                     .upload_id(&upload_id)
                     .multipart_upload(completed)
                     .send()
                     .await
                     .map_err(|e| R2Error::Upload {
-                        bucket: BUCKET.to_string(),
+                        bucket: self.bucket.clone(),
                         key: key.to_string(),
                         source: Box::new(e),
                     })?;
@@ -727,7 +787,7 @@ impl R2Client {
                 let _ignore = self
                     .client
                     .abort_multipart_upload()
-                    .bucket(BUCKET)
+                    .bucket(&self.bucket)
                     .key(key)
                     .upload_id(&upload_id)
                     .send()
@@ -771,7 +831,7 @@ impl R2Client {
             let upload_part = self
                 .client
                 .upload_part()
-                .bucket(BUCKET)
+                .bucket(&self.bucket)
                 .key(key)
                 .upload_id(upload_id)
                 .part_number(part_number)
@@ -779,7 +839,7 @@ impl R2Client {
                 .send()
                 .await
                 .map_err(|e| R2Error::Upload {
-                    bucket: BUCKET.to_string(),
+                    bucket: self.bucket.clone(),
                     key: key.to_string(),
                     source: Box::new(e),
                 })?;
@@ -814,16 +874,16 @@ impl R2Client {
     ///
     /// Returns [`R2Error::Delete`] on S3 failures.
     pub async fn delete(&self, key: &str) -> Result<(), R2Error> {
-        log::info!("Deleting s3://{BUCKET}/{key}");
+        log::info!("Deleting s3://{}/{key}", self.bucket);
 
         self.client
             .delete_object()
-            .bucket(BUCKET)
+            .bucket(&self.bucket)
             .key(key)
             .send()
             .await
             .map_err(|e| R2Error::Delete {
-                bucket: BUCKET.to_string(),
+                bucket: self.bucket.clone(),
                 key: key.to_string(),
                 source: Box::new(e),
             })?;
@@ -839,20 +899,24 @@ impl R2Client {
     ///
     /// Returns [`R2Error::List`] on S3 failures.
     pub async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, R2Error> {
-        log::info!("Listing s3://{BUCKET}/{prefix}*");
+        log::info!("Listing s3://{}/{prefix}*", self.bucket);
 
         let mut keys = Vec::new();
         let mut continuation_token: Option<String> = None;
 
         loop {
-            let mut request = self.client.list_objects_v2().bucket(BUCKET).prefix(prefix);
+            let mut request = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(prefix);
 
             if let Some(token) = &continuation_token {
                 request = request.continuation_token(token);
             }
 
             let output = request.send().await.map_err(|e| R2Error::List {
-                bucket: BUCKET.to_string(),
+                bucket: self.bucket.clone(),
                 prefix: prefix.to_string(),
                 source: Box::new(e),
             })?;
@@ -881,7 +945,7 @@ impl R2Client {
         let result = self
             .client
             .head_object()
-            .bucket(BUCKET)
+            .bucket(&self.bucket)
             .key(key)
             .send()
             .await;
@@ -903,7 +967,7 @@ impl R2Client {
                     return Ok(None);
                 }
                 Err(R2Error::Head {
-                    bucket: BUCKET.to_string(),
+                    bucket: self.bucket.clone(),
                     key: key.to_string(),
                     source: Box::new(err),
                 })

@@ -171,8 +171,6 @@ jobs:
       # ── Deploy (both paths) ──────────────────────────────────────────
       - name: Upload tiles to R2
         run: ./scripts/deploy.sh tiles
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
       - name: Upload data files and restart
         run: ./scripts/deploy.sh data

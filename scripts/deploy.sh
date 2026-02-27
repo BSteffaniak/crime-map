@@ -14,7 +14,7 @@ set -euo pipefail
 #
 # Prerequisites:
 #   - flyctl authenticated (`fly auth login`)
-#   - wrangler authenticated (`bunx wrangler login`)
+#   - crime_map_ingest binary available in PATH (for tiles upload)
 #   - Generated data in data/generated/
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -178,16 +178,9 @@ command_tiles() {
     local size
     size=$(du -h "$pmtiles" | cut -f1)
     echo "    Uploading incidents.pmtiles (${size}) to bucket '${R2_BUCKET}'..."
-    bunx wrangler r2 object put "${R2_BUCKET}/incidents.pmtiles" \
-        --file "$pmtiles" \
-        --content-type "application/octet-stream" \
-        --remote
+    crime_map_ingest push-tiles --dir "$DATA_DIR"
 
     echo "==> PMTiles upload complete!"
-    echo ""
-    echo "    After enabling R2.dev public access in the Cloudflare dashboard,"
-    echo "    set VITE_TILES_URL to: pmtiles://https://pub-<hash>.r2.dev/incidents.pmtiles"
-    echo "    Then redeploy: ./scripts/deploy.sh app"
 }
 
 command_all() {

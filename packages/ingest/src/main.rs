@@ -324,6 +324,21 @@ enum Commands {
     },
     /// List all partition names that have generated outputs on R2.
     ListGeneratedPartitions,
+    /// Push `incidents.pmtiles` to the `crime-map-tiles` CDN bucket on R2.
+    ///
+    /// Uses multipart upload for large files and smart sync to skip
+    /// unchanged tiles.
+    PushTiles {
+        /// Local directory containing `incidents.pmtiles`.
+        #[arg(long)]
+        dir: String,
+    },
+    /// Pull `incidents.pmtiles` from the `crime-map-tiles` CDN bucket on R2.
+    PullTiles {
+        /// Local directory to write `incidents.pmtiles` to.
+        #[arg(long)]
+        dir: String,
+    },
 }
 
 /// Resolves source IDs from `--sources` and/or `--states` flags to a
@@ -1228,6 +1243,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("  {name}");
                 }
             }
+        }
+        Commands::PushTiles { dir } => {
+            let r2 = crime_map_r2::R2Client::tiles_from_env()?;
+            let start = Instant::now();
+            let dir = std::path::PathBuf::from(dir);
+            let stats = r2.push_tiles(&dir).await?;
+            let elapsed = start.elapsed();
+            log::info!("Push tiles: {stats} in {:.1}s", elapsed.as_secs_f64());
+        }
+        Commands::PullTiles { dir } => {
+            let r2 = crime_map_r2::R2Client::tiles_from_env()?;
+            let start = Instant::now();
+            let dir = std::path::PathBuf::from(dir);
+            let stats = r2.pull_tiles(&dir).await?;
+            let elapsed = start.elapsed();
+            log::info!("Pull tiles: {stats} in {:.1}s", elapsed.as_secs_f64());
         }
     }
 
